@@ -184,7 +184,7 @@ export interface TarvenEnvPlugin {
 
 export class TarvenEnvWeb extends WebPlugin implements TarvenEnvPlugin {
   async getPlatform() { return { platform: 'ios' as const } }
-  async getAppVersion() { return { version: '1.9.1' } }
+  async getAppVersion() { return { version: '1.9.2' } }
   async provisionAndStart(_options: any) {
     setTimeout(() => {
       this.notifyListeners('ready', {

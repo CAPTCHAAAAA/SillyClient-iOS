@@ -274,10 +274,10 @@ function SillyClientLauncher() {
     ? "ios >"
     : "~ $";
   const terminalBanner = isWindows
-    ? "SillyClient 1.9.1 · Windows · cmd.exe"
+    ? "SillyClient 1.9.2 · Windows · cmd.exe"
     : isIOS
-    ? "SillyClient 1.9.1 · iOS · NodeMobile"
-    : "SillyClient 1.9.1 · Android shell";
+    ? "SillyClient 1.9.2 · iOS · NodeMobile"
+    : "SillyClient 1.9.2 · Android shell";
   const terminalPlaceholder = isWindows
     ? "输入 Windows 命令"
     : isIOS

@@ -76,7 +76,7 @@ public class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPickerDeleg
     }
 
     @objc func getAppVersion(_ call: CAPPluginCall) {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.9.1"
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.9.2"
         call.resolve(["version": version])
     }
 
@@ -289,7 +289,7 @@ public class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPickerDeleg
             return
         }
         var request = URLRequest(url: url)
-        request.setValue("SillyClient-iOS/1.9.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("SillyClient-iOS/1.9.2", forHTTPHeaderField: "User-Agent")
         URLSession.shared.dataTask(with: request) { data, _, error in
             guard let data = data, error == nil,
                   let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
@@ -638,8 +638,8 @@ public class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPickerDeleg
 
     @objc func checkUpdate(_ call: CAPPluginCall) {
         call.resolve([
-            "currentVersion": "1.9.1",
-            "latestVersion": "1.9.1",
+            "currentVersion": "1.9.2",
+            "latestVersion": "1.9.2",
             "updateAvailable": false
         ])
     }

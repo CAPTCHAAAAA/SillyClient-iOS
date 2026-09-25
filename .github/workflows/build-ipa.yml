@@ -206,7 +206,7 @@ jobs:
           # 将 SillyTavern 完整服务打入 Payload 应用包
           cp -r "$GITHUB_WORKSPACE/sillytavern-src" build/Payload/SillyClient.app/sillytavern
           cd build
-          zip -qr "$GITHUB_WORKSPACE/SillyClient-iOS-v1.9.1-unsigned.ipa" Payload
+          zip -qr "$GITHUB_WORKSPACE/SillyClient-iOS-v1.9.2-unsigned.ipa" Payload
           cd "$GITHUB_WORKSPACE"
 
       - name: Xcode 编译模拟器版并开机真机截图
@@ -247,8 +247,8 @@ jobs:
       - name: 上传构建包 Artifact (真机可直接安装的完整 IPA)
         uses: actions/upload-artifact@v4
         with:
-          name: SillyClient-iOS-v1.9.1-IPA
-          path: SillyClient-iOS-v1.9.1-unsigned.ipa
+          name: SillyClient-iOS-v1.9.2-IPA
+          path: SillyClient-iOS-v1.9.2-unsigned.ipa
 
       - name: 上传 E2E 自动化测试全流程阶段截图与可视化报告
         if: always()

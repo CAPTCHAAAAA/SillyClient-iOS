@@ -399,7 +399,7 @@ test('iOS web console adapts platform labels, eliminates Android shell text, and
     // 1. routes/index.tsx must distinguish isIOS and customize terminalTitle, banner, placeholder, and prompt
     assert.ok(routesIndex.includes('Capacitor.getPlatform() === "ios"'), 'routes/index.tsx must detect isIOS');
     assert.ok(routesIndex.includes('"iOS 控制台"'), 'routes/index.tsx must define iOS 控制台 title');
-    assert.ok(routesIndex.includes('"SillyClient 1.9.1 · iOS · NodeMobile"'), 'routes/index.tsx must define iOS banner');
+    assert.ok(routesIndex.includes('"SillyClient 1.9.2 · iOS · NodeMobile"'), 'routes/index.tsx must define iOS banner');
     assert.ok(routesIndex.includes('"iOS 进程内环境（可查看服务运行日志）"'), 'routes/index.tsx must define iOS placeholder');
     assert.ok(routesIndex.includes('"ios >"'), 'routes/index.tsx must define ios > prompt');
 
