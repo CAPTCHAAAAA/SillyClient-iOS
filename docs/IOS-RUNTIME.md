@@ -127,9 +127,11 @@ explicit test launch argument. The simulator driver checks actual HTTP/asset
 responses, complete Tavern WebView initialization, start/stop/closed port,
 same-process restart, obsolete operation rejection, real bridge copy migration,
 source and runtime hashes, and maintenance quarantine/restore/token replay.
-The Debug simulator frameworks and application are ad-hoc signed with a
-test-only application identity for real Keychain fixtures. That identity is
-never applied to the separately archived unsigned Release IPA. Its capability-probe
+The Debug simulator links its test-only application identity into the app's
+Mach-O `__TEXT,__entitlements` section for real Keychain fixtures. Frameworks
+and the application are then ad-hoc signed without those simulator entitlements
+in their host signatures. That identity is never applied to the separately
+archived unsigned Release IPA. Its capability-probe
 process never creates a production console or deploys an instance. Tests,
 source assertions, host fixtures, simulator acceptance, and physical-device
 acceptance are distinct evidence categories.

@@ -85,6 +85,13 @@ async function rejectedCommand(method, options) {
     return { rejected: true, error: response.error };
 }
 
+function writeReport() {
+    fs.writeFileSync(path.join(evidence, 'simulator-results.json'), JSON.stringify({
+        platform: 'GitHub-hosted iOS simulator', device, results,
+        physicalDeviceTested: false, paidApiTested: false, visualReviewPerformed: false,
+    }, null, 2));
+}
+
 async function check(name, callback) {
     const startedAt = Date.now();
     try {
@@ -94,10 +101,7 @@ async function check(name, callback) {
         results.push({ name, passed: false, elapsedMs: Date.now() - startedAt, error: error.message });
         throw error;
     } finally {
-        fs.writeFileSync(path.join(evidence, 'simulator-results.json'), JSON.stringify({
-            platform: 'GitHub-hosted iOS simulator', device, results,
-            physicalDeviceTested: false, paidApiTested: false, visualReviewPerformed: false,
-        }, null, 2));
+        writeReport();
     }
 }
 
@@ -224,9 +228,9 @@ try {
     for (const relative of runtimePaths) {
         assert.equal(fs.existsSync(path.join(documents, relative)), false, 'Simulator verification requires a fresh application sandbox');
     }
-    fs.rmSync(path.join(documents, 'ios-test', 'runtime-probe.json'), { force: true });
-    launch('--sillyclient-runtime-probe');
     await check('Actual NodeMobile worker HTTP, termination, and restart capability', async () => {
+        fs.rmSync(path.join(documents, 'ios-test', 'runtime-probe.json'), { force: true });
+        launch('--sillyclient-runtime-probe');
         const result = await waitForFile(path.join(documents, 'ios-test', 'runtime-probe.json'), 45000);
         fs.writeFileSync(path.join(evidence, 'node-mobile-runtime-probe.json'), JSON.stringify(result, null, 2));
         assert.equal(result.success, true, result.error);
@@ -237,10 +241,10 @@ try {
         }
         return result;
     });
-    simctl('terminate', device, bundleId);
-    appPid = undefined;
-    launch('--sillyclient-test');
     await check('Real Capacitor native bridge and application version', async () => {
+        simctl('terminate', device, bundleId);
+        appPid = undefined;
+        launch('--sillyclient-test');
         await waitForBridge();
         const version = await command('getAppVersion');
         assert.equal(version.version, '1.10.0');
@@ -518,6 +522,12 @@ try {
         verifyCopiedData();
         return { ...rejection, ...await verifyStopped() };
     });
+} catch (error) {
+    if (results.every(result => result.passed)) {
+        results.push({ name: 'Simulator setup or transition failed', passed: false, error: error.message });
+        writeReport();
+    }
+    throw error;
 } finally {
     const diagnosticRoots = [
         [documents, ['server-failed.json', 'server-ready.txt', 'SillyTavern/data/server.log']],
@@ -538,7 +548,14 @@ try {
     try {
         fs.writeFileSync(path.join(evidence, 'simulator-system.log'),
             simctl('spawn', device, 'log', 'show', '--predicate',
-                'process == "App" OR process == "runningboardd" OR process == "ReportCrash"', '--last', '10m'));
+                'process == "App" OR process == "runningboardd" OR process == "ReportCrash"'
+                    + ' OR process == "SpringBoard" OR process == "amfid" OR process == "securityd"', '--last', '10m'));
     } catch (error) { console.warn('System log collection failed:', error.message); }
+    try {
+        fs.writeFileSync(path.join(evidence, 'host-signing.log'), execFileSync('/usr/bin/log',
+            ['show', '--predicate', 'eventMessage CONTAINS[c] "com.sillyclient.ios"'
+                + ' OR ((process == "amfid" OR process == "kernel") AND eventMessage CONTAINS[c] "App.app")',
+            '--last', '10m'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 60000 }));
+    } catch (error) { console.warn('Host signing log collection failed:', error.message); }
     try { simctl('terminate', device, bundleId); } catch {}
 }

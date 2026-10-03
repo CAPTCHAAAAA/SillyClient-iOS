@@ -152,6 +152,27 @@ jobs:
             if (!device) throw new Error('No available iPhone simulator');
             process.stdout.write(device.udid);
           ")
+          # Simulator application claims belong in the linked Mach-O, not its host signature.
+          ruby <<'RUBY'
+          require 'xcodeproj'
+          require 'shellwords'
+          project = Xcodeproj::Project.open('web/capacitor-ui/ios/App/App.xcodeproj')
+          targets = project.targets.select { |target| target.name == 'App' }
+          raise 'Expected exactly one App target' unless targets.length == 1
+          configurations = targets.first.build_configurations.select { |config| config.name == 'Debug' }
+          raise 'Expected exactly one App Debug configuration' unless configurations.length == 1
+          entitlements = File.expand_path('scripts/ios-simulator.entitlements')
+          raise 'Missing simulator entitlements' unless File.file?(entitlements)
+          settings = configurations.first.build_settings
+          key = 'OTHER_LDFLAGS[sdk=iphonesimulator*]'
+          existing = settings[key] || settings['OTHER_LDFLAGS'] || '$(inherited)'
+          flags = existing.is_a?(Array) ? existing.dup : Shellwords.split(existing)
+          flags.unshift('$(inherited)') unless flags.include?('$(inherited)')
+          linker_flag = "-Wl,-sectcreate,__TEXT,__entitlements,#{entitlements}"
+          flags << linker_flag unless flags.include?(linker_flag)
+          settings[key] = flags
+          project.save
+          RUBY
           cd web/capacitor-ui/ios/App
           set -o pipefail
           xcodebuild -workspace App.xcworkspace -scheme App -configuration Debug \
@@ -162,14 +183,48 @@ jobs:
           APP_PATH=web/capacitor-ui/ios/App/build/derived/Build/Products/Debug-iphonesimulator/App.app
           test -d "$APP_PATH"
           cp -R sillytavern-src "$APP_PATH/sillytavern"
-          # The simulator needs an application identity to exercise the real Keychain.
           for COMPONENT in "$APP_PATH"/Frameworks/*.framework "$APP_PATH"/Frameworks/*.dylib; do
             if [ -e "$COMPONENT" ]; then codesign --force --sign - "$COMPONENT"; fi
           done
-          codesign --force --sign - --entitlements scripts/ios-simulator.entitlements "$APP_PATH"
-          codesign --display --entitlements :- "$APP_PATH" \
-            > evidence/simulator-entitlements.plist 2> evidence/simulator-codesign.log
+          codesign --force --sign - "$APP_PATH"
+          codesign --display --verbose=4 "$APP_PATH" > evidence/simulator-codesign.log 2>&1
           codesign --verify --deep --strict "$APP_PATH"
+          # Classic verbose section output is byte-oriented on either host endianness.
+          xcrun otool-classic -arch "$(uname -m)" -X -V -s __TEXT __entitlements "$APP_PATH/App" \
+            > evidence/simulator-entitlements-macho.txt
+          node --input-type=module <<'ENTITLEMENTS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const dump = fs.readFileSync('evidence/simulator-entitlements-macho.txt', 'utf8');
+          const rows = dump.trim().split(/\r?\n/).filter(row => row.trim());
+          assert.ok(rows.length > 0, 'No linked simulator entitlement bytes');
+          const chunks = [];
+          let nextAddress;
+          for (const row of rows) {
+            const [address, ...hex] = row.split('|', 1)[0].trim().split(/\s+/);
+            assert.ok(row.includes('|') && /^[0-9a-f]{8,16}$/i.test(address)
+              && hex.length > 0 && hex.length <= 16 && hex.every(byte => /^[0-9a-f]{2}$/i.test(byte)),
+              'Invalid simulator entitlement byte row');
+            const start = BigInt(`0x${address}`);
+            if (nextAddress !== undefined) {
+              assert.equal(start, nextAddress, 'Noncontiguous simulator entitlement byte rows');
+            }
+            nextAddress = start + BigInt(hex.length);
+            chunks.push(Buffer.from(hex.join(''), 'hex'));
+          }
+          const linked = Buffer.concat(chunks);
+          assert.ok(linked.length > 0 && linked.length <= 65536, 'Invalid linked simulator entitlement size');
+          fs.writeFileSync('evidence/simulator-entitlements.plist', linked);
+          ENTITLEMENTS
+          ruby <<'VERIFY'
+          require 'xcodeproj'
+          identity = 'SCIOSDEBUG.com.sillyclient.ios'
+          linked = Xcodeproj::Plist.read_from_path('evidence/simulator-entitlements.plist')
+          expected = Xcodeproj::Plist.read_from_path('scripts/ios-simulator.entitlements')
+          raise 'Incorrect linked application identity' unless linked['application-identifier'] == identity
+          raise 'Incorrect linked Keychain group' unless linked['keychain-access-groups'] == [identity]
+          raise 'Linked simulator entitlements differ from the source' unless linked == expected
+          VERIFY
           node scripts/run-ios-e2e.mjs "$DEVICE_UUID" "$APP_PATH"
 
       - name: Upload the unsigned build archive

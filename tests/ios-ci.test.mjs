@@ -67,7 +67,7 @@ test('unsigned artifact version and monotonic native build agree', () => {
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
 
-test('only the Debug simulator is ad-hoc signed for actual Keychain verification', () => {
+test('only the Debug simulator is ad-hoc signed without protected application claims', () => {
     const workflow = read('.github/workflows/build-ipa.yml');
     const simulator = workflow.slice(workflow.indexOf('- name: Build and verify the actual hosted simulator application'),
         workflow.indexOf('- name: Upload the unsigned build archive'));
@@ -76,20 +76,115 @@ test('only the Debug simulator is ad-hoc signed for actual Keychain verification
     assert.match(archive, /CODE_SIGNING_ALLOWED=NO/);
     assert.doesNotMatch(archive, /codesign --force|ios-simulator\.entitlements/);
     assert.match(simulator, /Debug-iphonesimulator\/App\.app/);
-    assert.match(simulator, /codesign --force --sign - --entitlements scripts\/ios-simulator\.entitlements "\$APP_PATH"/);
+    assert.match(simulator, /codesign --force --sign - "\$APP_PATH"/);
+    for (const command of simulator.split('\n').filter(line => /codesign --force/.test(line))) {
+        assert.doesNotMatch(command, /--entitlements|--deep|--preserve-metadata/);
+    }
     assert.match(simulator, /for COMPONENT in "\$APP_PATH"\/Frameworks\/\*\.framework "\$APP_PATH"\/Frameworks\/\*\.dylib/);
     assert.match(simulator, /codesign --force --sign - "\$COMPONENT"/);
+    assert.match(simulator, /codesign --display --verbose=4 "\$APP_PATH"/);
     assert.match(simulator, /codesign --verify --deep --strict/);
-    assert.doesNotMatch(simulator, /codesign --force[^\n]*--deep/);
     assert.ok(simulator.indexOf('codesign --force') > simulator.indexOf('cp -R sillytavern-src'));
     assert.ok(simulator.indexOf('codesign --force --sign - "$COMPONENT"')
-        < simulator.indexOf('codesign --force --sign - --entitlements'));
+        < simulator.indexOf('codesign --force --sign - "$APP_PATH"'));
+    assert.ok(simulator.indexOf('codesign --force --sign - "$APP_PATH"')
+        < simulator.indexOf('codesign --display --verbose=4'));
     assert.ok(simulator.indexOf('codesign --verify') < simulator.indexOf('node scripts/run-ios-e2e.mjs'));
     const entitlements = read('scripts/ios-simulator.entitlements');
     assert.match(entitlements, /application-identifier<\/key>\s*<string>SCIOSDEBUG\.com\.sillyclient\.ios/);
     assert.match(entitlements, /keychain-access-groups<\/key>\s*<array>\s*<string>SCIOSDEBUG\.com\.sillyclient\.ios/);
     assert.doesNotMatch(entitlements, /get-task-allow|application-groups/);
 });
+
+test('only the App Debug simulator links the test identity into its Mach-O', () => {
+    const workflow = read('.github/workflows/build-ipa.yml');
+    const simulator = workflow.slice(workflow.indexOf('- name: Build and verify the actual hosted simulator application'),
+        workflow.indexOf('- name: Upload the unsigned build archive'));
+    const configure = simulator.match(/ruby <<'RUBY'\n([\s\S]*?)\n\s*RUBY/)?.[1];
+    assert.ok(configure, 'Missing structured Xcode simulator configuration');
+    assert.match(configure, /require 'xcodeproj'/);
+    assert.match(configure, /Xcodeproj::Project\.open\('web\/capacitor-ui\/ios\/App\/App\.xcodeproj'\)/);
+    assert.match(configure, /project\.targets\.select \{ \|target\| target\.name == 'App' \}/);
+    assert.match(configure, /targets\.length == 1/);
+    assert.match(configure, /targets\.first\.build_configurations\.select \{ \|config\| config\.name == 'Debug' \}/);
+    assert.match(configure, /configurations\.length == 1/);
+    assert.match(configure, /configurations\.first\.build_settings/);
+    assert.match(configure, /OTHER_LDFLAGS\[sdk=iphonesimulator\*\]/);
+    assert.match(configure, /Shellwords\.split/);
+    assert.match(configure, /flags\.unshift\('\$\(inherited\)'\)/);
+    assert.match(configure, /-Wl,-sectcreate,__TEXT,__entitlements,/);
+    assert.match(configure, /File\.expand_path\('scripts\/ios-simulator\.entitlements'\)/);
+    assert.match(configure, /flags << linker_flag unless flags\.include\?\(linker_flag\)/);
+    assert.match(configure, /settings\[key\] = flags[\s\S]*project\.save/);
+    assert.doesNotMatch(configure, /project\.build_configurations|settings\['OTHER_LDFLAGS'\]\s*=/);
+    assert.ok(simulator.indexOf("ruby <<'RUBY'") < simulator.indexOf('xcodebuild -workspace'));
+    assert.match(simulator, /build CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""/);
+});
+
+test('simulator evidence validates the linked plist identity before launch', () => {
+    const workflow = read('.github/workflows/build-ipa.yml');
+    const simulator = workflow.slice(workflow.indexOf('- name: Build and verify the actual hosted simulator application'),
+        workflow.indexOf('- name: Upload the unsigned build archive'));
+    assert.match(simulator, /xcrun otool-classic -arch "\$\(uname -m\)" -X -V -s __TEXT __entitlements "\$APP_PATH\/App"/);
+    assert.match(simulator, /evidence\/simulator-entitlements-macho\.txt/);
+    const validate = simulator.match(/ruby <<'VERIFY'\n([\s\S]*?)\n\s*VERIFY/)?.[1];
+    assert.ok(validate, 'Missing semantic validation of linked simulator entitlements');
+    assert.match(validate, /Xcodeproj::Plist\.read_from_path\('evidence\/simulator-entitlements\.plist'\)/);
+    assert.match(validate, /linked\['application-identifier'\] == identity/);
+    assert.match(validate, /linked\['keychain-access-groups'\] == \[identity\]/);
+    assert.match(validate, /linked == expected/);
+    assert.ok(simulator.indexOf("ruby <<'VERIFY'") < simulator.indexOf('node scripts/run-ios-e2e.mjs'));
+});
+
+function decodeLinkedEntitlements(dump) {
+    const workflow = read('.github/workflows/build-ipa.yml');
+    const decoder = workflow.match(/node --input-type=module <<'ENTITLEMENTS'\n([\s\S]*?)\n\s*ENTITLEMENTS/)?.[1];
+    assert.ok(decoder, 'Missing linked-entitlement evidence decoder');
+    const body = decoder.replace(/^\s*import [^\n]+\n/gm, '');
+    let linked;
+    vm.runInNewContext(body, {
+        assert, Buffer, BigInt,
+        fs: {
+            readFileSync(file, encoding) {
+                assert.equal(file, 'evidence/simulator-entitlements-macho.txt');
+                assert.equal(encoding, 'utf8');
+                return dump;
+            },
+            writeFileSync(file, bytes) {
+                assert.equal(file, 'evidence/simulator-entitlements.plist');
+                assert.ok(Buffer.isBuffer(bytes));
+                linked = bytes;
+            },
+        },
+    }, { timeout: 1000 });
+    return linked;
+}
+
+function sectionDump(bytes) {
+    const rows = [];
+    for (let offset = 0; offset < bytes.length; offset += 16) {
+        const row = bytes.subarray(offset, offset + 16);
+        const address = (0x1000 + offset).toString(16).padStart(16, '0');
+        rows.push(`${address}  ${[...row].map(byte => byte.toString(16).padStart(2, '0')).join(' ')}  |fixture|`);
+    }
+    return rows.join('\n') + '\n';
+}
+
+test('linked simulator entitlement evidence preserves the actual bytes', () => {
+    const expected = Buffer.from(read('scripts/ios-simulator.entitlements'));
+    assert.deepEqual(decodeLinkedEntitlements(sectionDump(expected)), expected);
+});
+
+for (const [name, dump, message] of [
+    ['missing section', '', /No linked simulator entitlement bytes/],
+    ['non-byte row', '0000000000001000  zz  |fixture|\n', /Invalid simulator entitlement byte row/],
+    ['discontinuous rows', '0000000000001000  3c  |fixture|\n0000000000001010  3e  |fixture|\n',
+        /Noncontiguous simulator entitlement byte rows/],
+]) {
+    test(`linked simulator entitlement evidence rejects ${name}`, () => {
+        assert.throws(() => decodeLinkedEntitlements(dump), message);
+    });
+}
 
 test('native adapter preserves the existing console events and checks mode freshness on main', () => {
     const plugin = read('native-src/TarvenEnvPlugin.swift');
@@ -369,14 +464,26 @@ async function simulateDriver(scenario = 'success') {
         },
     };
     const fakeSimctl = (binary, args) => {
+        if (binary === '/usr/bin/log') {
+            assert.equal(args[0], 'show');
+            assert.ok(args.includes('--predicate'));
+            return 'Virtual host signing diagnostic log\n';
+        }
         assert.equal(binary, 'xcrun');
         assert.equal(args[0], 'simctl');
         const action = args[1];
+        if (action === 'install' && scenario === 'install-denied') throw new Error('Simulator installation denied');
         if (['boot', 'bootstatus', 'install'].includes(action)) return '';
         if (action === 'get_app_container') return container + '\n';
         if (action === 'terminate') { alive = false; return ''; }
         if (action === 'spawn') return 'Virtual simulator diagnostic log\n';
         assert.equal(action, 'launch');
+        if (scenario === 'probe-launch-denied' && args.includes('--sillyclient-runtime-probe')) {
+            throw new Error('Capability probe launch denied by codesigning');
+        }
+        if (scenario === 'test-launch-denied' && args.includes('--sillyclient-test')) {
+            throw new Error('Test application launch denied by codesigning');
+        }
         alive = true;
         if (args.includes('--sillyclient-runtime-probe')) {
             put(path.join(documents, 'ios-test/runtime-probe.json'), JSON.stringify({
@@ -436,7 +543,8 @@ async function simulateDriver(scenario = 'success') {
         }, { timeout: 1000 });
     } catch (failure) { error = failure; }
     const report = JSON.parse(get(path.join(evidence, 'simulator-results.json')).toString());
-    return { report, error, clock, acceptedStops, listening };
+    const hostDiagnostics = get(path.join(evidence, 'host-signing.log')).toString();
+    return { report, error, clock, acceptedStops, listening, hostDiagnostics };
 }
 
 test('real simulator driver completes all lifecycle stages using isolated protocol fixtures', async () => {
@@ -459,9 +567,13 @@ test('real simulator driver completes all lifecycle stages using isolated protoc
     assert.equal(actual.listening, false);
     assert.equal(actual.report.physicalDeviceTested, false);
     assert.equal(actual.report.visualReviewPerformed, false);
+    assert.match(actual.hostDiagnostics, /Virtual host signing diagnostic log/);
 });
 
 for (const [scenario, stage, message] of [
+    ['install-denied', 'Simulator setup or transition', /Simulator installation denied/],
+    ['probe-launch-denied', 'Actual NodeMobile worker', /Capability probe launch denied by codesigning/],
+    ['test-launch-denied', 'Real Capacitor native bridge', /Test application launch denied by codesigning/],
     ['remote-navigation-success', 'Remote navigation', /unexpectedly accepted/],
     ['remote-navigation-replaces-operation', 'Remote navigation', /remote-hardening-operation/],
     ['listener-left-open', 'Native stop closes', /listener open/],
@@ -484,6 +596,7 @@ for (const [scenario, stage, message] of [
         const failed = actual.report.results.filter(result => !result.passed);
         assert.equal(failed.length, 1);
         assert.ok(failed[0].name.includes(stage), failed[0].name);
+        assert.match(actual.hostDiagnostics, /Virtual host signing diagnostic log/);
         if (scenario === 'process-exit') assert.ok(actual.clock < 1000, 'Application exit waited for the startup deadline');
     });
 }
