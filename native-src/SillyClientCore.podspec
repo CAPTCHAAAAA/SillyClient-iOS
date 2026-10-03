@@ -15,5 +15,5 @@ Pod::Spec.new do |s|
   s.vendored_frameworks = 'NodeMobile.xcframework'
   s.dependency 'Capacitor'
   s.dependency 'ZIPFoundation', '0.9.19'
-  s.dependency 'Yams', '5.4.0'
+  s.dependency 'Yams', '5.1.3'
 end
