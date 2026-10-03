@@ -114,7 +114,7 @@ jobs:
             const source = fs.readFileSync(podfile, 'utf8');
             if (!source.includes(\"target 'App' do\")) throw new Error('Missing App target');
             fs.writeFileSync(podfile, source.replace(\"target 'App' do\",
-              \"target 'App' do\n  pod 'SillyClientCore', :path => '../../../../native-src'\"));
+              \"target 'App' do\n  pod 'Yams', :git => 'https://github.com/jpsim/Yams.git', :commit => '3d6871d5b4a5cd519adf233fbb576e0a2af71c17'\n  pod 'ZIPFoundation', :git => 'https://github.com/weichsel/ZIPFoundation.git', :commit => '02b6abe5f6eef7e3cbd5f247c5cc24e246efcfe0'\n  pod 'SillyClientCore', :path => '../../../../native-src'\"));
           "
           cd web/capacitor-ui/ios/App
           pod install
