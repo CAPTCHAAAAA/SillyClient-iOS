@@ -17,9 +17,72 @@ let scanning = false;
 let rescan = false;
 let scheduled = false;
 const cancelledOperations = new Map();
+const logPrefix = '[SILLYCLIENT_LOG_V1]';
+const maximumLogLineBytes = 16 * 1024;
+const maximumQueuedLogBytes = 256 * 1024;
+let logThrottled = false;
+
+function writeLogFrame(origin, stream, bytes) {
+    if (!bytes.length) return;
+    const encode = payload => logPrefix + JSON.stringify({
+        ...origin, stream, lineBase64: payload.toString('base64'),
+    }) + '\n';
+    if (process.stdout.writableLength >= maximumQueuedLogBytes) {
+        if (!logThrottled) {
+            logThrottled = true;
+            process.stdout.write(encode(Buffer.from('[Runtime log backlog reached; further lines discarded]')));
+        }
+        return;
+    }
+    logThrottled = false;
+    process.stdout.write(encode(bytes));
+}
+
+function captureWorkerOutput(worker, session) {
+    // Worker streams may drain after another session starts; never consult active here.
+    const origin = { instanceId: session.instanceId, operationId: session.operationId };
+    for (const [kind, stream] of [['stdout', worker.stdout], ['stderr', worker.stderr]]) {
+        let pending = Buffer.alloc(0);
+        let discarding = false;
+        const emit = bytes => {
+            const line = bytes.at(-1) === 13 ? bytes.subarray(0, -1) : bytes;
+            writeLogFrame(origin, kind, line);
+        };
+        stream.on('data', chunk => {
+            const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            let start = 0;
+            while (start < bytes.length) {
+                const end = bytes.indexOf(10, start);
+                const part = bytes.subarray(start, end === -1 ? bytes.length : end);
+                if (!discarding) {
+                    if (pending.length + part.length > maximumLogLineBytes) {
+                        pending = Buffer.alloc(0);
+                        discarding = true;
+                        emit(Buffer.from('[Oversized worker log line discarded]'));
+                    } else if (part.length) {
+                        pending = pending.length ? Buffer.concat([pending, part]) : Buffer.from(part);
+                    }
+                }
+                if (end === -1) break;
+                if (!discarding) emit(pending);
+                pending = Buffer.alloc(0);
+                discarding = false;
+                start = end + 1;
+            }
+        });
+        stream.once('end', () => {
+            if (!discarding) emit(pending);
+            pending = Buffer.alloc(0);
+        });
+    }
+}
 
 function operationKey(request) {
     return request.instanceId && request.operationId ? `${request.instanceId}:${request.operationId}` : null;
+}
+
+function validIdentity(value) {
+    return typeof value === 'string' && value.length >= 1 && value.length <= 128 && !/[^A-Za-z0-9_-]/.test(value);
 }
 
 function rememberCancellation(request) {
@@ -106,8 +169,7 @@ async function start(request) {
     if (!Number.isInteger(request.port) || request.port < 1 || request.port > 65535) {
         throw new Error('Invalid server port');
     }
-    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(request.instanceId || '')
-        || !/^[a-zA-Z0-9_-]{1,128}$/.test(request.operationId || '')) {
+    if (!validIdentity(request.instanceId) || !validIdentity(request.operationId)) {
         throw new Error('Invalid operation identity');
     }
     if (cancelledOperations.has(operationKey(request))) throw new Error('Operation cancelled before startup');
@@ -148,6 +210,7 @@ async function start(request) {
     if (await listenerOpen(session.port, session.host)) throw new Error('The requested port is already occupied');
     const worker = new Worker(pathToFileURL(loader), {
         execArgv: process.execArgv.filter(argument => argument !== '--expose-gc'),
+        stdout: true, stderr: true,
         env: {
             ...process.env, TARVEN_SERVER_DIR: serverDirectory,
             DATA_DIR: request.dataDirectory, PORT: String(request.port),
@@ -162,6 +225,7 @@ async function start(request) {
             ],
         },
     });
+    captureWorkerOutput(worker, session);
     session.worker = worker;
     active = session;
     publish('starting', session);

@@ -11,6 +11,12 @@ Android/Windows/Main release, install a client, or publish a Release.
 a real HTTP 200 response; stop resolves only after Worker termination and
 listener closure. Explicit instance and operation identities reject obsolete
 commands. A timed-out transport retains the identity until stop confirmation.
+Worker stdout and stderr have separate bounded UTF-8 line buffers. Framed logs
+carry their captured instance and operation identities into native storage;
+unframed host output belongs to the runtime, not whichever instance is current.
+Oversized lines and saturated output are discarded within explicit bounds.
+Native accepted log work is bounded through disk completion; this does not
+claim a global lifetime disk cap for all historical instance identities.
 Ordered command names and cancellation tombstones prevent stop-before-start
 delivery from leaving an orphan Worker. Host GC is acknowledged separately from
 the request to collect an active Worker; embedded Worker collection is not
@@ -60,6 +66,14 @@ receipts are rejected; omitted passwords retain only an already-bound record
 with the same username. Automatic ping and WebView authentication do not reuse
 credentials for another origin. Remote HTTP requests reject redirects and
 bound response bodies during reception.
+Same-URL view reuse refreshes application-owned challenge credentials without
+reloading the page. Clearing Keychain credentials also clears the matching
+remote view's in-memory credential. Successful browser ownership closes the
+old native Tavern session after its generation check. This is not a claim that WebKit's
+authentication cache or an already authenticated website session is logged out.
+Native events preserve the existing console's `message` and `launcher`
+contracts. Local mode snapshots are rechecked on the main queue and cannot
+replace an active remote view; status queries retain runtime ownership modes.
 
 Optional preinstallation uses fixed commit/size/SHA-256 catalog metadata.
 Third-party extension archives are downloaded at runtime; their implementation
@@ -111,7 +125,11 @@ The Debug-only native test harness executes the actual Swift modules against
 synthetic sandbox fixtures. It is absent from Release execution and requires an
 explicit test launch argument. The simulator driver checks actual HTTP/asset
 responses, complete Tavern WebView initialization, start/stop/closed port,
-same-process restart, and obsolete operation rejection. Its capability-probe
+same-process restart, obsolete operation rejection, real bridge copy migration,
+source and runtime hashes, and maintenance quarantine/restore/token replay.
+The Debug simulator frameworks and application are ad-hoc signed with a
+test-only application identity for real Keychain fixtures. That identity is
+never applied to the separately archived unsigned Release IPA. Its capability-probe
 process never creates a production console or deploys an instance. Tests,
 source assertions, host fixtures, simulator acceptance, and physical-device
 acceptance are distinct evidence categories.

@@ -1,6 +1,15 @@
 #if DEBUG
 import Foundation
 import ZIPFoundation
+import WebKit
+
+private final class IOSFixtureChallengeSender: NSObject, URLAuthenticationChallengeSender {
+    func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
+    func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
+    func cancel(_ challenge: URLAuthenticationChallenge) {}
+    func performDefaultHandling(for challenge: URLAuthenticationChallenge) {}
+    func rejectProtectionSpaceAndContinue(with challenge: URLAuthenticationChallenge) {}
+}
 
 enum IOSNativeTests {
     private static func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
@@ -39,6 +48,121 @@ enum IOSNativeTests {
             try require(IOSNavigationPolicy.sameOrigin(first, second), "Default HTTPS port did not match")
             try require(!IOSNavigationPolicy.sameOrigin(first, URL(string: "http://example.com")!), "Scheme change matched")
             try require(!IOSNavigationPolicy.sameOrigin(first, URL(string: "https://example.com:444")!), "Port change matched")
+        }
+        test("Bounded runtime log frames preserve captured identities and reject malformed output") { _, _ in
+            func frame(instance: String = "fixture-instance", operation: String = "fixture-operation",
+                       stream: String = "stdout", bytes: Data, extra: Bool = false) throws -> Data {
+                var value = ["instanceId": instance, "operationId": operation, "stream": stream,
+                             "lineBase64": bytes.base64EncodedString()]
+                if extra { value["unexpected"] = "field" }
+                var result = Data(IOSRuntimeLogFrame.prefix.utf8)
+                result.append(try JSONSerialization.data(withJSONObject: value))
+                return result
+            }
+            let line = "\u{4E2D}\u{6587} [SILLYCLIENT_LOG_V1] nested text"
+            for stream in ["stdout", "stderr"] {
+                guard let value = IOSRuntimeLogFrame.decode(try frame(stream: stream, bytes: Data(line.utf8))) else {
+                    throw IOSFileError.invalid("Valid runtime log frame was rejected")
+                }
+                try require(value.instanceId == "fixture-instance" && value.operationId == "fixture-operation",
+                            "Captured log identity was changed")
+                try require(value.stream == stream && value.line == line, "UTF-8 log payload or stream changed")
+            }
+            try require(IOSRuntimeLogFrame.decode(try frame(bytes: Data(repeating: 97, count: 16384))) != nil,
+                        "Maximum bounded log payload was rejected")
+            let malformed = try [
+                frame(instance: "unsafe\n", bytes: Data("line".utf8)),
+                frame(operation: "unsafe\r", bytes: Data("line".utf8)),
+                frame(instance: "../outside", bytes: Data("line".utf8)),
+                frame(operation: String(repeating: "a", count: 129), bytes: Data("line".utf8)),
+                frame(stream: "other", bytes: Data("line".utf8)),
+                frame(bytes: Data()),
+                frame(bytes: Data("two\nlines".utf8)),
+                frame(bytes: Data([0xc3, 0x28])),
+                frame(bytes: Data(repeating: 97, count: 16385)),
+                frame(bytes: Data("line".utf8), extra: true),
+                Data("unframed host output".utf8),
+                Data((IOSRuntimeLogFrame.prefix + "{}").utf8),
+                Data(repeating: 97, count: 24577),
+            ]
+            for bytes in malformed {
+                try require(IOSRuntimeLogFrame.decode(bytes) == nil, "Malformed runtime log frame was accepted")
+            }
+            for identity in ["trailing\n", "trailing\r", "../outside", "", String(repeating: "a", count: 129)] {
+                try rejects("Unsafe native instance identity was accepted") { _ = try IOSInstanceStore.identity(identity) }
+            }
+        }
+        test("Native runtime event adapter preserves the console contract and rejects obsolete local modes") { _, _ in
+            let log = IOSRuntimeEvents.log(instance: "fixture-instance", operation: "fixture-operation", line: "retained message")
+            try require(log["message"] as? String == "retained message" && log["line"] as? String == "retained message",
+                        "Legacy or scoped log payload was lost")
+            try require(log["instanceId"] as? String == "fixture-instance" && log["operationId"] as? String == "fixture-operation",
+                        "Runtime event identity was changed")
+            let ready: [String: Any] = ["state": "ready", "instanceId": "fixture-instance",
+                "operationId": "fixture-operation", "mode": "local", "serverReady": true]
+            let active = IOSRuntimeEvents.mode(ready, current: ready, remoteActive: false)
+            try require(active?["mode"] as? String == "launcher" && active?["tavernRunning"] as? Bool == true,
+                        "Ready event did not preserve the existing console contract")
+            try require(active?["runtimeMode"] as? String == "local", "Runtime ownership mode was lost")
+            try require(IOSRuntimeEvents.mode(ready, current: ready, remoteActive: true) == nil,
+                        "Local mode replaced an active remote session")
+            for (key, value) in [("state", "stopped"), ("instanceId", "different-instance"), ("operationId", "different-operation")] {
+                var newer = ready
+                newer[key] = value
+                try require(IOSRuntimeEvents.mode(ready, current: newer, remoteActive: false) == nil,
+                            "Obsolete local mode was accepted")
+            }
+            let stopped: [String: Any] = ["state": "stopped", "mode": "local", "serverReady": false]
+            let closed = IOSRuntimeEvents.mode(stopped, current: stopped, remoteActive: false)
+            try require(closed?["mode"] as? String == "launcher" && closed?["tavernRunning"] as? Bool == false,
+                        "Stopped event cannot reset the existing instance cards")
+            for state in ["provisioning", "starting", "stopping", "uncertain", "failed"] {
+                var unresolved = ready
+                unresolved["serverReady"] = false
+                unresolved["state"] = state
+                try require(IOSRuntimeEvents.mode(unresolved, current: unresolved, remoteActive: false) == nil,
+                            "An unresolved local operation was reported as stopped")
+            }
+        }
+        test("Application-owned WebView credentials refresh and clear without crossing challenge origins") { _, _ in
+            let controller = TavernViewController.shared
+            guard let webView = controller.tavernWebView else { throw IOSFileError.invalid("Actual Tavern WebView is unavailable") }
+            let sender = IOSFixtureChallengeSender()
+            let source = URL(string: "https://example.test/a")!
+            defer { controller.clearRemoteCredentials() }
+            func received(host: String = "example.test", scheme: String = "https", port: Int = 443,
+                          failures: Int = 0, method: String = NSURLAuthenticationMethodHTTPBasic)
+                throws -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+                let space = URLProtectionSpace(host: host, port: port, protocol: scheme, realm: nil, authenticationMethod: method)
+                let challenge = URLAuthenticationChallenge(protectionSpace: space, proposedCredential: nil,
+                    previousFailureCount: failures, failureResponse: nil, error: nil, sender: sender)
+                var disposition: URLSession.AuthChallengeDisposition?
+                var credential: URLCredential?
+                var calls = 0
+                controller.webView(webView, didReceive: challenge) { value, supplied in
+                    calls += 1
+                    disposition = value
+                    credential = supplied
+                }
+                guard calls == 1, let value = disposition else { throw IOSFileError.invalid("Challenge was not completed exactly once") }
+                return (value, credential)
+            }
+            controller.updateRemoteCredentials(url: source, username: "first-fixture", password: "old-fixture")
+            try require(received().1?.password == "old-fixture", "Initial application credential was not supplied")
+            controller.updateRemoteCredentials(url: source, username: "second-fixture", password: "new-fixture")
+            let refreshed = try received()
+            try require(refreshed.0 == .useCredential && refreshed.1?.user == "second-fixture"
+                        && refreshed.1?.password == "new-fixture", "Same-origin application credential was not refreshed")
+            let refused = try [received(host: "other.test"), received(scheme: "http"), received(port: 444),
+                               received(failures: 1), received(method: NSURLAuthenticationMethodHTTPDigest)]
+            for value in refused {
+                try require(value.0 != .useCredential && value.1 == nil, "Credentials were reused for an unrelated or failed challenge")
+            }
+            controller.updateRemoteCredentials(url: source, username: nil, password: nil)
+            try require(received().1 == nil, "An unconfigured remote retained another instance's application credential")
+            controller.updateRemoteCredentials(url: source, username: "first-fixture", password: "old-fixture")
+            controller.clearRemoteCredentials()
+            try require(received().1 == nil, "Clearing credentials retained the application-owned password")
         }
         test("Links and sibling-prefix paths cannot escape managed storage") { root, files in
             let outside = parent.appendingPathComponent("outside")
@@ -145,8 +269,8 @@ enum IOSNativeTests {
             let data = source.appendingPathComponent("custom-data")
             try files.createDirectory(data.appendingPathComponent("default-user"))
             try files.write(Data("dataRoot: custom-data\n".utf8), to: source.appendingPathComponent("config.yaml"))
-            try require(store.migrationDataDirectory(source, files: files) == data, "Custom dataRoot was not selected")
-            try require(store.migrationDataDirectory(data, files: files) == data, "Single-user data root was flattened")
+            try require(store.migrationDataDirectory(source, files: files).path == data.path, "Custom dataRoot was not selected")
+            try require(store.migrationDataDirectory(data, files: files).path == data.path, "Single-user data root was flattened")
             try files.write(Data("dataRoot: ../outside\n".utf8), to: source.appendingPathComponent("config.yaml"))
             try files.createDirectory(root.appendingPathComponent("outside"))
             try rejects("Migration read outside the selected source") { _ = try store.migrationDataDirectory(source, files: files) }

@@ -25,6 +25,7 @@ const simctl = (...args) => execFileSync('xcrun', ['simctl', ...args], {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120000,
 });
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 function launch(argument) {
     const output = simctl('launch', device, bundleId, argument);
@@ -196,7 +197,6 @@ try {
         for (const name of ['server.js', 'ios-loader.mjs', 'patch-sillytavern.mjs', 'config.yaml', 'dist/ios-frontend/manifest.json']) {
             assert.equal(fs.statSync(path.join(runtime, name)).isFile(), true, `Missing packaged runtime file: ${name}`);
         }
-        const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
         const loaderSha256 = digest(path.join(runtime, 'ios-loader.mjs'));
         assert.equal(loaderSha256, digest('native-src/ios-loader.mjs'), 'Packaged loader differs from the checked-out source');
         const manifest = JSON.parse(fs.readFileSync(path.join(runtime, 'dist/ios-frontend/manifest.json'), 'utf8'));
@@ -249,7 +249,7 @@ try {
     await check('Actual native filesystem, URL policy, and archive module regressions', async () => {
         const result = await command(undefined, {}, 'nativeTests', 30000);
         fs.writeFileSync(path.join(evidence, 'native-module-results.json'), JSON.stringify(result, null, 2));
-        assert.ok(Array.isArray(result.results) && result.results.length > 0, 'Native tests did not report their groups');
+        assert.ok(Array.isArray(result.results) && result.results.length === 22, 'Native tests did not report all 22 current groups');
         assert.equal(result.success, true, JSON.stringify(result.results.filter(item => item.passed !== true)));
         assert.ok(result.results.every(item => item.passed === true), 'One or more real Swift test groups failed');
         return { groups: result.results.length, ...result };
@@ -326,6 +326,197 @@ try {
     await check('The restarted session also stops and closes its listener', async () => {
         await command('stop', { instanceId, operationId: secondOperation }, 'call', 25000);
         return verifyStopped();
+    });
+
+    const copiedInstance = `simulator-copy-${randomUUID()}`;
+    const copyOperation = `simulator-${randomUUID()}`;
+    const sourceDirectory = path.join(documents, 'ios-test', `copy-source-${randomUUID()}`);
+    const copiedDirectory = path.join(documents, 'instances', copiedInstance);
+    const userDirectory = path.join(copiedDirectory, 'data', 'default-user');
+    const chatRelative = 'default-user/chats/bridge-chat.jsonl';
+    const extensionRelative = 'data/default-user/extensions/broken-bridge-fixture';
+    const copiedExtension = path.join(copiedDirectory, extensionRelative);
+    const sourceFiles = new Map([
+        ['config.yaml', 'dataRoot: selected-data\nunrelated: source-preserved\n'],
+        [`selected-data/${chatRelative}`, '{"user_name":"Synthetic user","is_user":true,"mes":"Preserved chat"}\n'],
+        ['selected-data/default-user/settings.json', '{"unrelated":"preserved","extension_settings":{"disabledExtensions":[]}}\n'],
+        ['selected-data/default-user/secrets.json', '{"syntheticCredential":true}\n'],
+        ['selected-data/default-user/secrets.json.enc', 'synthetic encrypted credential\n'],
+        ['selected-data/default-user/node_modules/legacy-only.js', 'synthetic old user dependency\n'],
+        ['selected-data/.git/config', 'synthetic old data repository\n'],
+        ['selected-data/default-user/extensions/broken-bridge-fixture/index.js', '// Synthetic incomplete extension fixture.\n'],
+        ['node_modules/legacy-server-only.js', 'synthetic old server dependency\n'],
+        ['.git/config', 'synthetic old server repository\n'],
+        ['data/default-user/chats/bridge-chat.jsonl', 'wrong data root; this must not be selected\n'],
+    ]);
+    const sourceHashes = new Map([...sourceFiles].map(([relative, bytes]) => [
+        relative, createHash('sha256').update(bytes).digest('hex'),
+    ]));
+    const chatHash = sourceHashes.get(`selected-data/${chatRelative}`);
+    const extensionHash = sourceHashes.get('selected-data/default-user/extensions/broken-bridge-fixture/index.js');
+    const settingsHash = sourceHashes.get('selected-data/default-user/settings.json');
+    const excludedData = ['default-user/secrets.json', 'default-user/secrets.json.enc', 'default-user/node_modules', '.git'];
+    let scan;
+    let selected;
+    let recoveryId;
+    let recoveryFolder;
+    let recoveryRecordHash;
+    let restoreOptions;
+
+    function verifySource() {
+        for (const [relative, sha256] of sourceHashes) {
+            assert.equal(digest(path.join(sourceDirectory, relative)), sha256, `Source fixture changed: ${relative}`);
+        }
+    }
+
+    function verifyCopiedData() {
+        assert.equal(digest(path.join(copiedDirectory, 'data', chatRelative)), chatHash, 'Copied chat hash changed');
+        assert.equal(digest(path.join(userDirectory, 'settings.json')), settingsHash, 'Unrelated copied settings changed');
+        for (const relative of excludedData) {
+            assert.equal(fs.existsSync(path.join(copiedDirectory, 'data', relative)), false,
+                `Excluded migration data was copied: ${relative}`);
+        }
+        assert.equal(fs.existsSync(path.join(copiedDirectory, '.git')), false, 'Old server Git metadata was copied');
+        assert.equal(fs.existsSync(path.join(copiedDirectory, 'node_modules', 'legacy-server-only.js')), false,
+            'Old server dependency was copied into the pinned runtime');
+        verifySource();
+    }
+
+    await check('Actual copy migration commits a pinned runtime without starting it', async () => {
+        assert.equal(fs.existsSync(sourceDirectory), false, 'Migration fixture source already exists');
+        assert.equal(fs.existsSync(copiedDirectory), false, 'Migration fixture destination already exists');
+        for (const [relative, bytes] of sourceFiles) {
+            const file = path.join(sourceDirectory, relative);
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            fs.writeFileSync(file, bytes);
+        }
+        const beforeRegistry = JSON.parse(fs.readFileSync(path.join(documents, 'instances-registry.json'), 'utf8'));
+        const result = await command('migrateInstance', {
+            instanceId: copiedInstance,
+            operationId: copyOperation,
+            sourcePath: fs.realpathSync(sourceDirectory),
+            mode: 'copy',
+            includeSecrets: false,
+        }, 'call', 120000);
+        assert.equal(result.success, true);
+        assert.equal(result.instanceId, copiedInstance);
+        assert.equal(result.targetPath, fs.realpathSync(copiedDirectory), 'Migration returned a different committed path');
+        const runtime = path.join(appPath, 'sillytavern');
+        for (const relative of ['server.js', 'ios-loader.mjs', 'package.json', 'dist/ios-frontend/manifest.json']) {
+            assert.equal(fs.statSync(path.join(copiedDirectory, relative)).isFile(), true,
+                `Copied runtime file is missing: ${relative}`);
+            assert.equal(digest(path.join(copiedDirectory, relative)), digest(path.join(runtime, relative)),
+                `Copied runtime differs from the pinned bundle: ${relative}`);
+        }
+        assert.equal(fs.statSync(path.join(copiedDirectory, 'node_modules')).isDirectory(), true);
+        const manifest = JSON.parse(fs.readFileSync(path.join(copiedDirectory, 'dist/ios-frontend/manifest.json'), 'utf8'));
+        for (const asset of manifest.assets) {
+            const file = path.join(copiedDirectory, 'dist/ios-frontend', asset.name);
+            assert.equal(fs.statSync(file).size, asset.bytes);
+            assert.equal(digest(file), asset.sha256, `Copied frontend asset changed: ${asset.name}`);
+        }
+        const registry = JSON.parse(fs.readFileSync(path.join(documents, 'instances-registry.json'), 'utf8'));
+        assert.deepEqual(Object.keys(registry).sort(), [...Object.keys(beforeRegistry), copiedInstance].sort(),
+            'Migration registered an unexpected instance identity');
+        for (const [id, record] of Object.entries(beforeRegistry)) {
+            assert.deepEqual(registry[id], record, 'Migration changed an existing registration');
+        }
+        assert.equal(registry[copiedInstance].instanceId, copiedInstance);
+        assert.equal(registry[copiedInstance].path, result.targetPath, 'Migration registry path differs from its committed target');
+        assert.equal(registry[copiedInstance].isTakeover, false);
+        verifyCopiedData();
+        assert.equal(digest(path.join(copiedExtension, 'index.js')), extensionHash, 'Copied extension hash changed');
+        const stopped = await verifyStopped();
+        return { instanceId: copiedInstance, operationId: copyOperation, targetPath: result.targetPath,
+            chatSha256: chatHash, verifiedSourceFiles: sourceHashes.size, excludedData, ...stopped };
+    });
+    await check('Actual maintenance scan finds the copied broken extension', async () => {
+        scan = await command('scanInstanceMaintenance', { instanceId: copiedInstance });
+        assert.equal(scan.instanceId, copiedInstance);
+        assert.ok(typeof scan.scanId === 'string' && scan.scanId.length > 0);
+        assert.equal(scan.items.length, 1, 'Tiny migration fixture produced unexpected maintenance candidates');
+        const candidate = scan.items[0];
+        assert.equal(candidate.kind, 'broken_extension');
+        assert.equal(candidate.action, 'quarantine');
+        assert.equal(candidate.relativePath, extensionRelative);
+        assert.ok(typeof candidate.id === 'string' && candidate.id.length > 0);
+        assert.ok(typeof candidate.token === 'string' && candidate.token.length > 0);
+        assert.deepEqual(scan.warnings, []);
+        selected = [{ id: candidate.id, token: candidate.token }];
+        verifyCopiedData();
+        return { instanceId: copiedInstance, scanId: scan.scanId, relativePath: candidate.relativePath };
+    });
+    await check('Actual maintenance quarantines the copy and preserves its recovery payload', async () => {
+        const result = await command('applyInstanceMaintenance', {
+            instanceId: copiedInstance, scanId: scan.scanId, items: selected,
+        });
+        assert.equal(result.success, true, JSON.stringify(result.results));
+        assert.equal(result.results.length, 1);
+        assert.equal(result.results[0].success, true);
+        assert.equal(result.results[0].id, selected[0].id);
+        assert.equal(result.results[0].action, 'quarantine');
+        assert.equal(result.recoveryIds.length, 1);
+        recoveryId = result.recoveryIds[0];
+        assert.match(recoveryId, /^[A-Fa-f0-9-]{36}$/);
+        assert.equal(result.results[0].recoveryId, recoveryId);
+        assert.equal(fs.existsSync(copiedExtension), false, 'Quarantine left the copied broken extension in place');
+        recoveryFolder = path.join(copiedDirectory, '.sillyclient-maintenance', 'recovery', recoveryId);
+        assert.equal(digest(path.join(recoveryFolder, 'payload', 'index.js')), extensionHash,
+            'Quarantined extension hash changed');
+        const record = JSON.parse(fs.readFileSync(path.join(recoveryFolder, 'record.json'), 'utf8'));
+        assert.equal(record.owner, 'sillyclient');
+        assert.equal(record.instanceId, copiedInstance);
+        assert.equal(record.recoveryId, recoveryId);
+        assert.equal(record.relativePath, extensionRelative);
+        assert.equal(record.phase, 'quarantined');
+        recoveryRecordHash = digest(path.join(recoveryFolder, 'record.json'));
+        verifyCopiedData();
+        await verifyStopped();
+        return { recoveryId, extensionSha256: extensionHash, sourcePreserved: true };
+    });
+    await check('Maintenance scan selections are single-use over the actual bridge', async () => {
+        const result = await rejectedCommand('applyInstanceMaintenance', {
+            instanceId: copiedInstance, scanId: scan.scanId, items: selected,
+        });
+        assert.equal(fs.existsSync(copiedExtension), false);
+        assert.equal(digest(path.join(recoveryFolder, 'payload', 'index.js')), extensionHash);
+        assert.equal(digest(path.join(recoveryFolder, 'record.json')), recoveryRecordHash);
+        verifyCopiedData();
+        return result;
+    });
+    await check('Actual recovery restores the extension and archives its record', async () => {
+        const listed = await command('listInstanceMaintenanceRecovery', { instanceId: copiedInstance });
+        assert.equal(listed.items.length, 1);
+        assert.deepEqual(listed.warnings, []);
+        const item = listed.items[0];
+        assert.equal(item.recoveryId, recoveryId);
+        assert.equal(item.relativePath, extensionRelative);
+        assert.equal(item.canRestore, true);
+        assert.ok(typeof item.token === 'string' && item.token.length > 0);
+        restoreOptions = { instanceId: copiedInstance, recoveryId, token: item.token };
+        const result = await command('restoreInstanceMaintenance', restoreOptions);
+        assert.equal(result.success, true);
+        assert.equal(result.recoveryId, recoveryId);
+        assert.equal(result.relativePath, extensionRelative);
+        assert.equal(digest(path.join(copiedExtension, 'index.js')), extensionHash, 'Restored extension hash changed');
+        assert.equal(fs.existsSync(recoveryFolder), false, 'Restored recovery remained active');
+        const history = path.join(copiedDirectory, '.sillyclient-maintenance', 'history', recoveryId, 'record.json');
+        const record = JSON.parse(fs.readFileSync(history, 'utf8'));
+        assert.equal(record.phase, 'restored');
+        assert.equal(record.instanceId, copiedInstance);
+        assert.equal(record.relativePath, extensionRelative);
+        verifyCopiedData();
+        await verifyStopped();
+        return { recoveryId, extensionSha256: extensionHash, archived: true };
+    });
+    await check('Recovery tokens are single-use and migration maintenance leaves no listener', async () => {
+        const rejection = await rejectedCommand('restoreInstanceMaintenance', restoreOptions);
+        const listed = await command('listInstanceMaintenanceRecovery', { instanceId: copiedInstance });
+        assert.deepEqual(listed.items, []);
+        assert.deepEqual(listed.warnings, []);
+        assert.equal(digest(path.join(copiedExtension, 'index.js')), extensionHash);
+        verifyCopiedData();
+        return { ...rejection, ...await verifyStopped() };
     });
 } finally {
     const diagnosticRoots = [

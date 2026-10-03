@@ -40,11 +40,13 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     public override func load() {
         super.load()
         NodeRunner.shared.setEventHandlers(log: { [weak self] id, operation, line in
-            self?.notifyListeners("log", data: ["instanceId": id, "operationId": operation, "line": line])
+            self?.notifyListeners("log", data: IOSRuntimeEvents.log(instance: id, operation: operation, line: line))
         }, status: { [weak self] state in
-            var value = state
-            value["tavernRunning"] = state["serverReady"]
-            self?.notifyListeners("mode", data: value)
+            DispatchQueue.main.async {
+                guard let self = self, let value = IOSRuntimeEvents.mode(state, current: NodeRunner.shared.status,
+                    remoteActive: self.viewSession?.2 == true || self.pendingViewSession?.2 == true) else { return }
+                self.notifyListeners("mode", data: value)
+            }
         })
     }
     private func perform(_ call: CAPPluginCall, _ body: @escaping () throws -> [String: Any]) {
@@ -168,6 +170,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                             return
                         }
                     }
+                    TavernViewController.shared.clearTavernSession()
                     self.viewSession = (instance, url, remote)
                     completion(.success(()))
                 }
@@ -275,14 +278,16 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     }
     @objc func sendCommand(_ call: CAPPluginCall) {
         let command = (call.getString("text") ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let current = NodeRunner.shared.status
         let message: String
         switch command {
-        case "status": message = "iOS NodeMobile: \(NodeRunner.shared.status["state"] ?? "unknown"), port \(NodeRunner.shared.status["port"] ?? 0)"
+        case "status": message = "iOS NodeMobile: \(current["state"] ?? "unknown"), port \(current["port"] ?? 0)"
         case "gc": NodeRunner.shared.triggerGarbageCollection(); message = "Host and worker garbage collection requested"
         case "help": message = "Supported iOS commands: status, gc, help"
         default: call.reject("Arbitrary shell commands are unsupported on iOS"); return
         }
-        NodeRunner.shared.appendLog(message)
+        NodeRunner.shared.appendLog(message, instance: current["instanceId"] as? String ?? "runtime",
+                                    operation: current["operationId"] as? String ?? "")
         call.resolve(["success": true])
     }
     @objc func reloadTavern(_ call: CAPPluginCall) {
@@ -328,7 +333,18 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         perform(call) { try IOSRemoteCredentials.status(self.id(call)) }
     }
     @objc func clearRemoteBasicAuth(_ call: CAPPluginCall) {
-        perform(call) { try IOSRemoteCredentials.clear(self.id(call)); return ["success": true] }
+        io.async {
+            do {
+                let instance = try self.id(call)
+                try IOSRemoteCredentials.clear(instance)
+                DispatchQueue.main.async {
+                    if let current = self.viewSession, current.2, current.0 == instance {
+                        TavernViewController.shared.clearRemoteCredentials()
+                    }
+                    call.resolve(["success": true])
+                }
+            } catch { call.reject(error.localizedDescription) }
+        }
     }
     @objc func pingUrl(_ call: CAPPluginCall) {
         do {

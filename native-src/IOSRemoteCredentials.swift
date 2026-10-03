@@ -63,8 +63,11 @@ enum IOSRemoteCredentials {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(value as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data, data.count <= 32768,
-              let record = try JSONSerialization.jsonObject(with: data) as? [String: String],
+        guard status == errSecSuccess else {
+            throw IOSFileError.invalid("Secure credential storage is unavailable (Keychain OSStatus \(status))")
+        }
+        guard let data = result as? Data, data.count <= 32768,
+              let record = try? JSONSerialization.jsonObject(with: data) as? [String: String],
               let username = record["username"], let password = record["password"] else {
             throw IOSFileError.invalid("Secure credential storage is unavailable")
         }
@@ -104,15 +107,18 @@ enum IOSRemoteCredentials {
         let status = SecItemUpdate(value as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
             for (key, field) in attributes { value[key] = field }
-            guard SecItemAdd(value as CFDictionary, nil) == errSecSuccess else {
-                throw IOSFileError.invalid("Could not save credentials securely")
+            let added = SecItemAdd(value as CFDictionary, nil)
+            guard added == errSecSuccess else {
+                throw IOSFileError.invalid("Could not save credentials securely (Keychain OSStatus \(added))")
             }
-        } else if status != errSecSuccess { throw IOSFileError.invalid("Could not update credentials securely") }
+        } else if status != errSecSuccess {
+            throw IOSFileError.invalid("Could not update credentials securely (Keychain OSStatus \(status))")
+        }
     }
     static func clear(_ id: String) throws {
         let status = SecItemDelete(try query(id) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw IOSFileError.invalid("Could not remove secure credentials")
+            throw IOSFileError.invalid("Could not remove secure credentials (Keychain OSStatus \(status))")
         }
     }
 }

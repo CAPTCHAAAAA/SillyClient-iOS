@@ -16,7 +16,7 @@ final class IOSInstanceStore {
     }
 
     static func identity(_ raw: String?) throws -> String {
-        guard let value = raw, value.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil else {
+        guard let value = raw, value.range(of: "^[A-Za-z0-9_-]{1,128}\\z", options: .regularExpression) != nil else {
             throw IOSFileError.invalid("An explicit valid instance identity is required")
         }
         return value

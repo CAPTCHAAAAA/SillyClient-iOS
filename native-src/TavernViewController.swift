@@ -243,12 +243,9 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
         guard let validated = try? IOSNavigationPolicy.validatedURL(url.absoluteString),
               let wv = tavernWebView else { return false }
         let url = validated
+        updateRemoteCredentials(url: url, username: username, password: password)
         let isAlreadyOnUrl = currentTavernUrl == url && wv.url.map { IOSNavigationPolicy.sameOrigin($0, url) } == true
         let isAlreadyLoadingSameUrl = (currentTavernUrl == url && wv.isLoading)
-        if !isAlreadyOnUrl && !isAlreadyLoadingSameUrl {
-            credentialOrigin = username == nil ? nil : url
-            credentials = username.map { URLCredential(user: $0, password: password ?? "", persistence: .forSession) }
-        }
         currentTavernUrl = url
         isTavernActive = true
 
@@ -351,10 +348,19 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
         if !reloadTavern() { control.endRefreshing() }
     }
 
-    public func clearTavernSession() {
-        exitImmersive()
+    func updateRemoteCredentials(url: URL, username: String?, password: String?) {
+        credentialOrigin = username == nil ? nil : url
+        credentials = username.map { URLCredential(user: $0, password: password ?? "", persistence: .forSession) }
+    }
+
+    func clearRemoteCredentials() {
         credentials = nil
         credentialOrigin = nil
+    }
+
+    public func clearTavernSession() {
+        exitImmersive()
+        clearRemoteCredentials()
         currentTavernUrl = nil
         tavernWebView?.stopLoading()
         tavernWebView?.loadHTMLString("", baseURL: nil)

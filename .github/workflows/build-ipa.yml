@@ -162,6 +162,14 @@ jobs:
           APP_PATH=web/capacitor-ui/ios/App/build/derived/Build/Products/Debug-iphonesimulator/App.app
           test -d "$APP_PATH"
           cp -R sillytavern-src "$APP_PATH/sillytavern"
+          # The simulator needs an application identity to exercise the real Keychain.
+          for COMPONENT in "$APP_PATH"/Frameworks/*.framework "$APP_PATH"/Frameworks/*.dylib; do
+            if [ -e "$COMPONENT" ]; then codesign --force --sign - "$COMPONENT"; fi
+          done
+          codesign --force --sign - --entitlements scripts/ios-simulator.entitlements "$APP_PATH"
+          codesign --display --entitlements :- "$APP_PATH" \
+            > evidence/simulator-entitlements.plist 2> evidence/simulator-codesign.log
+          codesign --verify --deep --strict "$APP_PATH"
           node scripts/run-ios-e2e.mjs "$DEVICE_UUID" "$APP_PATH"
 
       - name: Upload the unsigned build archive

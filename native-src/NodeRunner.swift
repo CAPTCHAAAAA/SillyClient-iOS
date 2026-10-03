@@ -3,6 +3,37 @@ import Darwin
 
 private typealias NodeStartFunc = @convention(c) (Int32, UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?) -> Int32
 
+struct IOSRuntimeLogFrame {
+    static let prefix = "[SILLYCLIENT_LOG_V1]"
+    static let maximumFrameBytes = 24 * 1024
+    static let maximumLineBytes = 16 * 1024
+    let instanceId: String
+    let operationId: String
+    let stream: String
+    let line: String
+
+    static func validIdentity(_ value: String) -> Bool {
+        let bytes = value.utf8
+        return (1...128).contains(bytes.count) && bytes.allSatisfy {
+            (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95
+        }
+    }
+
+    static func decode(_ raw: Data) -> IOSRuntimeLogFrame? {
+        guard raw.count <= maximumFrameBytes, raw.starts(with: prefix.utf8),
+              let value = try? JSONSerialization.jsonObject(with: Data(raw.dropFirst(prefix.utf8.count))) as? [String: Any],
+              Set(value.keys) == Set(["instanceId", "operationId", "stream", "lineBase64"]),
+              let instance = value["instanceId"] as? String, validIdentity(instance),
+              let operation = value["operationId"] as? String, validIdentity(operation),
+              let stream = value["stream"] as? String, ["stdout", "stderr"].contains(stream),
+              let encoded = value["lineBase64"] as? String,
+              encoded.utf8.count <= ((maximumLineBytes + 2) / 3) * 4,
+              let bytes = Data(base64Encoded: encoded), !bytes.isEmpty, bytes.count <= maximumLineBytes,
+              !bytes.contains(10), let line = String(data: bytes, encoding: .utf8) else { return nil }
+        return IOSRuntimeLogFrame(instanceId: instance, operationId: operation, stream: stream, line: line)
+    }
+}
+
 public final class NodeRunner {
     public static let shared = NodeRunner()
     private let queue = DispatchQueue(label: "com.sillyclient.runtime-state")
@@ -24,8 +55,11 @@ public final class NodeRunner {
     private var mailboxSources: [DispatchSourceFileSystemObject] = []
     private var pipeSource: DispatchSourceRead?
     private var lineBytes = Data()
+    private var discardingOutputLine = false
     private var logs: [String: [String]] = [:]
     private var logBytes: [String: Int] = [:]
+    private var pendingLogCount = 0
+    private var pendingLogBytes = 0
     private var logEvent: ((String, String, String) -> Void)?
     private var stateEvent: (([String: Any]) -> Void)?
     private let control: URL
@@ -81,7 +115,7 @@ public final class NodeRunner {
     func failProvision(instance: String, operation: String, error: Error) {
         queue.async {
             guard self.instanceId == instance, self.operationId == operation, self.state == "provisioning" else { return }
-            self.appendLog("Provisioning failed: \(error.localizedDescription)")
+            self.appendLog("Provisioning failed: \(error.localizedDescription)", instance: instance, operation: operation)
             self.instanceId = nil
             self.operationId = nil
             self.state = "failed"
@@ -358,14 +392,22 @@ public final class NodeRunner {
             var buffer = [UInt8](repeating: 0, count: 32768)
             let count = Darwin.read(readFd, &buffer, buffer.count)
             guard count > 0 else { return }
-            self.lineBytes.append(contentsOf: buffer.prefix(count))
+            var bytes = Data(buffer.prefix(count))
+            if self.discardingOutputLine {
+                guard let end = bytes.firstIndex(of: 10) else { return }
+                bytes.removeSubrange(...end)
+                self.discardingOutputLine = false
+            }
+            self.lineBytes.append(bytes)
             while let end = self.lineBytes.firstIndex(of: 10) {
-                let line = String(decoding: self.lineBytes.prefix(upTo: end), as: UTF8.self)
+                let line = Data(self.lineBytes.prefix(upTo: end))
                 self.lineBytes.removeSubrange(...end)
-                self.appendLog(line)
+                if line.count > 65536 { self.appendLog("[Oversized runtime log line discarded]") }
+                else { self.consumeOutputLine(line) }
             }
             if self.lineBytes.count > 65536 {
                 self.lineBytes.removeAll(keepingCapacity: true)
+                self.discardingOutputLine = true
                 self.appendLog("[Oversized runtime log line discarded]")
             }
         }
@@ -374,12 +416,34 @@ public final class NodeRunner {
         source.resume()
     }
 
-    public func appendLog(_ raw: String) {
-        let line = String(raw.prefix(16384)).trimmingCharacters(in: .newlines)
+    private func consumeOutputLine(_ raw: Data) {
+        if raw.starts(with: IOSRuntimeLogFrame.prefix.utf8) {
+            guard let frame = IOSRuntimeLogFrame.decode(raw) else {
+                appendLog("[Malformed runtime log frame discarded]")
+                return
+            }
+            appendLog(frame.line, instance: frame.instanceId, operation: frame.operationId)
+        } else {
+            appendLog(String(decoding: raw, as: UTF8.self))
+        }
+    }
+
+    public func appendLog(_ raw: String, instance id: String = "runtime", operation op: String = "") {
+        guard IOSRuntimeLogFrame.validIdentity(id), op.isEmpty || IOSRuntimeLogFrame.validIdentity(op) else { return }
+        var bytes = Data(raw.utf8.prefix(IOSRuntimeLogFrame.maximumLineBytes))
+        while !bytes.isEmpty, String(data: bytes, encoding: .utf8) == nil { bytes.removeLast() }
+        let line = (String(data: bytes, encoding: .utf8) ?? "").trimmingCharacters(in: .newlines)
         guard !line.isEmpty else { return }
+        let size = line.utf8.count
+        logLock.lock()
+        guard pendingLogCount < 256, pendingLogBytes + size <= 512 * 1024 else {
+            logLock.unlock()
+            return
+        }
+        pendingLogCount += 1
+        pendingLogBytes += size
+        logLock.unlock()
         queue.async {
-            let id = self.instanceId ?? "runtime"
-            let op = self.operationId ?? ""
             self.logLock.lock()
             var buffer = self.logs[id] ?? []
             var bytes = self.logBytes[id] ?? 0
@@ -397,6 +461,12 @@ public final class NodeRunner {
             self.logLock.unlock()
             self.logEvent?(id, op, line)
             self.outputQueue.async {
+                defer {
+                    self.logLock.lock()
+                    self.pendingLogCount -= 1
+                    self.pendingLogBytes -= size
+                    self.logLock.unlock()
+                }
                 guard self.fm.fileExists(atPath: self.control.path), let data = (line + "\n").data(using: .utf8) else { return }
                 let target = self.control.appendingPathComponent("\(id).log")
                 do {

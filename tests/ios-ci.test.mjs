@@ -36,6 +36,16 @@ test('test execution is guarded by Debug and an explicit launch argument', () =>
     assert.match(harness, /data\.count <= 65536/);
 });
 
+test('copy migration is explicitly whitelisted only in the Debug test harness', () => {
+    const harness = read('native-src/IOSDebugHarness.swift');
+    assert.match(harness, /^#if DEBUG[\s\S]*#endif\s*$/);
+    const whitelist = harness.match(/methods: Set<String> = \[([\s\S]*?)\]/)?.[1];
+    assert.ok(whitelist);
+    const methods = [...whitelist.matchAll(/"([^"]+)"/g)].map(match => match[1]);
+    assert.equal(methods.filter(method => method === 'migrateInstance').length, 1);
+    assert.match(harness, /guard let method = request\["method"\] as\? String, methods\.contains\(method\)/);
+});
+
 test('capability probe returns before creating the real console and stays isolated on foreground', () => {
     const delegate = read('native-src/AppDelegate.swift');
     const launch = delegate.slice(delegate.indexOf('func application(_ application: UIApplication, didFinishLaunching'));
@@ -55,6 +65,58 @@ test('unsigned artifact version and monotonic native build agree', () => {
     assert.ok(build >= 18);
     assert.match(workflow, /SillyClient-iOS-v1\.10\.0-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
+});
+
+test('only the Debug simulator is ad-hoc signed for actual Keychain verification', () => {
+    const workflow = read('.github/workflows/build-ipa.yml');
+    const simulator = workflow.slice(workflow.indexOf('- name: Build and verify the actual hosted simulator application'),
+        workflow.indexOf('- name: Upload the unsigned build archive'));
+    const archive = workflow.slice(workflow.indexOf('- name: Archive the unsigned physical-device binary'),
+        workflow.indexOf('- name: Build and verify the actual hosted simulator application'));
+    assert.match(archive, /CODE_SIGNING_ALLOWED=NO/);
+    assert.doesNotMatch(archive, /codesign --force|ios-simulator\.entitlements/);
+    assert.match(simulator, /Debug-iphonesimulator\/App\.app/);
+    assert.match(simulator, /codesign --force --sign - --entitlements scripts\/ios-simulator\.entitlements "\$APP_PATH"/);
+    assert.match(simulator, /for COMPONENT in "\$APP_PATH"\/Frameworks\/\*\.framework "\$APP_PATH"\/Frameworks\/\*\.dylib/);
+    assert.match(simulator, /codesign --force --sign - "\$COMPONENT"/);
+    assert.match(simulator, /codesign --verify --deep --strict/);
+    assert.doesNotMatch(simulator, /codesign --force[^\n]*--deep/);
+    assert.ok(simulator.indexOf('codesign --force') > simulator.indexOf('cp -R sillytavern-src'));
+    assert.ok(simulator.indexOf('codesign --force --sign - "$COMPONENT"')
+        < simulator.indexOf('codesign --force --sign - --entitlements'));
+    assert.ok(simulator.indexOf('codesign --verify') < simulator.indexOf('node scripts/run-ios-e2e.mjs'));
+    const entitlements = read('scripts/ios-simulator.entitlements');
+    assert.match(entitlements, /application-identifier<\/key>\s*<string>SCIOSDEBUG\.com\.sillyclient\.ios/);
+    assert.match(entitlements, /keychain-access-groups<\/key>\s*<array>\s*<string>SCIOSDEBUG\.com\.sillyclient\.ios/);
+    assert.doesNotMatch(entitlements, /get-task-allow|application-groups/);
+});
+
+test('native adapter preserves the existing console events and checks mode freshness on main', () => {
+    const plugin = read('native-src/TarvenEnvPlugin.swift');
+    const events = read('native-src/IOSRuntimeEvents.swift');
+    const load = plugin.slice(plugin.indexOf('public override func load()'), plugin.indexOf('private func perform'));
+    assert.match(load, /IOSRuntimeEvents\.log\(instance: id, operation: operation, line: line\)/);
+    assert.match(load, /DispatchQueue\.main\.async[\s\S]*IOSRuntimeEvents\.mode\(state, current: NodeRunner\.shared\.status/);
+    assert.match(load, /remoteActive: self\.viewSession\?\.2 == true \|\| self\.pendingViewSession\?\.2 == true/);
+    assert.match(events, /"message": line/);
+    assert.match(events, /value\["mode"\] = "launcher"/);
+    assert.match(events, /value\["tavernRunning"\] = event\["serverReady"\]/);
+    assert.match(plugin, /appendLog\(message, instance: current\["instanceId"\][\s\S]*operation: current\["operationId"\]/);
+});
+
+test('same-URL view reuse refreshes application credentials and matched clears happen on main', () => {
+    const controller = read('native-src/TavernViewController.swift');
+    const enter = controller.slice(controller.indexOf('public func enterImmersive'), controller.indexOf('public func exitImmersive'));
+    assert.ok(enter.indexOf('updateRemoteCredentials(url: url, username: username, password: password)')
+        < enter.indexOf('let isAlreadyOnUrl'));
+    assert.match(enter, /if isAlreadyOnUrl[\s\S]*else if !isAlreadyLoadingSameUrl/);
+    const plugin = read('native-src/TarvenEnvPlugin.swift');
+    const clear = plugin.slice(plugin.indexOf('@objc func clearRemoteBasicAuth'), plugin.indexOf('@objc func pingUrl'));
+    assert.match(clear, /try IOSRemoteCredentials\.clear\(instance\)[\s\S]*DispatchQueue\.main\.async/);
+    assert.match(clear, /current\.2, current\.0 == instance[\s\S]*clearRemoteCredentials\(\)[\s\S]*call\.resolve/);
+    const show = plugin.slice(plugin.indexOf('private func show('), plugin.indexOf('private func completeView'));
+    const browser = show.slice(show.indexOf('UIApplication.shared.open'), show.indexOf('let auth = remote'));
+    assert.match(browser, /guard self\.viewGeneration == generation[\s\S]*guard opened[\s\S]*clearTavernSession\(\)[\s\S]*self\.viewSession =/);
 });
 
 test('host capability probe really terminates and restarts HTTP workers', t => {
@@ -83,15 +145,44 @@ async function simulateDriver(scenario = 'success') {
     const documents = path.join(container, 'Documents');
     const evidence = path.resolve('evidence');
     const key = file => path.resolve(file);
-    const put = (file, value) => files.set(key(file), Buffer.isBuffer(value) ? value : Buffer.from(value));
+    const mkdir = file => {
+        let directory = key(file);
+        while (!directories.has(directory)) {
+            directories.add(directory);
+            const parent = path.dirname(directory);
+            if (parent === directory) break;
+            directory = parent;
+        }
+    };
+    const put = (file, value) => {
+        mkdir(path.dirname(file));
+        files.set(key(file), Buffer.isBuffer(value) ? value : Buffer.from(value));
+    };
     const missing = () => Object.assign(new Error('Virtual file not found'), { code: 'ENOENT' });
     const get = file => {
         if (!files.has(key(file))) throw missing();
         return files.get(key(file));
     };
+    const moveTree = (source, destination) => {
+        const prefix = key(source);
+        const target = key(destination);
+        const contains = file => file === prefix || file.startsWith(prefix + path.sep);
+        const movedFiles = [...files].filter(([file]) => contains(file));
+        const movedDirectories = [...directories].filter(contains);
+        assert.ok(movedDirectories.length > 0, 'Virtual native move source is missing');
+        for (const [file, value] of movedFiles) {
+            put(target + file.slice(prefix.length), value);
+            files.delete(file);
+        }
+        for (const directory of movedDirectories) {
+            mkdir(target + directory.slice(prefix.length));
+            directories.delete(directory);
+        }
+    };
     const asset = Buffer.from('verified virtual frontend');
     const loader = 'virtual current loader';
     const runtime = path.join(application, 'sillytavern');
+    mkdir(path.join(runtime, 'node_modules'));
     for (const name of ['server.js', 'patch-sillytavern.mjs', 'config.yaml']) put(path.join(runtime, name), name);
     put(path.join(runtime, 'ios-loader.mjs'), loader);
     put('native-src/ios-loader.mjs', loader);
@@ -108,10 +199,13 @@ async function simulateDriver(scenario = 'success') {
     let active;
     let state = 'idle';
     let acceptedStops = 0;
+    const registry = {};
+    let migrated;
+    let maintenance;
     const respond = request => {
         if (request.action === 'nativeTests') {
             return { success: true, result: { success: true,
-                results: Array.from({ length: 19 }, (_, index) => ({ name: `Virtual group ${index}`, passed: true })) } };
+                results: Array.from({ length: 22 }, (_, index) => ({ name: `Virtual group ${index}`, passed: true })) } };
         }
         if (request.action === 'tavern') {
             return { success: true, result: { ready: 'complete', hasChat: true, hasInput: true, hasClient: true,
@@ -131,7 +225,12 @@ async function simulateDriver(scenario = 'success') {
             active = { instanceId: options.instanceId, operationId: options.operationId };
             state = 'ready';
             listening = true;
-            directories.add(key(path.join(documents, 'SillyTavern')));
+            const server = path.join(documents, 'SillyTavern');
+            mkdir(server);
+            if (!registry[options.instanceId]) {
+                registry[options.instanceId] = { instanceId: options.instanceId, path: server, isTakeover: false };
+                put(path.join(documents, 'instances-registry.json'), JSON.stringify(registry));
+            }
             return success({ ready: true, ...active });
         case 'stop':
             if (options.instanceId !== active?.instanceId || options.operationId !== active?.operationId) {
@@ -153,15 +252,108 @@ async function simulateDriver(scenario = 'success') {
             }
             return success({ success: true });
         case 'exitImmersive': return success({ success: true });
+        case 'migrateInstance': {
+            assert.equal(active, undefined, 'Driver migrated before stopping its local session');
+            assert.equal(options.mode, 'copy');
+            assert.equal(options.includeSecrets, false);
+            assert.ok(options.instanceId && options.instanceId !== 'default' && options.operationId);
+            const target = path.join(documents, 'instances', options.instanceId);
+            const sourceData = path.join(options.sourcePath, 'selected-data');
+            for (const [file, value] of [...files]) {
+                if (file.startsWith(key(runtime) + path.sep)) {
+                    put(path.join(target, path.relative(runtime, file)), value);
+                } else if (file.startsWith(key(sourceData) + path.sep)) {
+                    const relative = path.relative(sourceData, file);
+                    if (!relative.split(path.sep).some(part =>
+                        ['.git', 'node_modules', 'secrets.json', 'secrets.json.enc'].includes(part))) {
+                        put(path.join(target, 'data', relative), value);
+                    }
+                }
+            }
+            mkdir(path.join(target, 'node_modules'));
+            migrated = { instanceId: options.instanceId, target, source: options.sourcePath };
+            registry[options.instanceId] = { instanceId: options.instanceId, path: target, isTakeover: false };
+            if (scenario === 'migration-registry-mismatch') registry[options.instanceId].path = path.join(documents, 'wrong-target');
+            put(path.join(documents, 'instances-registry.json'), JSON.stringify(registry));
+            if (scenario === 'migration-source-changed') put(path.join(options.sourcePath, 'config.yaml'), 'changed source\n');
+            if (scenario === 'migration-excluded-data') {
+                put(path.join(target, 'data/default-user/secrets.json'), get(path.join(sourceData, 'default-user/secrets.json')));
+            }
+            if (scenario === 'migration-auto-start') {
+                active = { instanceId: options.instanceId, operationId: options.operationId };
+                state = 'ready';
+                listening = true;
+            }
+            return success({ success: true, instanceId: options.instanceId, targetPath: target });
+        }
+        case 'scanInstanceMaintenance':
+            assert.equal(options.instanceId, migrated.instanceId);
+            maintenance = { scanId: 'virtual-scan', candidateId: 'virtual-candidate', candidateToken: 'virtual-selection-token',
+                relative: 'data/default-user/extensions/broken-bridge-fixture',
+                recoveryId: '00000000-0000-4000-8000-000000000001', applied: false, restored: false };
+            return success({ instanceId: migrated.instanceId, scanId: maintenance.scanId, warnings: [],
+                items: [{ id: maintenance.candidateId, token: maintenance.candidateToken, kind: 'broken_extension',
+                    action: 'quarantine', relativePath: maintenance.relative }] });
+        case 'applyInstanceMaintenance': {
+            assert.equal(options.instanceId, migrated.instanceId);
+            if (maintenance.applied) {
+                if (scenario === 'maintenance-scan-reused') return success({ success: true });
+                return reject('Maintenance scan expired or was already used');
+            }
+            assert.equal(options.scanId, maintenance.scanId);
+            assert.deepEqual(options.items, [{ id: maintenance.candidateId, token: maintenance.candidateToken }]);
+            const original = path.join(migrated.target, maintenance.relative);
+            maintenance.folder = path.join(migrated.target, '.sillyclient-maintenance/recovery', maintenance.recoveryId);
+            moveTree(original, path.join(maintenance.folder, 'payload'));
+            put(path.join(maintenance.folder, 'record.json'), JSON.stringify({
+                revision: 1, owner: 'sillyclient', instanceId: migrated.instanceId, recoveryId: maintenance.recoveryId,
+                relativePath: maintenance.relative, kind: 'broken_extension', action: 'quarantine', phase: 'quarantined',
+            }));
+            if (scenario === 'maintenance-payload-corrupted') put(path.join(maintenance.folder, 'payload/index.js'), 'corrupted payload\n');
+            maintenance.applied = true;
+            return success({ success: true, recoveryIds: [maintenance.recoveryId],
+                results: [{ id: maintenance.candidateId, success: true, action: 'quarantine', recoveryId: maintenance.recoveryId }] });
+        }
+        case 'listInstanceMaintenanceRecovery':
+            assert.equal(options.instanceId, migrated.instanceId);
+            if (maintenance.restored) return success({ items: [], warnings: [] });
+            maintenance.restoreToken = 'virtual-restore-token';
+            return success({ warnings: [], items: [{ recoveryId: maintenance.recoveryId, relativePath: maintenance.relative,
+                canRestore: true, token: maintenance.restoreToken }] });
+        case 'restoreInstanceMaintenance': {
+            assert.equal(options.instanceId, migrated.instanceId);
+            if (maintenance.restored) {
+                if (scenario === 'maintenance-token-reused') return success({ success: true });
+                return reject('Recovery token expired or was already used');
+            }
+            assert.equal(options.recoveryId, maintenance.recoveryId);
+            assert.equal(options.token, maintenance.restoreToken);
+            const restored = path.join(migrated.target, maintenance.relative);
+            moveTree(path.join(maintenance.folder, 'payload'), restored);
+            if (scenario === 'maintenance-restore-corrupted') put(path.join(restored, 'index.js'), 'corrupted restore\n');
+            const record = JSON.parse(get(path.join(maintenance.folder, 'record.json')).toString());
+            record.phase = 'restored';
+            put(path.join(maintenance.folder, 'record.json'), JSON.stringify(record));
+            moveTree(maintenance.folder, path.join(migrated.target, '.sillyclient-maintenance/history', maintenance.recoveryId));
+            maintenance.restored = true;
+            return success({ success: true, recoveryId: maintenance.recoveryId, relativePath: maintenance.relative });
+        }
         default: throw new Error(`Unexpected virtual native method: ${request.method}`);
         }
     };
     const fakeFs = {
-        mkdirSync(file) { directories.add(key(file)); },
+        mkdirSync(file) { mkdir(file); },
         existsSync(file) { return files.has(key(file)) || directories.has(key(file)); },
         readFileSync(file, encoding) { const value = get(file); return encoding ? value.toString(encoding) : value; },
         writeFileSync(file, value) { put(file, value); },
-        statSync(file) { return { size: get(file).length, isFile: () => true }; },
+        statSync(file) {
+            const directory = directories.has(key(file));
+            return { size: directory ? 0 : get(file).length, isFile: () => !directory, isDirectory: () => directory };
+        },
+        realpathSync(file) {
+            if (!files.has(key(file)) && !directories.has(key(file))) throw missing();
+            return key(file);
+        },
         copyFileSync(source, destination) { put(destination, get(source)); },
         rmSync(file, options) {
             assert.equal(options.recursive, undefined, 'Driver attempted a recursive deletion');
@@ -250,13 +442,19 @@ async function simulateDriver(scenario = 'success') {
 test('real simulator driver completes all lifecycle stages using isolated protocol fixtures', async () => {
     const actual = await simulateDriver();
     assert.equal(actual.error, undefined, actual.error?.message);
-    assert.equal(actual.report.results.length, 16);
+    assert.equal(actual.report.results.length, 22);
     assert.ok(actual.report.results.every(result => result.passed));
-    assert.equal(actual.report.results.find(result => result.name.includes('native filesystem')).actual.groups, 19);
+    assert.equal(actual.report.results.find(result => result.name.includes('native filesystem')).actual.groups, 22);
     const remoteRejection = actual.report.results.find(result => result.name.includes('Remote navigation')).actual;
     assert.equal(remoteRejection.rejected, true);
     assert.equal(remoteRejection.instanceId, 'default');
     assert.ok(remoteRejection.homepageBytes > 0);
+    const copy = actual.report.results.find(result => result.name.includes('Actual copy migration')).actual;
+    assert.ok(copy.instanceId.startsWith('simulator-copy-'));
+    assert.match(copy.chatSha256, /^[0-9a-f]{64}$/);
+    assert.equal(copy.verifiedSourceFiles, 11);
+    assert.equal(copy.portClosedAfterStop, true);
+    assert.equal(actual.report.results.at(-1).actual.portClosedAfterStop, true);
     assert.equal(actual.acceptedStops, 2);
     assert.equal(actual.listening, false);
     assert.equal(actual.report.physicalDeviceTested, false);
@@ -270,6 +468,14 @@ for (const [scenario, stage, message] of [
     ['stale-stop-success', 'stale operation stop', /unexpectedly accepted/],
     ['process-exit', 'embedded server startup', /application exited before replying/],
     ['rejection-timeout', 'stale operation stop', /Timed out waiting/],
+    ['migration-source-changed', 'Actual copy migration', /Source fixture changed/],
+    ['migration-excluded-data', 'Actual copy migration', /Excluded migration data was copied/],
+    ['migration-registry-mismatch', 'Actual copy migration', /Migration registry path differs/],
+    ['migration-auto-start', 'Actual copy migration', /listener open/],
+    ['maintenance-payload-corrupted', 'maintenance quarantines', /Quarantined extension hash changed/],
+    ['maintenance-scan-reused', 'scan selections are single-use', /unexpectedly accepted/],
+    ['maintenance-restore-corrupted', 'recovery restores', /Restored extension hash changed/],
+    ['maintenance-token-reused', 'Recovery tokens are single-use', /unexpectedly accepted/],
 ]) {
     test(`simulator driver fails instead of reporting success: ${scenario}`, async () => {
         const actual = await simulateDriver(scenario);

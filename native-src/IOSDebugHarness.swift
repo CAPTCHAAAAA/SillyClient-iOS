@@ -13,7 +13,7 @@ public final class IOSDebugHarness {
         "getInstanceInfo", "provisionAndStart", "stop", "returnToTavern", "enterImmersive",
         "exitImmersive", "closeTavern", "reloadTavern", "setPullToRefresh", "openExternalUrl",
         "scanInstanceMaintenance", "applyInstanceMaintenance", "listInstanceMaintenanceRecovery",
-        "restoreInstanceMaintenance", "uninstallInstance", "getLogs"
+        "restoreInstanceMaintenance", "migrateInstance", "uninstallInstance", "getLogs"
     ]
 
     public init() {
@@ -38,7 +38,7 @@ public final class IOSDebugHarness {
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("request.json")),
               data.count <= 65536,
               let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let id = request["id"] as? String, id.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil,
+              let id = request["id"] as? String, id.range(of: "^[A-Za-z0-9_-]{1,80}\\z", options: .regularExpression) != nil,
               id != lastRequest else { return }
         lastRequest = id
         if request["action"] as? String == "nativeTests" {
