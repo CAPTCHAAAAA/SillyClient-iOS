@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 40
     env:
       APP_VERSION: 1.10.0
-      SILLYCLIENT_TEST_TMP: ${{ runner.temp }}/sillyclient-tests
+      SILLYCLIENT_TEST_TMP: /tmp/sillyclient-tests-${{ github.run_id }}
 
     steps:
       - name: Check out source
