@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
@@ -12,30 +13,75 @@ const evidence = path.resolve('evidence');
 fs.mkdirSync(evidence, { recursive: true });
 const results = [];
 let documents;
+let container;
+let appPid;
+let commandInFlight = false;
+const instanceId = 'default';
+const port = 8000;
+const origin = `http://127.0.0.1:${port}`;
+const firstOperation = `simulator-${randomUUID()}`;
+const secondOperation = `simulator-${randomUUID()}`;
 const simctl = (...args) => execFileSync('xcrun', ['simctl', ...args], {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120000,
 });
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
+function launch(argument) {
+    const output = simctl('launch', device, bundleId, argument);
+    const pid = output.trim().match(/:\s*(\d+)\s*$/);
+    assert.ok(pid, 'Simulator launch did not report the application PID');
+    appPid = Number(pid[1]);
+}
+
+function assertAppAlive() {
+    if (!appPid) return;
+    try { process.kill(appPid, 0); }
+    catch (error) {
+        if (error.code === 'ESRCH') throw new Error(`Simulator application exited before replying (PID ${appPid})`);
+        throw error;
+    }
+}
+
 async function waitForFile(file, timeout = 10000) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
-        try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+        assertAppAlive();
+        try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+        catch (error) {
+            if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+        }
         await sleep(100);
     }
     throw new Error(`Timed out waiting for ${path.basename(file)}`);
 }
 
+async function nativeRequest(method, options = {}, action = 'call', timeout = 10000) {
+    assert.equal(commandInFlight, false, 'The single-request debug bridge requires serialized commands');
+    commandInFlight = true;
+    try {
+        const id = randomUUID();
+        const directory = path.join(documents, 'ios-test');
+        fs.mkdirSync(directory, { recursive: true });
+        const temporary = path.join(directory, 'request.tmp');
+        fs.writeFileSync(temporary, JSON.stringify({ id, action, method, options }));
+        fs.renameSync(temporary, path.join(directory, 'request.json'));
+        return await waitForFile(path.join(directory, `${id}.json`), timeout);
+    } finally {
+        commandInFlight = false;
+    }
+}
+
 async function command(method, options = {}, action = 'call', timeout = 10000) {
-    const id = randomUUID();
-    const directory = path.join(documents, 'ios-test');
-    fs.mkdirSync(directory, { recursive: true });
-    const temporary = path.join(directory, 'request.tmp');
-    fs.writeFileSync(temporary, JSON.stringify({ id, action, method, options }));
-    fs.renameSync(temporary, path.join(directory, 'request.json'));
-    const response = await waitForFile(path.join(directory, `${id}.json`), timeout);
-    if (!response.success) throw new Error(response.error || `${method} rejected`);
+    const response = await nativeRequest(method, options, action, timeout);
+    if (response.success !== true) throw new Error(response.error || `${method} rejected`);
     return response.result;
+}
+
+async function rejectedCommand(method, options) {
+    const response = await nativeRequest(method, options);
+    assert.equal(response.success, false, `${method} unexpectedly accepted an obsolete or unavailable session`);
+    assert.ok(typeof response.error === 'string' && response.error.length > 0, 'Native rejection omitted its error');
+    return { rejected: true, error: response.error };
 }
 
 async function check(name, callback) {
@@ -60,31 +106,142 @@ function get(url) {
             const chunks = [];
             response.on('data', chunk => chunks.push(chunk));
             response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks) }));
+            response.once('error', reject);
+            response.once('aborted', () => reject(new Error('HTTP response was aborted')));
         });
         request.once('error', reject);
         request.setTimeout(3000, () => request.destroy(new Error('HTTP response timed out')));
     });
 }
 
+function portIsClosed() {
+    return new Promise((resolve, reject) => {
+        const socket = net.createConnection({ host: '127.0.0.1', port });
+        socket.once('connect', () => { socket.destroy(); resolve(false); });
+        socket.once('error', error => {
+            if (error.code === 'ECONNREFUSED') resolve(true);
+            else reject(error);
+        });
+        socket.setTimeout(1000, () => socket.destroy(new Error('Listener closure could not be confirmed')));
+    });
+}
+
+async function verifyStopped() {
+    const deadline = Date.now() + 10000;
+    let closed = false;
+    while (Date.now() < deadline) {
+        assertAppAlive();
+        closed = await portIsClosed();
+        if (closed) break;
+        await sleep(100);
+    }
+    assert.equal(closed, true, 'Native stop left the real listener open');
+    await sleep(250);
+    assert.equal(await portIsClosed(), true, 'A delayed worker reopened the stopped port');
+    const status = await command('getStatus');
+    assert.equal(status.serverReady, false);
+    assert.equal(status.state, 'stopped');
+    assert.equal(status.instanceId, undefined);
+    assert.equal(status.operationId, undefined);
+    return { port, portClosedAfterStop: true, state: status.state };
+}
+
+async function verifyReady(operationId) {
+    const status = await command('getStatus');
+    assert.equal(status.serverReady, true);
+    assert.equal(status.instanceId, instanceId);
+    assert.equal(status.operationId, operationId);
+    assert.equal(status.port, port);
+    assert.equal(new URL(status.url).origin, origin);
+    const response = await get(`${origin}/`);
+    assert.equal(response.status, 200);
+    assert.ok(response.body.includes(Buffer.from('SillyTavern')));
+    return { instanceId, operationId, port, homepageBytes: response.body.length };
+}
+
+async function verifyTavern() {
+    const deadline = Date.now() + 30000;
+    let actual;
+    while (Date.now() < deadline) {
+        actual = await command(undefined, {}, 'tavern');
+        if (actual?.hasChat && actual?.hasInput && actual?.hasClient && actual.ready === 'complete') break;
+        await sleep(300);
+    }
+    assert.ok(actual?.hasChat && actual?.hasInput && actual?.hasClient && actual.ready === 'complete',
+        'Real Tavern JavaScript and DOM did not become ready');
+    assert.equal(new URL(actual.url).origin, origin);
+    return actual;
+}
+
+async function waitForBridge() {
+    const deadline = Date.now() + 30000;
+    let lastError;
+    while (Date.now() < deadline) {
+        try {
+            const platform = await command('getPlatform', {}, 'call', 3000);
+            assert.equal(platform.platform, 'ios');
+            return platform;
+        } catch (error) {
+            lastError = error;
+            assertAppAlive();
+            await sleep(200);
+        }
+    }
+    throw lastError || new Error('The real Capacitor bridge did not become available');
+}
+
 try {
+    await check('Packaged runtime contains the current loader and verified frontend', async () => {
+        const runtime = path.join(appPath, 'sillytavern');
+        for (const name of ['server.js', 'ios-loader.mjs', 'patch-sillytavern.mjs', 'config.yaml', 'dist/ios-frontend/manifest.json']) {
+            assert.equal(fs.statSync(path.join(runtime, name)).isFile(), true, `Missing packaged runtime file: ${name}`);
+        }
+        const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+        const loaderSha256 = digest(path.join(runtime, 'ios-loader.mjs'));
+        assert.equal(loaderSha256, digest('native-src/ios-loader.mjs'), 'Packaged loader differs from the checked-out source');
+        const manifest = JSON.parse(fs.readFileSync(path.join(runtime, 'dist/ios-frontend/manifest.json'), 'utf8'));
+        const version = JSON.parse(fs.readFileSync(path.join(runtime, 'package.json'), 'utf8')).version;
+        assert.equal(manifest.format, 1);
+        assert.equal(manifest.version, version);
+        const assetRoot = path.resolve(runtime, 'dist/ios-frontend');
+        for (const asset of manifest.assets) {
+            const file = path.resolve(assetRoot, asset.name);
+            const relative = path.relative(assetRoot, file);
+            assert.ok(relative && !path.isAbsolute(relative) && relative !== '..'
+                && !relative.startsWith(`..${path.sep}`), 'Frontend manifest path escaped the prepared directory');
+            assert.equal(fs.statSync(file).size, asset.bytes, `Packaged frontend size differs: ${asset.name}`);
+            assert.equal(digest(file), asset.sha256, `Packaged frontend digest differs: ${asset.name}`);
+        }
+        assert.ok(manifest.assets.some(asset => asset.name === 'lib.js' && asset.bytes > 0));
+        return { loaderSha256, serverVersion: version, frontendAssets: manifest.assets.length };
+    });
     try { simctl('boot', device); } catch {}
     simctl('bootstatus', device, '-b');
     simctl('install', device, appPath);
-    documents = path.join(simctl('get_app_container', device, bundleId, 'data').trim(), 'Documents');
-    simctl('launch', device, bundleId, '--sillyclient-runtime-probe');
+    container = simctl('get_app_container', device, bundleId, 'data').trim();
+    documents = path.join(container, 'Documents');
+    const runtimePaths = ['SillyTavern', 'instances', 'instances-registry.json'];
+    for (const relative of runtimePaths) {
+        assert.equal(fs.existsSync(path.join(documents, relative)), false, 'Simulator verification requires a fresh application sandbox');
+    }
+    fs.rmSync(path.join(documents, 'ios-test', 'runtime-probe.json'), { force: true });
+    launch('--sillyclient-runtime-probe');
     await check('Actual NodeMobile worker HTTP, termination, and restart capability', async () => {
         const result = await waitForFile(path.join(documents, 'ios-test', 'runtime-probe.json'), 45000);
         fs.writeFileSync(path.join(evidence, 'node-mobile-runtime-probe.json'), JSON.stringify(result, null, 2));
         assert.equal(result.success, true, result.error);
         assert.equal(result.cycles.length, 2);
         assert.ok(result.cycles.every(cycle => cycle.httpStatus === 200 && cycle.portClosedAfterTermination));
+        for (const relative of runtimePaths) {
+            assert.equal(fs.existsSync(path.join(documents, relative)), false, 'Capability probe unexpectedly provisioned a normal instance');
+        }
         return result;
     });
     simctl('terminate', device, bundleId);
-    simctl('launch', device, bundleId, '--sillyclient-test');
-    await sleep(5000);
+    appPid = undefined;
+    launch('--sillyclient-test');
     await check('Real Capacitor native bridge and application version', async () => {
-        assert.equal((await command('getPlatform')).platform, 'ios');
+        await waitForBridge();
         const version = await command('getAppVersion');
         assert.equal(version.version, '1.10.0');
         return version;
@@ -92,50 +249,105 @@ try {
     await check('Actual native filesystem, URL policy, and archive module regressions', async () => {
         const result = await command(undefined, {}, 'nativeTests', 30000);
         fs.writeFileSync(path.join(evidence, 'native-module-results.json'), JSON.stringify(result, null, 2));
-        assert.equal(result.success, true, JSON.stringify(result.results.filter(item => !item.passed)));
-        return result;
+        assert.ok(Array.isArray(result.results) && result.results.length > 0, 'Native tests did not report their groups');
+        assert.equal(result.success, true, JSON.stringify(result.results.filter(item => item.passed !== true)));
+        assert.ok(result.results.every(item => item.passed === true), 'One or more real Swift test groups failed');
+        return { groups: result.results.length, ...result };
     });
     await check('Real embedded server startup through the native plugin', async () => {
-        const result = await command('provisionAndStart', { instanceId: 'default', port: 8000 }, 'call', 100000);
+        const result = await command('provisionAndStart', { instanceId, port, operationId: firstOperation }, 'call', 120000);
         assert.equal(result.ready, true);
-        const response = await get('http://127.0.0.1:8000/');
-        assert.equal(response.status, 200);
-        assert.ok(response.body.includes(Buffer.from('SillyTavern')));
-        return { ready: result.ready, homepageBytes: response.body.length };
+        assert.equal(result.instanceId, instanceId);
+        assert.equal(result.operationId, firstOperation);
+        return verifyReady(firstOperation);
+    });
+    await check('Remote navigation cannot replace an active local session', async () => {
+        const rejection = await rejectedCommand('enterImmersive', {
+            instanceId: 'remote-hardening-test',
+            url: 'https://example.test/',
+        });
+        const local = await verifyReady(firstOperation);
+        return { ...rejection, ...local };
     });
     await check('Served frontend bytes match the build-time manifest', async () => {
         const manifest = JSON.parse(fs.readFileSync(path.join(appPath, 'sillytavern', 'dist', 'ios-frontend', 'manifest.json')));
         const asset = manifest.assets.find(item => item.name === 'lib.js');
         assert.ok(asset);
-        const response = await get('http://127.0.0.1:8000/lib.js');
+        const response = await get(`${origin}/lib.js`);
         assert.equal(response.status, 200);
+        assert.equal(response.body.length, asset.bytes);
         assert.equal(createHash('sha256').update(response.body).digest('hex'), asset.sha256);
         return { bytes: response.body.length, sha256: asset.sha256 };
     });
     await check('Real Tavern WebView loads the embedded server DOM', async () => {
-        await command('enterImmersive', { instanceId: 'default', url: 'http://127.0.0.1:8000/' });
-        const deadline = Date.now() + 30000;
-        let actual;
-        while (Date.now() < deadline) {
-            actual = await command(undefined, {}, 'tavern');
-            if (actual?.hasChat && actual?.hasInput && actual?.hasClient && actual.ready === 'complete') break;
-            await sleep(300);
-        }
-        assert.ok(actual?.hasChat && actual?.hasInput && actual?.hasClient && actual.ready === 'complete',
-            'Real Tavern JavaScript and DOM did not become ready');
-        assert.ok(actual.url.startsWith('http://127.0.0.1:8000/'));
-        return actual;
+        await command('enterImmersive', { instanceId, url: `${origin}/` });
+        return verifyTavern();
+    });
+    await check('Return to Tavern reopens the current ready session', async () => {
+        await command('exitImmersive');
+        assert.equal((await command('returnToTavern')).success, true);
+        return verifyTavern();
+    });
+    await check('A second start cannot replace a reserved running session', async () => {
+        const rejection = await rejectedCommand('provisionAndStart', {
+            instanceId: 'obsolete-instance', operationId: `simulator-${randomUUID()}`, port,
+        });
+        assert.equal(fs.existsSync(path.join(documents, 'instances', 'obsolete-instance')), false,
+            'Rejected startup still provisioned an instance');
+        await verifyReady(firstOperation);
+        return rejection;
+    });
+    await check('Native stop closes the actual server port', async () => {
+        assert.equal((await command('stop', { instanceId, operationId: firstOperation }, 'call', 25000)).success, true);
+        return verifyStopped();
+    });
+    await check('Return to Tavern rejects a stopped session', async () => {
+        return rejectedCommand('returnToTavern', {});
+    });
+    await check('The existing instance restarts on the same port in the same application', async () => {
+        const result = await command('provisionAndStart', { instanceId, port, operationId: secondOperation }, 'call', 120000);
+        assert.equal(result.ready, true);
+        assert.equal(result.instanceId, instanceId);
+        assert.equal(result.operationId, secondOperation);
+        await command('returnToTavern');
+        await verifyTavern();
+        return verifyReady(secondOperation);
+    });
+    await check('A stale operation stop cannot terminate the restarted listener', async () => {
+        const rejection = await rejectedCommand('stop', { instanceId, operationId: firstOperation });
+        await verifyReady(secondOperation);
+        return rejection;
+    });
+    await check('A different instance stop cannot terminate the current listener', async () => {
+        const rejection = await rejectedCommand('stop', { instanceId: 'obsolete-instance', operationId: secondOperation });
+        await verifyReady(secondOperation);
+        return rejection;
+    });
+    await check('The restarted session also stops and closes its listener', async () => {
+        await command('stop', { instanceId, operationId: secondOperation }, 'call', 25000);
+        return verifyStopped();
     });
 } finally {
-    if (documents) {
-        for (const relative of ['server-failed.json', 'server-ready.txt', 'SillyTavern/data/server.log']) {
-            const file = path.join(documents, relative);
-            if (fs.existsSync(file)) fs.copyFileSync(file, path.join(evidence, relative.replaceAll('/', '-')));
+    const diagnosticRoots = [
+        [documents, ['server-failed.json', 'server-ready.txt', 'SillyTavern/data/server.log']],
+        [container, ['status.json', 'default.log', 'default.log.1', 'runtime.log', 'runtime.log.1']
+            .map(name => `Library/Application Support/SillyClient/runtime/${name}`)],
+    ];
+    for (const [root, relatives] of diagnosticRoots) {
+        if (!root) continue;
+        for (const relative of relatives) {
+            try {
+                const file = path.join(root, relative);
+                if (fs.existsSync(file)) fs.copyFileSync(file, path.join(evidence, relative.replaceAll('/', '-')));
+            } catch (error) {
+                console.warn(`Diagnostic file collection failed (${relative}):`, error.message);
+            }
         }
     }
     try {
         fs.writeFileSync(path.join(evidence, 'simulator-system.log'),
-            simctl('spawn', device, 'log', 'show', '--predicate', 'processImagePath contains "App"', '--last', '5m'));
+            simctl('spawn', device, 'log', 'show', '--predicate',
+                'process == "App" OR process == "runningboardd" OR process == "ReportCrash"', '--last', '10m'));
     } catch (error) { console.warn('System log collection failed:', error.message); }
     try { simctl('terminate', device, bundleId); } catch {}
 }

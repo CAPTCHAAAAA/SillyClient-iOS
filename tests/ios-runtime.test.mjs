@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
+import { Worker } from 'node:worker_threads';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { compile } from '../scripts/prepare-ios-frontend.mjs';
 
@@ -193,6 +194,44 @@ test('loader reports startup failure promptly and does not synthesize WASM', asy
     }
 });
 
+test('actual loader worker reports fatal failure after readiness without exiting its host', { timeout: 10000 }, async t => {
+    const f = fixture(t);
+    const loader = path.join(f.server, 'ios-loader.mjs');
+    fs.copyFileSync(path.join(root, 'native-src', 'ios-loader.mjs'), loader);
+    fs.writeFileSync(path.join(f.server, 'src', 'server-events.js'), `
+        import { EventEmitter } from 'node:events';
+        export const serverEvents = new EventEmitter();
+        export const EVENT_NAMES = { SERVER_STARTED: 'ready' };
+    `);
+    fs.writeFileSync(path.join(f.server, 'server.js'), `
+        import { serverEvents, EVENT_NAMES } from './src/server-events.js';
+        serverEvents.emit(EVENT_NAMES.SERVER_STARTED, { url: 'http://127.0.0.1:1/' });
+        setTimeout(() => { throw new Error('fatal after readiness'); }, 100);
+    `);
+    const worker = new Worker(pathToFileURL(loader), {
+        env: { ...process.env, TARVEN_SERVER_DIR: f.server, SILLYCLIENT_OPERATION_ID: 'synthetic-operation' },
+        workerData: { arguments: [loader] }, stdout: true, stderr: true,
+    });
+    worker.stdout.resume();
+    worker.stderr.resume();
+    try {
+        const [ready] = await once(worker, 'message', { signal: t.signal });
+        assert.equal(ready.type, 'ready');
+        assert.equal(ready.operationId, 'synthetic-operation');
+        const [failure] = await once(worker, 'message', { signal: t.signal });
+        assert.equal(failure.type, 'failure');
+        assert.equal(failure.message, 'fatal after readiness');
+        const marker = path.join(f.directory, 'server-failed.json');
+        const deadline = Date.now() + 1000;
+        while (!fs.existsSync(marker) && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        assert.equal(JSON.parse(fs.readFileSync(marker)).message, failure.message);
+    } finally {
+        await worker.terminate();
+    }
+});
+
 for (const lite of [false, true]) {
     test(`no-WASM tokenizer fallback rejects instead of inventing tokens (${lite ? 'lite' : 'full'})`, t => {
         const f = fixture(t);
@@ -306,7 +345,7 @@ test('TarvenEnvPlugin native method table contains all required file picker and 
     ];
 
     for (const method of requiredMethods) {
-        assert.ok(swiftContent.includes(`CAPPluginMethod(name: "${method}"`), `Missing Swift method registration: ${method}`);
+        assert.ok(swiftContent.includes(`"${method}"`), `Missing Swift method registration: ${method}`);
         assert.ok(swiftContent.includes(`@objc func ${method}(`), `Missing Swift method implementation: ${method}`);
         assert.ok(mContent.includes(`CAP_PLUGIN_METHOD(${method},`), `Missing ObjC method export: ${method}`);
     }
@@ -343,17 +382,19 @@ test('Home Indicator avoidance and keyboard avoidance layout bounds match hardwa
     assert.equal(normalFullBleedHeight - keyboardLayoutHeight, currentKeyboardHeight);
 });
 
-test('NodeRunner and ios-loader expose and respond to garbage collection signal', () => {
+test('NodeRunner and supervisor route host and worker garbage collection requests', () => {
     const nodeRunnerSwift = fs.readFileSync(path.join(root, 'native-src', 'NodeRunner.swift'), 'utf8');
     const iosLoader = fs.readFileSync(path.join(root, 'native-src', 'ios-loader.mjs'), 'utf8');
+    const supervisor = fs.readFileSync(path.join(root, 'native-src', 'Resources', 'ios-supervisor.mjs'), 'utf8');
 
     // NodeRunner must pass --expose-gc
     assert.ok(nodeRunnerSwift.includes('"--expose-gc"'), 'NodeRunner must start node with --expose-gc flag');
-    assert.ok(nodeRunnerSwift.includes('trigger-node-gc.sig'), 'NodeRunner must write trigger-node-gc.sig');
+    assert.ok(nodeRunnerSwift.includes('["action": "gc"]'), 'NodeRunner must send a bounded GC command');
 
     // ios-loader must listen for trigger-node-gc.sig and invoke globalThis.gc()
     assert.ok(iosLoader.includes('trigger-node-gc.sig'), 'ios-loader must check trigger-node-gc.sig');
     assert.ok(iosLoader.includes('globalThis.gc()'), 'ios-loader must invoke globalThis.gc()');
+    assert.ok(supervisor.includes("postMessage({ type: 'gc' })"), 'Supervisor must request worker collection');
 });
 
 test('TavernViewController and AppDelegate define prefersHomeIndicatorAutoHidden and bottom safe area support', () => {

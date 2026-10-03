@@ -16,6 +16,14 @@ import fs from 'node:fs';
 import util from 'node:util';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isMainThread, parentPort, workerData } from 'node:worker_threads';
+
+if (!isMainThread && workerData?.arguments) {
+    process.argv = [process.execPath, ...workerData.arguments];
+    parentPort.on('message', message => {
+        if (message.type === 'gc' && typeof globalThis.gc === 'function') globalThis.gc();
+    });
+}
 
 // 注入 SafeTextDecoder，彻底消除 NodeMobile (small-icu) 下对 fatal: true 的 ERR_NO_ICU 报错
 if (typeof globalThis.TextDecoder !== 'undefined') {
@@ -63,7 +71,7 @@ console.log('[ios-loader] ==========================================');
 
 // 保持 libuv 事件循环长久活跃，并响应原生内存警戒 GC 触发信号
 const statusDirectory = path.dirname(process.env.TARVEN_SERVER_DIR || fileURLToPath(new URL('.', import.meta.url)));
-const keepAliveTimer = setInterval(() => {
+const keepAliveTimer = isMainThread ? setInterval(() => {
     try {
         const sigFile = path.join(statusDirectory, 'trigger-node-gc.sig');
         if (fs.existsSync(sigFile)) {
@@ -74,14 +82,15 @@ const keepAliveTimer = setInterval(() => {
             }
         }
     } catch (_) {}
-}, 2000);
+}, 2000) : null;
 let startupFailed = false;
 let serviceReady = false;
 
-function reportStartupFailure(error) {
-    if (serviceReady || startupFailed) return;
+function reportRuntimeFailure(error) {
+    if (startupFailed || (serviceReady && isMainThread)) return;
     startupFailed = true;
     const message = String(error?.message || error || 'Unknown startup failure').slice(0, 2000);
+    parentPort?.postMessage({ type: 'failure', message });
     try {
         fs.writeFileSync(path.join(statusDirectory, 'server-failed.json'), JSON.stringify({ message }));
     } catch (writeError) {
@@ -100,17 +109,17 @@ process.exit = function(code) {
     if (code !== 0) {
         console.log(new Error('[ios-loader] Stacktrace for non-zero exit:').stack);
     }
-    reportStartupFailure(new Error(`SillyTavern exited before becoming ready (code ${code}).`));
+    reportRuntimeFailure(new Error(`SillyTavern requested exit (code ${code}).`));
 };
 
 process.on('uncaughtException', (err) => {
     console.log('[ios-loader] 捕获未处理异常 (已拦截防闪退):', err && err.message, err && err.stack);
-    reportStartupFailure(err);
+    reportRuntimeFailure(err);
 });
 
 process.on('unhandledRejection', (reason) => {
     console.log('[ios-loader] 捕获未处理 Promise 拒绝:', reason && (reason.stack || reason.message || reason));
-    reportStartupFailure(reason);
+    reportRuntimeFailure(reason);
 });
 
 // 计算当前脚本所在目录
@@ -167,6 +176,7 @@ try {
         serverEvents.on(EVENT_NAMES.SERVER_STARTED, ({ url }) => {
             if (startupFailed) return;
             serviceReady = true;
+            parentPort?.postMessage({ type: 'ready', operationId: process.env.SILLYCLIENT_OPERATION_ID });
             console.log(`[ios-loader] 🎉 SillyTavern 官方服务真正监听就绪: ${url}`);
             const candidates = [
                 process.env.DATA_DIR,
@@ -221,9 +231,9 @@ if (fs.existsSync(serverEntry)) {
         console.log('[ios-loader] SillyTavern server entry import complete, background startup in progress...');
     } catch (e) {
         console.log('[ios-loader] 加载 server.js 遇到严重错误:', e && e.message, e && e.stack);
-        reportStartupFailure(e);
+        reportRuntimeFailure(e);
     }
 } else {
     console.log(`[ios-loader] 错误: 未能在 ${serverEntry} 找到 SillyTavern server.js`);
-    reportStartupFailure(new Error('SillyTavern server.js is missing.'));
+    reportRuntimeFailure(new Error('SillyTavern server.js is missing.'));
 }

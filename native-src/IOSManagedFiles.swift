@@ -30,6 +30,12 @@ struct IOSFileSnapshot: Equatable {
     let contentDigest: String
     let bytes: Int64
     let guardValue: IOSFileGuard
+    let observations: [IOSFileObservation]
+}
+
+struct IOSFileObservation: Equatable {
+    let relative: String
+    let value: IOSFileGuard
 }
 
 final class IOSInspectionBudget {
@@ -100,22 +106,32 @@ final class IOSManagedFiles {
 
     func guardValue(_ url: URL) throws -> IOSFileGuard { try rawGuard(checked(url)) }
 
-    func children(_ directory: URL, limit: Int = 8192) throws -> [URL] {
+    func boundedChildren(_ directory: URL, limit: Int) throws -> (items: [URL], truncated: Bool) {
+        guard limit >= 0 else { throw IOSFileError.invalid("Invalid directory entry limit") }
         let safe = try checked(directory)
-        guard try rawGuard(safe).isDirectory, let handle = opendir(safe.path) else {
+        let before = try rawGuard(safe)
+        guard before.isDirectory, let handle = opendir(safe.path) else {
             throw IOSFileError.invalid("Cannot enumerate the managed directory")
         }
         defer { closedir(handle) }
         var result: [URL] = []
+        var truncated = false
         while let entry = readdir(handle) {
             let name = withUnsafePointer(to: &entry.pointee.d_name) {
                 $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) { String(cString: $0) }
             }
             if name == "." || name == ".." { continue }
-            guard result.count < limit else { throw IOSFileError.invalid("Directory entry limit reached") }
+            if result.count == limit { truncated = true; break }
             result.append(safe.appendingPathComponent(name))
         }
-        return result.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard try rawGuard(safe) == before else { throw IOSFileError.invalid("Directory changed during enumeration") }
+        return (result.sorted { $0.lastPathComponent < $1.lastPathComponent }, truncated)
+    }
+
+    func children(_ directory: URL, limit: Int = 8192) throws -> [URL] {
+        let result = try boundedChildren(directory, limit: limit)
+        guard !result.truncated else { throw IOSFileError.invalid("Directory entry limit reached") }
+        return result.items
     }
 
     func data(_ file: URL, maximum: Int = 1024 * 1024, budget: IOSInspectionBudget? = nil) throws -> Data {
@@ -153,26 +169,30 @@ final class IOSManagedFiles {
         return value
     }
 
-    func snapshot(_ file: URL, budget: IOSInspectionBudget = IOSInspectionBudget()) throws -> IOSFileSnapshot {
+    func snapshot(_ file: URL, budget: IOSInspectionBudget = IOSInspectionBudget(),
+                  maximumBytes: Int64 = 128 * 1024 * 1024, cancelled: () throws -> Void = {}) throws -> IOSFileSnapshot {
         let original = try checked(file)
         let rootGuard = try rawGuard(original)
         var digest = SHA256()
         var content = SHA256()
         var entries = 0
         var total: Int64 = 0
+        var observations: [IOSFileObservation] = []
         func visit(_ current: URL, depth: Int) throws {
+            try cancelled()
             entries += 1
             guard entries <= 8192, depth <= 64 else { throw IOSFileError.invalid("Inspection tree limit reached") }
             try budget.spend(entries: 1)
             _ = try checked(current)
             let before = try rawGuard(current)
             let relative = current == original ? "." : String(current.path.dropFirst(original.path.count + 1))
+            observations.append(IOSFileObservation(relative: relative, value: before))
             digest.update(data: Data("\(relative)\0\(before.fingerprint)\0".utf8))
             content.update(data: Data("\(relative)\0\(before.isDirectory)\0".utf8))
             if before.isDirectory {
                 for child in try children(current, limit: 8192 - entries) { try visit(child, depth: depth + 1) }
             } else {
-                guard before.size >= 0, before.size <= 128 * 1024 * 1024 - total else {
+                guard before.size >= 0, before.size <= maximumBytes - total else {
                     throw IOSFileError.invalid("Inspection byte limit reached")
                 }
                 let descriptor = open(current.path, O_RDONLY | O_NOFOLLOW)
@@ -184,9 +204,11 @@ final class IOSManagedFiles {
                 }
                 var buffer = [UInt8](repeating: 0, count: 32768)
                 while true {
+                    try cancelled()
                     let count = Darwin.read(descriptor, &buffer, buffer.count)
                     if count == 0 { break }
-                    guard count > 0, count <= 128 * 1024 * 1024 - total else {
+                    if count < 0 && errno == EINTR { continue }
+                    guard count > 0, Int64(count) <= maximumBytes - total else {
                         throw IOSFileError.invalid("Inspection byte limit reached")
                     }
                     try budget.spend(bytes: Int64(count))
@@ -201,7 +223,99 @@ final class IOSManagedFiles {
         try visit(original, depth: 0)
         guard try rawGuard(original) == rootGuard else { throw IOSFileError.invalid("Inspection root changed") }
         return IOSFileSnapshot(digest: Self.hex(digest.finalize()), contentDigest: Self.hex(content.finalize()),
-            bytes: total, guardValue: rootGuard)
+            bytes: total, guardValue: rootGuard, observations: observations)
+    }
+
+    func validate(_ snapshot: IOSFileSnapshot, at file: URL) throws {
+        let original = try checked(file)
+        for observation in snapshot.observations {
+            let item = observation.relative == "." ? original : original.appendingPathComponent(observation.relative)
+            guard try rawGuard(checked(item)) == observation.value else {
+                throw IOSFileError.invalid("Inspected content changed before the operation committed")
+            }
+        }
+    }
+
+    func copyTree(_ source: URL, to target: URL, destination: IOSManagedFiles,
+                  budget: IOSInspectionBudget = IOSInspectionBudget(maxEntries: 32768, maxBytes: 2 * 1024 * 1024 * 1024),
+                  include: (String) -> Bool = { _ in true }, cancelled: () throws -> Void = {}) throws {
+        let original = try checked(source)
+        guard !destination.exists(target) else { throw IOSFileError.invalid("Copy destination already exists") }
+        var inspected: [(URL, IOSFileGuard)] = []
+        let verificationBudget = IOSInspectionBudget(maxEntries: budget.maxEntries, maxBytes: budget.maxBytes)
+        func visit(_ current: URL, _ output: URL, depth: Int) throws {
+            try cancelled()
+            guard depth <= 64 else { throw IOSFileError.invalid("Migration nesting limit reached") }
+            try budget.spend(entries: 1)
+            let before = try rawGuard(checked(current))
+            inspected.append((current, before))
+            if before.isDirectory {
+                try destination.createDirectory(output)
+                for child in try children(current, limit: budget.maxEntries - budget.entries) {
+                    let relative = String(child.path.dropFirst(original.path.count + 1))
+                    if include(relative) {
+                        try visit(child, output.appendingPathComponent(child.lastPathComponent), depth: depth + 1)
+                    }
+                }
+            } else {
+                guard before.size >= 0, before.size <= budget.maxBytes - budget.bytes else {
+                    throw IOSFileError.invalid("Migration byte limit reached")
+                }
+                try destination.createDirectory(output.deletingLastPathComponent())
+                let input = open(current.path, O_RDONLY | O_NOFOLLOW)
+                guard input >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                defer { close(input) }
+                var opened = stat()
+                guard fstat(input, &opened) == 0, try fromStat(opened) == before else {
+                    throw IOSFileError.invalid("Migration source changed before opening")
+                }
+                let safeOutput = try destination.checked(output, allowMissing: true)
+                let descriptor = open(safeOutput.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
+                guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                defer { close(descriptor) }
+                let created = try destination.guardValue(safeOutput)
+                var expected = SHA256()
+                expected.update(data: Data(".\0false\0".utf8))
+                var copied: Int64 = 0
+                var buffer = [UInt8](repeating: 0, count: 32768)
+                while true {
+                    try cancelled()
+                    let count = Darwin.read(input, &buffer, buffer.count)
+                    if count == 0 { break }
+                    if count < 0 && errno == EINTR { continue }
+                    guard count > 0, Int64(count) <= before.size - copied else {
+                        throw IOSFileError.invalid("Migration source grew or could not be read")
+                    }
+                    try budget.spend(bytes: Int64(count))
+                    copied += Int64(count)
+                    let chunk = Data(buffer.prefix(count))
+                    expected.update(data: chunk)
+                    try chunk.withUnsafeBytes { bytes in
+                        var offset = 0
+                        while offset < count {
+                            let written = Darwin.write(descriptor, bytes.baseAddress!.advanced(by: offset), count - offset)
+                            if written < 0 && errno == EINTR { continue }
+                            guard written > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                            offset += written
+                        }
+                    }
+                }
+                guard copied == before.size, fstat(input, &opened) == 0, try fromStat(opened) == before,
+                      fsync(descriptor) == 0 else { throw IOSFileError.invalid("Migration source changed or its copy was incomplete") }
+                let actual = try destination.snapshot(safeOutput, budget: verificationBudget,
+                                                      maximumBytes: budget.maxBytes, cancelled: cancelled)
+                guard actual.guardValue.identity == created.identity,
+                      actual.contentDigest == Self.hex(expected.finalize()) else {
+                    throw IOSFileError.invalid("Copied user data did not verify")
+                }
+            }
+            guard try rawGuard(checked(current)) == before else { throw IOSFileError.invalid("Migration source changed") }
+        }
+        try visit(original, target, depth: 0)
+        for (path, expected) in inspected {
+            try cancelled()
+            guard try rawGuard(checked(path)) == expected else { throw IOSFileError.invalid("Migration source changed after copying") }
+        }
     }
 
     static func hex<T: Sequence>(_ values: T) -> String where T.Element == UInt8 {

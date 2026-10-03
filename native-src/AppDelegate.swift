@@ -28,6 +28,18 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     #endif
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        #if DEBUG
+        // The capability probe must not race normal instance scanning or deployment.
+        if ProcessInfo.processInfo.arguments.contains("--sillyclient-runtime-probe") {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            self.window = window
+            window.rootViewController = UIViewController()
+            window.makeKeyAndVisible()
+            IOSDebugHarness.runRuntimeProbe()
+            return true
+        }
+        #endif
+
         let window = UIWindow(frame: UIScreen.main.bounds)
         self.window = window
         let rootVC = TavernViewController.shared
@@ -43,9 +55,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         window.makeKeyAndVisible()
 
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--sillyclient-runtime-probe") {
-            IOSDebugHarness.runRuntimeProbe()
-        } else if ProcessInfo.processInfo.arguments.contains("--sillyclient-test") {
+        if ProcessInfo.processInfo.arguments.contains("--sillyclient-test") {
             testHarness = IOSDebugHarness()
         }
         #endif
@@ -65,6 +75,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             application.endBackgroundTask(backgroundTask)
             backgroundTask = .invalid
         }
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--sillyclient-runtime-probe") { return }
+        #endif
         TavernViewController.shared.ensureActiveConnection()
     }
 

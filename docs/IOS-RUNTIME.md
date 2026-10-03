@@ -1,6 +1,73 @@
-# iOS Runtime Startup
+# iOS Runtime And Instance Safety
 
 This is an experimental branch, not a verified iOS release.
+The hardening build retains version `1.10.0`; it does not change the public
+Android/Windows/Main release, install a client, or publish a Release.
+
+## Native Ownership
+
+`NodeRunner` invokes `node_start` once for the lifetime of the application.
+`ios-supervisor.mjs` owns the individual server Workers. Start readiness requires
+a real HTTP 200 response; stop resolves only after Worker termination and
+listener closure. Explicit instance and operation identities reject obsolete
+commands. A timed-out transport retains the identity until stop confirmation.
+Ordered command names and cancellation tombstones prevent stop-before-start
+delivery from leaving an orphan Worker. Host GC is acknowledged separately from
+the request to collect an active Worker; embedded Worker collection is not
+claimed verified merely because its request was sent.
+
+`TarvenEnvPlugin` is an adapter rather than an installer or archive parser.
+`IOSInstanceStore` handles managed identity, lightweight enumeration, YAML
+configuration, staged provisioning, copy migration, and uninstall registration.
+`IOSManagedFiles` and `IOSSafeArchive` enforce bounded regular-file inspection,
+link rejection, checksums, exclusive destinations, and source identity checks.
+Preparing a runtime never takes place in `scanInstances`. A new installation
+is published by an exclusive staging-directory rename; no incomplete
+`server.js` directory is silently treated as a prepared runtime.
+
+The supported runtime is the one prepared by this build. Arbitrary server
+versions, external takeover, and arbitrary custom destinations fail explicitly
+on iOS. Copy migration retains source files, selects their user-data root, and
+streams only filtered data into a fresh pinned runtime. Old dependencies, Git
+metadata, and, unless explicitly selected, `secrets.json`/`secrets.json.enc`
+never enter the destination. Files are SHA-256 verified, cancellation is checked
+between chunks, and selected source guards are checked again before completion.
+Migration is limited to 32,768 entries, 64 levels, and 2 GiB of user data. ZIP
+imports have separate compressed/extraction limits. A selected external folder
+does not authorize reading an outside `dataRoot`; select that data root itself.
+
+## Maintenance And Authentication
+
+`IOSInstanceMaintenance` only operates with a stopped runtime and uses one-use,
+five-minute scan and recovery tokens. Suspected broken user extensions, stale
+disabled references, and verified launcher-owned expired download caches are
+handled individually. There is no arbitrary path deletion or blanket
+settings reset. Selected contents, configuration, identity, and any reinstalled
+extensions are checked again before applying changes. Backups are retained
+and recovery identities are returned even when post-move verification fails.
+Recovery refuses same-name replacements, changed settings, metadata, payloads,
+or instance configuration. Completed records are archived outside the active
+recovery list. Inspection is bounded and a partial list reports overflow;
+empty prepared records do not consume the 256-payload active recovery capacity.
+
+`IOSRemoteCredentials` stores one atomic Keychain record per remote identity.
+Passwords never reach JavaScript, URLs, browser storage, or logs. Credentials
+are bound to scheme, host, and effective port, not merely to an imported
+instance ID. Unbound legacy records require explicit password verification.
+For the existing frontend setter, a bounded, five-minute, one-use receipt from
+a successful explicitly authenticated HEAD request binds the origin. Ambiguous
+receipts are rejected; omitted passwords retain only an already-bound record
+with the same username. Automatic ping and WebView authentication do not reuse
+credentials for another origin. Remote HTTP requests reject redirects and
+bound response bodies during reception.
+
+Optional preinstallation uses fixed commit/size/SHA-256 catalog metadata.
+Third-party extension archives are downloaded at runtime; their implementation
+code is not bundled into the MIT source. Archive, manifest entry, and license
+validation completes in staging. Missing, null, and empty optional manifest
+entries are allowed; nonempty entries must refer to verified regular files.
+Existing extensions and disabled settings are preserved. SC Bordeaux uses the
+existing pinned companion assets, without a replacement visual design.
 
 ## Build and Runtime Boundary
 
@@ -37,8 +104,17 @@ are collected on failure and their artifact upload uses `always()`.
 Unit tests need no installed project dependencies:
 
 ```sh
-node --test tests/ios-runtime.test.mjs
+node --test tests/ios-runtime.test.mjs tests/ios-ci.test.mjs tests/ios-supervisor.test.mjs
 ```
+
+The Debug-only native test harness executes the actual Swift modules against
+synthetic sandbox fixtures. It is absent from Release execution and requires an
+explicit test launch argument. The simulator driver checks actual HTTP/asset
+responses, complete Tavern WebView initialization, start/stop/closed port,
+same-process restart, and obsolete operation rejection. Its capability-probe
+process never creates a production console or deploys an instance. Tests,
+source assertions, host fixtures, simulator acceptance, and physical-device
+acceptance are distinct evidence categories.
 
 Prepare a disposable SillyTavern copy with the workflow's pinned revision and
 dependencies. Do not use a personal installation: compatibility preparation
@@ -77,7 +153,11 @@ The workflow restores Node 22 before running Capacitor tools.
   separate validation.
 - SillyTavern declares Node >=20; the embedded runtime remains 18.20.4.
   A successful smoke test does not establish full upstream compatibility.
-- Existing sandbox server installations are reused by the native runner.
-  This change does not implement migration or repair of older copied runtimes.
-- No frontend visual changes, release, or main-branch integration are part of
-  this repair.
+- Existing installations must contain their loader and prebuilt manifest;
+  incompatible or partial copied runtimes fail explicitly rather than falling
+  back to an unprepared `server.js`. User data can be copied into a fresh pinned
+  runtime, but old runtime versions are not upgraded in place.
+- The maintenance backend does not authorize synchronizing its new frontend
+  panel. That preview retains its separate user approval gate.
+- No subjective visual review, physical-device operations, Release, or
+  main-branch integration are part of this hardening verification.
