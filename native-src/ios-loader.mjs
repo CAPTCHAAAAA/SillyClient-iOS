@@ -37,27 +37,6 @@ if (typeof globalThis.TextDecoder !== 'undefined') {
     }
 }
 
-// 注入 WebAssembly 实例安全兜底，防止在 iOS jitless 环境下缺少 exports 属性引发 TypeError: exports.init is not a function
-if (typeof globalThis.WebAssembly !== 'undefined' && globalThis.WebAssembly.Instance) {
-    const OrigInstance = globalThis.WebAssembly.Instance;
-    try {
-        class SafeInstance extends OrigInstance {
-            constructor(module, importObject) {
-                super(module, importObject);
-                if (!this.exports) this.exports = {};
-                if (typeof this.exports.init !== 'function') this.exports.init = () => {};
-                if (typeof this.exports.update !== 'function') this.exports.update = () => {};
-                if (typeof this.exports.final !== 'function') this.exports.final = () => {};
-                if (typeof this.exports.digest !== 'function') this.exports.digest = () => '00000000';
-                if (!this.exports.memory || !this.exports.memory.buffer) {
-                    this.exports.memory = { buffer: new ArrayBuffer(65536) };
-                }
-            }
-        }
-        globalThis.WebAssembly.Instance = SafeInstance;
-    } catch (_) {}
-}
-
 // 关键环境变量设置
 process.env.ST_DISABLE_SHARP = 'true';
 process.env.NODE_ENV = 'production';
