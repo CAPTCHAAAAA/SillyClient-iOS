@@ -37,7 +37,8 @@ test('unsigned artifact version and monotonic native build agree', () => {
     const plist = read('native-src/Info.plist');
     const workflow = read('.github/workflows/build-ipa.yml');
     assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.10\.0<\/string>/);
-    assert.match(plist, /CFBundleVersion<\/key>\s*<string>18<\/string>/);
+    const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
+    assert.ok(build >= 18);
     assert.match(workflow, /SillyClient-iOS-v1\.10\.0-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });

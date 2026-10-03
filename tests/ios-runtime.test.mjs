@@ -383,7 +383,8 @@ test('iOS Info.plist declares NSMicrophoneUsageDescription and TavernViewControl
 
     // 2. TavernViewController must implement requestMediaCapturePermissionFor
     assert.ok(tavernVCSwift.includes('requestMediaCapturePermissionFor'), 'TavernViewController must implement requestMediaCapturePermissionFor');
-    assert.ok(tavernVCSwift.includes('decisionHandler(.grant)'), 'TavernViewController must grant media capture permission');
+    assert.ok(tavernVCSwift.includes('decisionHandler(.prompt)'), 'TavernViewController must prompt for same-origin media capture permission');
+    assert.ok(tavernVCSwift.includes('decisionHandler(.deny)'), 'TavernViewController must deny cross-origin media capture permission');
 
     // 3. KeepAliveService must support .playAndRecord with speaker and bluetooth options
     assert.ok(keepAliveSwift.includes('.playAndRecord'), 'KeepAliveService must use .playAndRecord category');

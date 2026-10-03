@@ -41,6 +41,10 @@ public final class IOSDebugHarness {
               let id = request["id"] as? String, id.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil,
               id != lastRequest else { return }
         lastRequest = id
+        if request["action"] as? String == "nativeTests" {
+            respond(id, ["success": true, "result": IOSNativeTests.run()])
+            return
+        }
         guard let webView = TavernViewController.shared.consoleWebView else {
             respond(id, ["success": false, "error": "Console WebView is unavailable"])
             return
@@ -52,7 +56,8 @@ public final class IOSDebugHarness {
             }
             tavern.evaluateJavaScript("""
                 ({url: location.href, ready: document.readyState, hasChat: !!document.querySelector('#chat'),
-                  hasInput: !!document.querySelector('#send_textarea'), title: document.title})
+                  hasInput: !!document.querySelector('#send_textarea'), title: document.title,
+                  hasClient: typeof window.SillyTavern?.getContext === 'function' && typeof window.jQuery === 'function'})
                 """) { [weak self] result, error in
                 self?.respond(id, ["success": error == nil, "result": result ?? NSNull(),
                                   "error": error?.localizedDescription ?? ""])

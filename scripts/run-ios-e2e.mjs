@@ -89,6 +89,12 @@ try {
         assert.equal(version.version, '1.10.0');
         return version;
     });
+    await check('Actual native filesystem, URL policy, and archive module regressions', async () => {
+        const result = await command(undefined, {}, 'nativeTests', 30000);
+        fs.writeFileSync(path.join(evidence, 'native-module-results.json'), JSON.stringify(result, null, 2));
+        assert.equal(result.success, true, JSON.stringify(result.results.filter(item => !item.passed)));
+        return result;
+    });
     await check('Real embedded server startup through the native plugin', async () => {
         const result = await command('provisionAndStart', { instanceId: 'default', port: 8000 }, 'call', 100000);
         assert.equal(result.ready, true);
@@ -112,10 +118,11 @@ try {
         let actual;
         while (Date.now() < deadline) {
             actual = await command(undefined, {}, 'tavern');
-            if (actual?.hasChat && actual?.hasInput) break;
+            if (actual?.hasChat && actual?.hasInput && actual?.hasClient && actual.ready === 'complete') break;
             await sleep(300);
         }
-        assert.ok(actual?.hasChat && actual?.hasInput, 'Real Tavern DOM did not become ready');
+        assert.ok(actual?.hasChat && actual?.hasInput && actual?.hasClient && actual.ready === 'complete',
+            'Real Tavern JavaScript and DOM did not become ready');
         assert.ok(actual.url.startsWith('http://127.0.0.1:8000/'));
         return actual;
     });

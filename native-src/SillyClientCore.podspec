@@ -14,4 +14,6 @@ Pod::Spec.new do |s|
   s.frameworks       = 'UIKit', 'WebKit', 'AVFoundation', 'Security'
   s.vendored_frameworks = 'NodeMobile.xcframework'
   s.dependency 'Capacitor'
+  s.dependency 'ZIPFoundation', '0.9.19'
+  s.dependency 'Yams', '5.4.0'
 end
