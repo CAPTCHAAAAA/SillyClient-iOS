@@ -135,7 +135,7 @@ final class IOSInstanceMaintenance {
                                     if text.isEmpty { continue }
                                     let relative = try IOSSafeArchive.relativePath(text.hasPrefix("./") ? String(text.dropFirst(2)) : text)
                                     let asset = entry.appendingPathComponent(relative)
-                                    if !files.exists(asset) || (try files.guardValue(asset)).isDirectory {
+                                    if try !files.exists(asset) || files.guardValue(asset).isDirectory {
                                         reason = "Missing extension entry file"; break
                                     }
                                 }
