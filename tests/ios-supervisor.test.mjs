@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import net from 'node:net';
+import vm from 'node:vm';
 
 const supervisor = fileURLToPath(new URL('../native-src/Resources/ios-supervisor.mjs', import.meta.url));
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -27,7 +28,40 @@ async function freePort() {
     return port;
 }
 
-async function fixture(t, { asynchronousOutput = false } = {}) {
+function prepareActualLoader(server, contents) {
+    fs.mkdirSync(path.join(server, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(server, 'package.json'), JSON.stringify({ type: 'module' }));
+    fs.copyFileSync(new URL('../native-src/ios-loader.mjs', import.meta.url), path.join(server, 'ios-loader.mjs'));
+    fs.writeFileSync(path.join(server, 'src', 'server-events.js'), `
+        import { EventEmitter } from 'node:events';
+        export const serverEvents = new EventEmitter();
+        export const EVENT_NAMES = { SERVER_STARTED: 'ready' };
+    `);
+    fs.writeFileSync(path.join(server, 'relative-state.txt'), contents);
+    fs.writeFileSync(path.join(server, 'server.js'), `
+        import assert from 'node:assert/strict';
+        import fs from 'node:fs';
+        import path from 'node:path';
+        import http from 'node:http';
+        import { fileURLToPath } from 'node:url';
+        import { serverEvents, EVENT_NAMES } from './src/server-events.js';
+        const directory = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));
+        process.chdir(directory);
+        process.chdir('.');
+        process.chdir(path.join(directory, '..', path.basename(directory)));
+        assert.equal(fs.realpathSync(process.cwd()), directory);
+        assert.throws(() => process.chdir(path.dirname(directory)), { code: 'ERR_IOS_WORKER_CWD_CHANGE' });
+        assert.throws(() => process.chdir(undefined), { code: 'ERR_INVALID_ARG_TYPE' });
+        const read = () => fs.readFileSync('relative-state.txt', 'utf8');
+        assert.equal(read(), ${JSON.stringify(contents)});
+        const server = http.createServer((request, response) => response.end(read()));
+        server.listen(Number(process.env.PORT), '127.0.0.1', () => {
+            serverEvents.emit(EVENT_NAMES.SERVER_STARTED, { url: 'http://127.0.0.1:' + process.env.PORT + '/' });
+        });
+    `);
+}
+
+async function fixture(t, { asynchronousOutput = false, actualLoader = false } = {}) {
     const parent = process.env.SILLYCLIENT_TEST_TMP || os.tmpdir();
     fs.mkdirSync(parent, { recursive: true });
     const directory = fs.mkdtempSync(path.join(parent, 'ios-supervisor-'));
@@ -42,6 +76,7 @@ async function fixture(t, { asynchronousOutput = false } = {}) {
         const server = http.createServer((request, response) => response.end('actual-worker'));
         server.listen(Number(process.env.PORT), '127.0.0.1', () => parentPort.postMessage({type:'ready'}));
     `);
+    if (actualLoader) prepareActualLoader(server, 'first-instance-data');
     let output = '';
     let stdout = '';
     const arguments_ = asynchronousOutput ? ['--input-type=module', '--eval', `
@@ -104,6 +139,39 @@ test('embedded supervisor really starts, stops, and restarts an HTTP worker', as
     assert.equal((await f.command({ ...options, instanceId: 'second', operationId: 'operation-2' })).ready, true);
     assert.equal((await f.command({ ...options, instanceId: 'third', operationId: 'operation-3' })).success, false);
     assert.equal((await f.command({ action: 'stop' })).success, true);
+});
+
+test('production loader accepts upstream same-directory Worker chdir and rejects actual changes', async t => {
+    const f = await fixture(t, { actualLoader: true });
+    const port = await freePort();
+    const identity = { instanceId: 'actual-loader', operationId: 'actual-loader-operation' };
+    const started = await f.command({
+        action: 'start', ...identity, port,
+        serverDirectory: f.server, dataDirectory: path.join(f.server, 'data'),
+    });
+    assert.deepEqual(started, { success: true, ready: true }, f.output());
+    assert.equal(await (await fetch(`http://127.0.0.1:${port}/`)).text(), 'first-instance-data');
+    assert.equal((await f.command({ action: 'stop', ...identity })).success, true);
+    await assert.rejects(fetch(`http://127.0.0.1:${port}/`));
+});
+
+test('production loader restart uses the next instance directory after the old Worker terminates', async t => {
+    const f = await fixture(t, { actualLoader: true });
+    const next = path.join(path.dirname(f.server), 'second-server');
+    prepareActualLoader(next, 'second-instance-data');
+    const port = await freePort();
+    const first = { instanceId: 'first-loader', operationId: 'first-loader-operation' };
+    const second = { instanceId: 'second-loader', operationId: 'second-loader-operation' };
+    for (const [identity, server, contents] of [
+        [first, f.server, 'first-instance-data'], [second, next, 'second-instance-data'],
+    ]) {
+        assert.deepEqual(await f.command({
+            action: 'start', ...identity, port, serverDirectory: server, dataDirectory: path.join(server, 'data'),
+        }), { success: true, ready: true }, f.output());
+        assert.equal(await (await fetch(`http://127.0.0.1:${port}/`)).text(), contents);
+        assert.equal((await f.command({ action: 'stop', ...identity })).success, true);
+        await assert.rejects(fetch(`http://127.0.0.1:${port}/`));
+    }
 });
 
 test('a stop consumed before its start cancels the same operation without an orphan worker', async t => {
@@ -328,10 +396,145 @@ test('native frame contract keeps queued output identities explicit and validate
     assert.match(source, /Data\(base64Encoded: encoded\)/);
     assert.match(source, /bytes\.count <= maximumLineBytes/);
     assert.match(source, /String\(data: bytes, encoding: \.utf8\)/);
-    assert.match(source, /appendLog\(frame\.line, instance: frame\.instanceId, operation: frame\.operationId\)/);
+    assert.match(source, /append\(frame\.line, frame\.instanceId, frame\.operationId, true\)/);
     const append = source.slice(source.indexOf('public func appendLog'), source.indexOf('public func getLogs'));
     assert.match(append, /instance id: String = "runtime", operation op: String = ""/);
     assert.doesNotMatch(append, /self\.(?:instanceId|operationId)/);
     assert.match(append, /pendingLogCount < 256, pendingLogBytes \+ size <= 512 \* 1024/);
     assert.match(append, /defer \{[\s\S]*pendingLogCount -= 1[\s\S]*pendingLogBytes -= size/);
+});
+
+test('native captured-output routing stores host diagnostics without relaying JavaScript events', () => {
+    const source = fs.readFileSync(new URL('../native-src/NodeRunner.swift', import.meta.url), 'utf8');
+    const consume = source.slice(source.indexOf('private func consumeOutputLine'), source.indexOf('static func routeCapturedOutput'));
+    assert.match(consume, /Self\.routeCapturedOutput\(raw\)/);
+    assert.match(consume, /appendLog\(line, instance: instance, operation: operation, publishEvent: publishEvent\)/);
+    const route = source.slice(source.indexOf('static func routeCapturedOutput'), source.indexOf('public func appendLog'));
+    assert.match(route, /raw\.count <= 65536/);
+    assert.match(route, /append\(frame\.line, frame\.instanceId, frame\.operationId, true\)/);
+    assert.match(route, /append\(String\(decoding: raw, as: UTF8\.self\), "runtime", "", false\)/);
+    assert.match(route, /append\("\[Malformed runtime log frame discarded\]", "runtime", "", false\)/);
+    assert.match(route, /append\("\[Oversized runtime log line discarded\]", "runtime", "", false\)/);
+    assert.doesNotMatch(route, /self\.(?:instanceId|operationId)|logEvent/);
+    const append = source.slice(source.indexOf('public func appendLog'), source.indexOf('public func getLogs'));
+    assert.match(append, /appendLog\(raw, instance: id, operation: op, publishEvent: true\)/);
+    assert.match(append, /if publishEvent \{ self\.logEvent\?\(id, op, line\) \}/);
+    const redirect = source.slice(source.indexOf('private func redirectOutput'), source.indexOf('private func consumeOutputLine'));
+    assert.match(redirect, /appendLog\("\[Oversized runtime log line discarded\]", publishEvent: false\)/);
+});
+
+async function invokeDebugBridge(method, options, plugin) {
+    const source = fs.readFileSync(new URL('../native-src/IOSDebugHarness.swift', import.meta.url), 'utf8');
+    const script = source.match(/static let bridgeInvocationScript = """\n([\s\S]*?)\n\s*"""/)?.[1];
+    assert.ok(script, 'Missing the real Debug bridge invocation script');
+    const body = script.replace(/\\\\/g, '\\');
+    const response = await vm.runInNewContext(`(async () => {\n${body}\n})()`, {
+        window: { Capacitor: { Plugins: { TarvenEnv: plugin } } }, method, options,
+        console: { log() { assert.fail('Bridge diagnostics were printed to captured stdout'); } },
+    }, { timeout: 1000 });
+    return JSON.parse(JSON.stringify(response));
+}
+
+test('Debug bridge envelopes preserve successful native results and the actual invocation', async () => {
+    const options = { instanceId: 'debug-fixture' };
+    let calls = 0;
+    const response = await invokeDebugBridge('getInstanceInfo', options, {
+        async getInstanceInfo(actual) {
+            calls += 1;
+            assert.equal(actual, options);
+            return { instanceId: actual.instanceId, version: '1.19.0' };
+        },
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(response, { success: true, result: { instanceId: 'debug-fixture', version: '1.19.0' } });
+});
+
+test('Debug bridge rejection preserves the native message and safe error code', async () => {
+    const response = await invokeDebugBridge('provisionAndStart', {}, {
+        async provisionAndStart() {
+            throw Object.assign(new Error('Stop the current operation before starting an instance'),
+                { code: 'ERR_SESSION_BUSY' });
+        },
+    });
+    assert.equal(response.success, false);
+    assert.match(response.error, /provisionAndStart.*ERR_SESSION_BUSY.*Stop the current operation/);
+    assert.doesNotMatch(response.error, /A JavaScript exception occurred/);
+    const secretCode = 'fixture-native-code-secret';
+    const redactedCode = await invokeDebugBridge('getStatus', { password: secretCode }, {
+        async getStatus() { throw Object.assign(new Error('Native method failed'), { code: secretCode }); },
+    });
+    assert.equal(redactedCode.success, false);
+    assert.doesNotMatch(redactedCode.error, /fixture-native-code-secret/);
+    for (const code of ['ERR_NEWLINE\n', 'overlong-code-'.repeat(10000)]) {
+        const invalidCode = await invokeDebugBridge('getStatus', {}, {
+            async getStatus() { throw Object.assign(new Error('Native method failed'), { code }); },
+        });
+        assert.equal(invalidCode.error, 'getStatus: Native method failed');
+    }
+});
+
+test('Debug bridge reports unavailable native methods without a WebKit promise rejection', async () => {
+    const response = await invokeDebugBridge('getPlatform', {}, {});
+    assert.equal(response.success, false);
+    assert.match(response.error, /getPlatform.*Native bridge method is unavailable/);
+});
+
+test('Debug bridge diagnostics redact option secrets, authenticated URLs, and authorization text', async () => {
+    const options = { password: 'fixture-password', nested: { apiKey: 'fixture-api-key' } };
+    const response = await invokeDebugBridge('enterImmersive', options, {
+        async enterImmersive() {
+            throw new Error('Denied fixture-password fixture-api-key at https://user:uri-secret@example.test/a'
+                + '?token=query-secret&visible=1; Authorization: Bearer header-secret; password=unbound-secret');
+        },
+    });
+    assert.equal(response.success, false);
+    assert.match(response.error, /enterImmersive.*Denied/);
+    assert.match(response.error, /\[redacted\]/);
+    assert.doesNotMatch(response.error, /fixture-password|fixture-api-key|uri-secret|query-secret|header-secret|unbound-secret/);
+    const repeatedSecret = 'synthetic-secret-' + 'x'.repeat(984);
+    const longUrl = 'https://fixture-user:' + 'synthetic-long-secret-'.repeat(240) + '@example.test';
+    const token = 'synthetic-token-'.repeat(110);
+    const cases = [
+        { options: { password: repeatedSecret }, message: Array(6).fill(repeatedSecret).join(' '), fragment: 'synthetic-secret-' },
+        { options: { url: longUrl }, message: 'URL failure at ' + longUrl, fragment: 'synthetic-long-secret-' },
+        { options: { password: 'a'.repeat(2000), token }, message: 'a'.repeat(2000) + ' filler '.repeat(130) + token, fragment: 'synthetic-token-' },
+        { options: { password: 'q', nested: { apiKey: repeatedSecret } }, message: 'q'.repeat(150) + ' ' + Array(3).fill(repeatedSecret).join(' '), fragment: 'synthetic-secret-' },
+    ];
+    for (const fixture of cases) {
+        const bounded = await invokeDebugBridge('getStatus', fixture.options, {
+            async getStatus() { throw new Error(fixture.message); },
+        });
+        assert.equal(bounded.success, false);
+        assert.ok(bounded.error.length <= 2048);
+        assert.match(bounded.error, /^getStatus:/);
+        assert.equal(bounded.error.includes(fixture.fragment), false, 'A truncated secret reached the diagnostic');
+    }
+});
+
+test('Debug bridge rejection text is bounded and never serializes unknown error objects', async () => {
+    const response = await invokeDebugBridge('getStatus', {}, {
+        async getStatus() { throw new Error('x'.repeat(100000)); },
+    });
+    assert.equal(response.success, false);
+    assert.ok(response.error.length <= 2048);
+    assert.match(response.error, /^getStatus:/);
+    const unknown = await invokeDebugBridge('getStatus', {}, {
+        async getStatus() { throw { stack: 'private-stack', options: { password: 'private-secret' } }; },
+    });
+    assert.equal(unknown.success, false);
+    assert.match(unknown.error, /rejected without a diagnostic/);
+    assert.doesNotMatch(unknown.error, /private-stack|private-secret|password|options/);
+});
+
+test('Debug bridge Swift responses preserve diagnostic envelopes and numeric WebKit failures', () => {
+    const source = fs.readFileSync(new URL('../native-src/IOSDebugHarness.swift', import.meta.url), 'utf8');
+    assert.match(source, /callAsyncJavaScript\(Self\.bridgeInvocationScript, arguments:/);
+    assert.match(source, /case \.success\(let value\):[\s\S]*value as\? \[String: Any\][\s\S]*respond\(id, response\)/);
+    assert.match(source, /case \.failure\(let error\):[\s\S]*Self\.webKitFailureDescription\(error\)/);
+    const fallback = source.match(/static func webKitFailureDescription[\s\S]*?(?=\n    public init)/)?.[0];
+    assert.ok(fallback);
+    assert.match(fallback, /error as NSError/);
+    assert.match(fallback, /native\.domain\.prefix\(80\)/);
+    assert.match(fallback, /native\.code/);
+    assert.doesNotMatch(fallback, /localizedDescription|userInfo|stack|request\[/);
 });

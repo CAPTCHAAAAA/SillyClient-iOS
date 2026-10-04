@@ -51,11 +51,9 @@ final class IOSInstanceMaintenance {
     private func expire() {
         scans = scans.filter { $0.value.expires > now() }
         restores = restores.filter { $0.value.expires > now() }
-        if scans.count >= 16 { scans.removeAll() }
-        if restores.count >= 256 { restores.removeAll() }
     }
     private func validSegment(_ value: String) -> Bool {
-        value != "." && value != ".." && value.range(of: "^[A-Za-z0-9_.-]{1,160}$", options: .regularExpression) != nil
+        value != "." && value != ".." && value.range(of: "^[A-Za-z0-9_.-]{1,160}\\z", options: .regularExpression) != nil
     }
     private func config(_ root: URL) throws -> (String, IOSFileGuard?) {
         let path = root.appendingPathComponent("config.yaml")
@@ -102,6 +100,7 @@ final class IOSInstanceMaintenance {
         try NodeRunner.shared.beginMaintenance(instance: id)
         defer { NodeRunner.shared.endMaintenance(instance: id) }
         scans = scans.filter { $0.value.instance != id }
+        guard scans.count < 16 else { throw IOSFileError.invalid("Maintenance scan capacity reached; existing scans remain valid") }
         let files = store.files
         let configuration = try config(root)
         let identity = try files.guardValue(root).identity
@@ -110,8 +109,9 @@ final class IOSInstanceMaintenance {
         var warnings: [String] = []
         func add(_ file: URL, kind: String, description: String, references: [String] = []) throws {
             guard candidates.count < 128 else { throw IOSFileError.invalid("Candidate limit reached; remaining files were preserved") }
-            let snapshot = try files.snapshot(file, budget: budget)
             let relative = String(file.path.dropFirst(root.path.count + 1))
+            _ = try IOSSafeArchive.relativePath(relative)
+            let snapshot = try files.snapshot(file, budget: budget)
             candidates.append(Candidate(id: UUID().uuidString, token: UUID().uuidString, relative: relative,
                 kind: kind, action: kind == "broken_extension" ? "quarantine" : kind == "download_cache"
                     ? "delete_cache" : "remove_disabled_reference",
@@ -376,12 +376,12 @@ final class IOSInstanceMaintenance {
         let root = try store.directory(instance, maintenance: true)
         try NodeRunner.shared.beginMaintenance(instance: instance)
         defer { NodeRunner.shared.endMaintenance(instance: instance) }
+        restores = restores.filter { $0.value.instance != instance }
         let parent = root.appendingPathComponent("\(base)/recovery")
         guard store.files.exists(parent) else { return ["items": [], "warnings": []] }
         var items: [[String: Any]] = []
         var warnings: [String] = []
         let budget = IOSInspectionBudget()
-        restores = restores.filter { $0.value.instance != instance }
         let listing = try store.files.boundedChildren(parent, limit: 4096)
         if listing.truncated { warnings.append("Recovery inspection limit reached; additional records were preserved") }
         for child in listing.items {
@@ -395,6 +395,9 @@ final class IOSInstanceMaintenance {
                     "kind": record["kind"] ?? "", "action": record["action"] ?? "",
                     "sizeBytes": record["sizeBytes"] ?? 0, "canRestore": false, "token": ""]
                 do {
+                    guard restores.count < 256 else {
+                        throw IOSFileError.invalid("Recovery token capacity reached; existing tokens remain valid")
+                    }
                     let payloadDigest = try restoreValidation(root, record: record, folder: folder, budget: budget)
                     let token = UUID().uuidString
                     restores[token] = RestorePlan(instance: instance, recovery: recovery,

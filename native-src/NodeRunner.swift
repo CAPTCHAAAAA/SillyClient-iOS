@@ -402,13 +402,12 @@ public final class NodeRunner {
             while let end = self.lineBytes.firstIndex(of: 10) {
                 let line = Data(self.lineBytes.prefix(upTo: end))
                 self.lineBytes.removeSubrange(...end)
-                if line.count > 65536 { self.appendLog("[Oversized runtime log line discarded]") }
-                else { self.consumeOutputLine(line) }
+                self.consumeOutputLine(line)
             }
             if self.lineBytes.count > 65536 {
                 self.lineBytes.removeAll(keepingCapacity: true)
                 self.discardingOutputLine = true
-                self.appendLog("[Oversized runtime log line discarded]")
+                self.appendLog("[Oversized runtime log line discarded]", publishEvent: false)
             }
         }
         source.setCancelHandler { close(readFd) }
@@ -417,18 +416,34 @@ public final class NodeRunner {
     }
 
     private func consumeOutputLine(_ raw: Data) {
+        Self.routeCapturedOutput(raw) { line, instance, operation, publishEvent in
+            self.appendLog(line, instance: instance, operation: operation, publishEvent: publishEvent)
+        }
+    }
+
+    static func routeCapturedOutput(_ raw: Data, append: (String, String, String, Bool) -> Void) {
+        guard raw.count <= 65536 else {
+            append("[Oversized runtime log line discarded]", "runtime", "", false)
+            return
+        }
         if raw.starts(with: IOSRuntimeLogFrame.prefix.utf8) {
             guard let frame = IOSRuntimeLogFrame.decode(raw) else {
-                appendLog("[Malformed runtime log frame discarded]")
+                append("[Malformed runtime log frame discarded]", "runtime", "", false)
                 return
             }
-            appendLog(frame.line, instance: frame.instanceId, operation: frame.operationId)
+            append(frame.line, frame.instanceId, frame.operationId, true)
         } else {
-            appendLog(String(decoding: raw, as: UTF8.self))
+            // Capacitor itself writes listener delivery to process stdout.
+            append(String(decoding: raw, as: UTF8.self), "runtime", "", false)
         }
     }
 
     public func appendLog(_ raw: String, instance id: String = "runtime", operation op: String = "") {
+        appendLog(raw, instance: id, operation: op, publishEvent: true)
+    }
+
+    private func appendLog(_ raw: String, instance id: String = "runtime", operation op: String = "",
+                           publishEvent: Bool) {
         guard IOSRuntimeLogFrame.validIdentity(id), op.isEmpty || IOSRuntimeLogFrame.validIdentity(op) else { return }
         var bytes = Data(raw.utf8.prefix(IOSRuntimeLogFrame.maximumLineBytes))
         while !bytes.isEmpty, String(data: bytes, encoding: .utf8) == nil { bytes.removeLast() }
@@ -459,7 +474,7 @@ public final class NodeRunner {
                 self.logBytes.removeValue(forKey: old)
             }
             self.logLock.unlock()
-            self.logEvent?(id, op, line)
+            if publishEvent { self.logEvent?(id, op, line) }
             self.outputQueue.async {
                 defer {
                     self.logLock.lock()

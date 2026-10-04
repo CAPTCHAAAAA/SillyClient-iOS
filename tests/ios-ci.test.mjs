@@ -186,6 +186,47 @@ for (const [name, dump, message] of [
     });
 }
 
+test('maintenance expiration preserves live scan and recovery tokens at capacity', () => {
+    const maintenance = read('native-src/IOSInstanceMaintenance.swift');
+    const expire = maintenance.slice(maintenance.indexOf('private func expire()'),
+        maintenance.indexOf('private func validSegment'));
+    assert.match(expire, /scans = scans\.filter \{ \$0\.value\.expires > now\(\) \}/);
+    assert.match(expire, /restores = restores\.filter \{ \$0\.value\.expires > now\(\) \}/);
+    assert.doesNotMatch(expire, /removeAll|\.count/);
+});
+
+test('maintenance limits token issuance without invalidating another live plan', () => {
+    const maintenance = read('native-src/IOSInstanceMaintenance.swift');
+    const scan = maintenance.slice(maintenance.indexOf('func scan('), maintenance.indexOf('func apply('));
+    assert.match(scan, /scans = scans\.filter \{ \$0\.value\.instance != id \}/);
+    assert.match(scan, /guard scans\.count < 16 else/);
+    assert.ok(scan.indexOf('guard scans.count < 16') < scan.indexOf('scans[scanId] = plan'));
+    const list = maintenance.slice(maintenance.indexOf('func list('), maintenance.indexOf('func restore('));
+    assert.match(list, /guard restores\.count < 256 else/);
+    assert.ok(list.indexOf('guard restores.count < 256') < list.indexOf('restores[token] = RestorePlan'));
+    assert.doesNotMatch(list, /restores\.removeAll/);
+});
+
+test('maintenance rejects terminal line controls before taking a recoverable snapshot', () => {
+    const maintenance = read('native-src/IOSInstanceMaintenance.swift');
+    const segment = maintenance.slice(maintenance.indexOf('private func validSegment'),
+        maintenance.indexOf('private func config'));
+    assert.ok(segment.includes('[A-Za-z0-9_.-]{1,160}\\\\z'));
+    const add = maintenance.slice(maintenance.indexOf('func add('), maintenance.indexOf('for user in'));
+    assert.ok(add.indexOf('try IOSSafeArchive.relativePath(relative)') >= 0);
+    assert.ok(add.indexOf('try IOSSafeArchive.relativePath(relative)') < add.indexOf('try files.snapshot'));
+});
+
+test('copy migration routes flat user data to the actual default-user directory', () => {
+    const store = read('native-src/IOSInstanceStore.swift');
+    const destination = store.slice(store.indexOf('func migrationDataTarget('), store.indexOf('func migrate('));
+    assert.match(destination, /singleUser \? dataRoot\.appendingPathComponent\("default-user"\) : dataRoot/);
+    assert.match(destination, /guard !singleUser \|\| !nestedUsers else/);
+    const migrate = store.slice(store.indexOf('func migrate('), store.indexOf('func uninstall('));
+    assert.match(migrate, /copyTarget = try migrationDataTarget\(dataSource, files: dataFiles, dataRoot: dataTarget\)/);
+    assert.match(migrate, /dataFiles\.copyTree\(dataSource, to: copyTarget, destination: files/);
+});
+
 test('native adapter preserves the existing console events and checks mode freshness on main', () => {
     const plugin = read('native-src/TarvenEnvPlugin.swift');
     const events = read('native-src/IOSRuntimeEvents.swift');
@@ -300,7 +341,7 @@ async function simulateDriver(scenario = 'success') {
     const respond = request => {
         if (request.action === 'nativeTests') {
             return { success: true, result: { success: true,
-                results: Array.from({ length: 22 }, (_, index) => ({ name: `Virtual group ${index}`, passed: true })) } };
+                results: Array.from({ length: 27 }, (_, index) => ({ name: `Virtual group ${index}`, passed: true })) } };
         }
         if (request.action === 'tavern') {
             return { success: true, result: { ready: 'complete', hasChat: true, hasInput: true, hasClient: true,
@@ -552,7 +593,7 @@ test('real simulator driver completes all lifecycle stages using isolated protoc
     assert.equal(actual.error, undefined, actual.error?.message);
     assert.equal(actual.report.results.length, 22);
     assert.ok(actual.report.results.every(result => result.passed));
-    assert.equal(actual.report.results.find(result => result.name.includes('native filesystem')).actual.groups, 22);
+    assert.equal(actual.report.results.find(result => result.name.includes('native filesystem')).actual.groups, 27);
     const remoteRejection = actual.report.results.find(result => result.name.includes('Remote navigation')).actual;
     assert.equal(remoteRejection.rejected, true);
     assert.equal(remoteRejection.instanceId, 'default');

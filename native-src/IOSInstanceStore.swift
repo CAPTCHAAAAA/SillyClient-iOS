@@ -8,6 +8,8 @@ final class IOSInstanceStore {
     let documents: URL
     let files: IOSManagedFiles
     private let fm = FileManager.default
+    private static let userDataMarkers = Set(["settings.json", "characters", "chats", "group chats",
+                                              "groups", "worlds", "themes", "backgrounds"])
 
     init(root: URL? = nil) {
         documents = (root ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0])
@@ -275,8 +277,7 @@ final class IOSInstanceStore {
             guard try sourceFiles.guardValue(data).isDirectory else { throw IOSFileError.invalid("Migration data root is not a directory") }
             return data
         }
-        let markers = Set(["settings.json", "characters", "chats", "group chats", "groups", "worlds", "themes", "backgrounds"])
-        let dataOnly = entries.contains { markers.contains($0.lastPathComponent) }
+        let dataOnly = entries.contains { Self.userDataMarkers.contains($0.lastPathComponent) }
             || entries.contains { child in
                 (try? sourceFiles.guardValue(child).isDirectory) == true
                     && (sourceFiles.exists(child.appendingPathComponent("settings.json"))
@@ -288,6 +289,24 @@ final class IOSInstanceStore {
             throw IOSFileError.invalid("No user data root was found; select a data directory or backup containing data")
         }
         return backup
+    }
+
+    func migrationDataTarget(_ source: URL, files sourceFiles: IOSManagedFiles, dataRoot: URL) throws -> URL {
+        let entries = try sourceFiles.children(source, limit: 512)
+        let userDirectories = Set(entries.filter { child in
+            (try? sourceFiles.guardValue(child).isDirectory) == true
+                && (child.lastPathComponent == "default-user"
+                    || sourceFiles.exists(child.appendingPathComponent("settings.json"))
+                    || sourceFiles.exists(child.appendingPathComponent("characters")))
+        }.map(\.path))
+        let singleUser = entries.contains {
+            Self.userDataMarkers.contains($0.lastPathComponent) && !userDirectories.contains($0.path)
+        }
+        let nestedUsers = !userDirectories.isEmpty
+        guard !singleUser || !nestedUsers else {
+            throw IOSFileError.invalid("Ambiguous user data layout; select the data root or a single user directory")
+        }
+        return singleUser ? dataRoot.appendingPathComponent("default-user") : dataRoot
     }
 
     func migrate(instance id: String, operation: String, sourcePath: String, targetPath: String?,
@@ -351,8 +370,9 @@ final class IOSInstanceStore {
             dataFiles = sourceFiles
         }
         let dataTarget = staging.appendingPathComponent("data")
+        let copyTarget = try migrationDataTarget(dataSource, files: dataFiles, dataRoot: dataTarget)
         if files.exists(dataTarget) { try fm.removeItem(at: files.checked(dataTarget)) }
-        try dataFiles.copyTree(dataSource, to: dataTarget, destination: files, include: included, cancelled: cancelled)
+        try dataFiles.copyTree(dataSource, to: copyTarget, destination: files, include: included, cancelled: cancelled)
         try updateConfig(staging, port: 8000, config: nil, dataRoot: target.appendingPathComponent("data"))
         try IOSPreinstaller.install(staging: staging, instanceId: id, selection: preinstall, companion: nil, cancelled: cancelled)
         try files.createDirectory(target.deletingLastPathComponent())

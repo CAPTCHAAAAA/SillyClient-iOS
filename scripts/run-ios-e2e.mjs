@@ -251,9 +251,9 @@ try {
         return version;
     });
     await check('Actual native filesystem, URL policy, and archive module regressions', async () => {
-        const result = await command(undefined, {}, 'nativeTests', 30000);
+        const result = await command(undefined, {}, 'nativeTests', 60000);
         fs.writeFileSync(path.join(evidence, 'native-module-results.json'), JSON.stringify(result, null, 2));
-        assert.ok(Array.isArray(result.results) && result.results.length === 22, 'Native tests did not report all 22 current groups');
+        assert.ok(Array.isArray(result.results) && result.results.length === 27, 'Native tests did not report all 27 current groups');
         assert.equal(result.success, true, JSON.stringify(result.results.filter(item => item.passed !== true)));
         assert.ok(result.results.every(item => item.passed === true), 'One or more real Swift test groups failed');
         return { groups: result.results.length, ...result };

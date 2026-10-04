@@ -163,7 +163,12 @@ test('loader reports startup failure promptly and does not synthesize WASM', asy
     fs.copyFileSync(path.join(root, 'native-src', 'ios-loader.mjs'), path.join(f.server, 'ios-loader.mjs'));
     fs.writeFileSync(path.join(f.server, 'server.js'), `
         import assert from 'node:assert/strict';
+        import fs from 'node:fs';
+        import path from 'node:path';
+        import { fileURLToPath } from 'node:url';
         import fetch, * as implementation from 'node-fetch';
+        process.chdir(path.dirname(fileURLToPath(import.meta.url)));
+        assert.equal(fs.realpathSync(process.cwd()), fs.realpathSync(${JSON.stringify(f.server)}));
         if (typeof WebAssembly !== 'undefined') throw new Error('Fabricated WASM');
         assert.equal(globalThis.fetch, fetch);
         for (const name of ['Headers', 'Request', 'Response', 'FormData', 'Blob', 'File']) {
@@ -208,13 +213,16 @@ test('actual loader worker reports fatal failure after readiness without exiting
         serverEvents.emit(EVENT_NAMES.SERVER_STARTED, { url: 'http://127.0.0.1:1/' });
         setTimeout(() => { throw new Error('fatal after readiness'); }, 100);
     `);
-    const worker = new Worker(pathToFileURL(loader), {
-        env: { ...process.env, TARVEN_SERVER_DIR: f.server, SILLYCLIENT_OPERATION_ID: 'synthetic-operation' },
-        workerData: { arguments: [loader] }, stdout: true, stderr: true,
-    });
-    worker.stdout.resume();
-    worker.stderr.resume();
+    const originalCwd = process.cwd();
+    let worker;
     try {
+        process.chdir(f.server);
+        worker = new Worker(pathToFileURL(loader), {
+            env: { ...process.env, TARVEN_SERVER_DIR: f.server, SILLYCLIENT_OPERATION_ID: 'synthetic-operation' },
+            workerData: { arguments: [loader] }, stdout: true, stderr: true,
+        });
+        worker.stdout.resume();
+        worker.stderr.resume();
         const [ready] = await once(worker, 'message', { signal: t.signal });
         assert.equal(ready.type, 'ready');
         assert.equal(ready.operationId, 'synthetic-operation');
@@ -227,6 +235,33 @@ test('actual loader worker reports fatal failure after readiness without exiting
             await new Promise(resolve => setTimeout(resolve, 10));
         }
         assert.equal(JSON.parse(fs.readFileSync(marker)).message, failure.message);
+    } finally {
+        try { if (worker) await worker.terminate(); }
+        finally { process.chdir(originalCwd); }
+    }
+});
+
+test('actual loader rejects an unrelated inherited Worker CWD before importing server code', { timeout: 10000 }, async t => {
+    const f = fixture(t);
+    const loader = path.join(f.server, 'ios-loader.mjs');
+    fs.copyFileSync(path.join(root, 'native-src', 'ios-loader.mjs'), loader);
+    const imported = path.join(f.server, 'entry-imported.txt');
+    fs.writeFileSync(path.join(f.server, 'server.js'), `
+        import fs from 'node:fs';
+        fs.writeFileSync(${JSON.stringify(imported)}, 'unexpected import');
+    `);
+    const worker = new Worker(pathToFileURL(loader), {
+        env: { ...process.env, TARVEN_SERVER_DIR: f.server },
+        workerData: { arguments: [loader] }, stdout: true, stderr: true,
+    });
+    worker.stdout.resume();
+    worker.stderr.resume();
+    worker.on('error', () => {});
+    try {
+        const [failure] = await once(worker, 'message', { signal: t.signal });
+        assert.equal(failure.type, 'failure');
+        assert.match(failure.message, /did not inherit its prepared runtime directory/);
+        assert.equal(fs.existsSync(imported), false);
     } finally {
         await worker.terminate();
     }

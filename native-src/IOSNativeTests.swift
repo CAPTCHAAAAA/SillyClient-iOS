@@ -92,6 +92,36 @@ enum IOSNativeTests {
                 try rejects("Unsafe native instance identity was accepted") { _ = try IOSInstanceStore.identity(identity) }
             }
         }
+        test("Captured native diagnostics remain storage-only while valid Worker frames publish once") { _, _ in
+            var routed: [(line: String, instance: String, operation: String, publishes: Bool)] = []
+            func route(_ bytes: Data) {
+                NodeRunner.routeCapturedOutput(bytes) { line, instance, operation, publishes in
+                    routed.append((line, instance, operation, publishes))
+                }
+            }
+            let diagnostic = "TO JS {\"message\":\"captured native listener delivery\"}"
+            route(Data(diagnostic.utf8))
+            var frame = Data(IOSRuntimeLogFrame.prefix.utf8)
+            frame.append(try JSONSerialization.data(withJSONObject: [
+                "instanceId": "captured-instance", "operationId": "captured-operation", "stream": "stdout",
+                "lineBase64": Data("original worker message".utf8).base64EncodedString(),
+            ]))
+            route(frame)
+            route(Data((IOSRuntimeLogFrame.prefix + "{}").utf8))
+            route(Data(repeating: 97, count: 65537))
+            try require(routed.count == 4, "Captured output was lost or duplicated")
+            try require(routed[0].line == diagnostic && routed[0].instance == "runtime"
+                        && routed[0].operation.isEmpty && !routed[0].publishes,
+                        "Native delivery output could feed another frontend log event")
+            try require(routed[1].line == "original worker message" && routed[1].instance == "captured-instance"
+                        && routed[1].operation == "captured-operation" && routed[1].publishes,
+                        "Valid Worker message lost its captured identity or publication")
+            for index in [2, 3] {
+                try require(routed[index].instance == "runtime" && routed[index].operation.isEmpty
+                            && !routed[index].publishes && routed[index].line.utf8.count < 100,
+                            "Invalid captured output was relayed or retained without a bound")
+            }
+        }
         test("Native runtime event adapter preserves the console contract and rejects obsolete local modes") { _, _ in
             let log = IOSRuntimeEvents.log(instance: "fixture-instance", operation: "fixture-operation", line: "retained message")
             try require(log["message"] as? String == "retained message" && log["line"] as? String == "retained message",
@@ -275,6 +305,60 @@ enum IOSNativeTests {
             try files.createDirectory(root.appendingPathComponent("outside"))
             try rejects("Migration read outside the selected source") { _ = try store.migrationDataDirectory(source, files: files) }
         }
+        test("Flat user folders and ZIPs map into default-user while multi-user roots keep their layout") { root, files in
+            let store = IOSInstanceStore(root: root)
+            let single = root.appendingPathComponent("single-user")
+            let settings = Data("{\"unrelated\":\"preserved\"}\n".utf8)
+            let chat = Data("{\"chat\":\"preserved\"}\n".utf8)
+            try files.createDirectory(single.appendingPathComponent("chats"))
+            try files.write(settings, to: single.appendingPathComponent("settings.json"))
+            try files.write(chat, to: single.appendingPathComponent("chats/chat.jsonl"))
+            let before = try files.snapshot(single)
+            func copyAndCheck(_ source: URL, to dataRoot: URL) throws {
+                let data = try store.migrationDataDirectory(source, files: files, portableBackup: true)
+                let target = try store.migrationDataTarget(data, files: files, dataRoot: dataRoot)
+                try files.copyTree(data, to: target, destination: files)
+                try require(files.data(dataRoot.appendingPathComponent("default-user/settings.json")) == settings,
+                            "Flat user settings did not reach default-user")
+                try require(files.data(dataRoot.appendingPathComponent("default-user/chats/chat.jsonl")) == chat,
+                            "Flat user chats did not reach default-user")
+                try require(!files.exists(dataRoot.appendingPathComponent("settings.json"))
+                            && !files.exists(dataRoot.appendingPathComponent("chats")), "Flat data was orphaned at the multi-user root")
+            }
+            try copyAndCheck(single, to: root.appendingPathComponent("folder-copy/data"))
+            let zip = root.appendingPathComponent("flat-user.zip")
+            do {
+                let archive = try Archive(url: zip, accessMode: .create)
+                for (name, bytes) in [("settings.json", settings), ("chats/chat.jsonl", chat)] {
+                    try archive.addEntry(with: name, type: .file, uncompressedSize: Int64(bytes.count),
+                                         compressionMethod: .deflate, provider: { offset, size in
+                        bytes.subdata(in: Int(offset)..<min(bytes.count, Int(offset) + size))
+                    })
+                }
+            }
+            let extracted = root.appendingPathComponent("flat-extracted")
+            try files.createDirectory(extracted)
+            try IOSSafeArchive.extract(zip, to: extracted)
+            try copyAndCheck(extracted, to: root.appendingPathComponent("zip-copy/data"))
+            try require(files.snapshot(single) == before, "Flat source data changed")
+            let multi = root.appendingPathComponent("multi-user")
+            for name in ["default-user", "another-user", "chats", "characters"] {
+                try files.createDirectory(multi.appendingPathComponent(name))
+                try files.write(settings, to: multi.appendingPathComponent("\(name)/settings.json"))
+            }
+            let multiTarget = root.appendingPathComponent("multi-copy/data")
+            let target = try store.migrationDataTarget(multi, files: files, dataRoot: multiTarget)
+            try require(target.path == multiTarget.path, "Multi-user data acquired an extra default-user layer")
+            try files.copyTree(multi, to: target, destination: files)
+            for name in ["default-user", "another-user", "chats", "characters"] {
+                try require(files.data(multiTarget.appendingPathComponent("\(name)/settings.json")) == settings,
+                            "Multi-user layout changed")
+            }
+            try files.write(settings, to: multi.appendingPathComponent("settings.json"))
+            try rejects("Ambiguous flat and nested user data was accepted") {
+                _ = try store.migrationDataTarget(multi, files: files, dataRoot: root.appendingPathComponent("ambiguous/data"))
+            }
+        }
         test("YAML configuration preserves unrelated values and validates Boolean and heartbeat inputs") { root, files in
             let store = IOSInstanceStore(root: root)
             try files.write(Data("unrelated: preserved\n".utf8), to: root.appendingPathComponent("config.yaml"))
@@ -412,6 +496,113 @@ enum IOSNativeTests {
                                            selections: selection(changed, kind: "broken_extension"))
             }
             try require(files.exists(extensionURL), "Scanned content was removed")
+        }
+        test("Sixteen live scan plans survive a capacity rejection and remain single-use") { root, files in
+            let maintenance = IOSInstanceMaintenance(store: IOSInstanceStore(root: root), now: { 1000 })
+            var plans: [(String, String)] = []
+            for index in 0..<17 {
+                let id = "scan-capacity-\(index)"
+                try files.createDirectory(root.appendingPathComponent("instances/\(id)"))
+                if index == 16 {
+                    try rejects("Scan issuance exceeded its bounded capacity") { _ = try maintenance.scan(id) }
+                } else {
+                    let scan = try maintenance.scan(id)
+                    guard let scanId = scan["scanId"] as? String else { throw IOSFileError.invalid("Scan identity is missing") }
+                    plans.append((id, scanId))
+                }
+            }
+            for (id, scanId) in plans {
+                let result = try maintenance.apply(instance: id, scanId: scanId, selections: [])
+                try require(result["success"] as? Bool == true, "A live plan was invalidated at capacity")
+                try rejects("Capacity plan could be replayed") {
+                    _ = try maintenance.apply(instance: id, scanId: scanId, selections: [])
+                }
+            }
+            _ = try maintenance.scan("scan-capacity-16")
+        }
+        test("A full 256-payload recovery batch remains usable across another instance listing") { root, files in
+            let (store, _, user) = try maintenanceFixture(root, files)
+            var originals: [String: Data] = [:]
+            for index in 0..<256 {
+                let relative = "data/default-user/extensions/broken-\(index)"
+                let bytes = Data("backup-\(index)".utf8)
+                try files.createDirectory(user.appendingPathComponent("extensions/broken-\(index)"))
+                try files.write(bytes, to: user.appendingPathComponent("extensions/broken-\(index)/index.js"))
+                originals[relative] = bytes
+            }
+            let maintenance = IOSInstanceMaintenance(store: store, now: { 1000 })
+            for _ in 0..<2 {
+                let scan = try maintenance.scan("test-instance")
+                guard let items = scan["items"] as? [[String: Any]], items.count == 128,
+                      let scanId = scan["scanId"] as? String else { throw IOSFileError.invalid("Full quarantine batch is missing") }
+                let chosen = items.map { ["id": $0["id"]!, "token": $0["token"]!] }
+                let applied = try maintenance.apply(instance: "test-instance", scanId: scanId, selections: chosen)
+                try require(applied["success"] as? Bool == true, "Full quarantine batch failed")
+            }
+            let overflow = user.appendingPathComponent("extensions/overflow")
+            try files.createDirectory(overflow)
+            let scan = try maintenance.scan("test-instance")
+            let rejected = try maintenance.apply(instance: "test-instance", scanId: scan["scanId"] as! String,
+                                                selections: selection(scan, kind: "broken_extension"))
+            try require(rejected["success"] as? Bool == false && files.exists(overflow), "Recovery overflow moved new content")
+            guard let items = try maintenance.list("test-instance")["items"] as? [[String: Any]],
+                  items.count == 256, items.allSatisfy({ $0["canRestore"] as? Bool == true }),
+                  let first = items.first, let last = items.last else { throw IOSFileError.invalid("Full recovery batch is not usable") }
+            let other = root.appendingPathComponent("instances/other-instance/data/default-user/extensions/other-broken")
+            try files.createDirectory(other)
+            try files.write(Data("other backup".utf8), to: other.appendingPathComponent("index.js"))
+            let otherScan = try maintenance.scan("other-instance")
+            let otherApplied = try maintenance.apply(instance: "other-instance", scanId: otherScan["scanId"] as! String,
+                                                     selections: selection(otherScan, kind: "broken_extension"))
+            try require(otherApplied["success"] as? Bool == true, "Other-instance quarantine failed")
+            guard let limited = (try maintenance.list("other-instance")["items"] as? [[String: Any]])?.first else {
+                throw IOSFileError.invalid("Other-instance recovery is missing")
+            }
+            try require(limited["canRestore"] as? Bool == false && limited["token"] as? String == "",
+                        "Global recovery token capacity was exceeded")
+            func restoreOriginal(_ item: [String: Any]) throws {
+                guard let recovery = item["recoveryId"] as? String, let token = item["token"] as? String,
+                      let relative = item["relativePath"] as? String, let expected = originals[relative] else {
+                    throw IOSFileError.invalid("Recovery identity or original bytes are missing")
+                }
+                let restored = try maintenance.restore(instance: "test-instance", recovery: recovery, token: token)
+                try require(restored["success"] as? Bool == true, "A live full-capacity recovery token was invalidated")
+                let path = root.appendingPathComponent("instances/test-instance/\(relative)/index.js")
+                try require(files.data(path) == expected, "Full-capacity restore changed its payload")
+                try rejects("Full-capacity recovery token was replayed") {
+                    _ = try maintenance.restore(instance: "test-instance", recovery: recovery, token: token)
+                }
+            }
+            try restoreOriginal(first)
+            guard let available = (try maintenance.list("other-instance")["items"] as? [[String: Any]])?.first,
+                  available["canRestore"] as? Bool == true, let recovery = available["recoveryId"] as? String,
+                  let token = available["token"] as? String else { throw IOSFileError.invalid("Consumed token capacity was not reusable") }
+            _ = try maintenance.restore(instance: "other-instance", recovery: recovery, token: token)
+            try require(files.data(other.appendingPathComponent("index.js")) == Data("other backup".utf8), "Other recovery changed")
+            try restoreOriginal(last)
+        }
+        test("Control-character user and extension names are preserved instead of becoming unrecoverable candidates") { root, files in
+            let (store, _, user) = try maintenanceFixture(root, files)
+            let names = ["broken\n", "broken\r", "broken\u{2028}"]
+            for name in names {
+                try files.createDirectory(user.appendingPathComponent("extensions/\(name)"))
+                try files.write(Data("preserved".utf8), to: user.appendingPathComponent("extensions/\(name)/index.js"))
+            }
+            let other = root.appendingPathComponent("instances/test-instance/data/user\n/extensions/broken")
+            try files.createDirectory(other)
+            try files.write(Data("user preserved".utf8), to: other.appendingPathComponent("index.js"))
+            try files.createDirectory(user.appendingPathComponent("extensions/valid-broken"))
+            let maintenance = IOSInstanceMaintenance(store: store)
+            let scan = try maintenance.scan("test-instance")
+            try require((scan["items"] as? [[String: Any]])?.count == 1, "Control-character name became a maintenance candidate")
+            let applied = try maintenance.apply(instance: "test-instance", scanId: scan["scanId"] as! String,
+                                                selections: selection(scan, kind: "broken_extension"))
+            try require(applied["success"] as? Bool == true, "Valid maintenance candidate was rejected")
+            for name in names {
+                try require(files.data(user.appendingPathComponent("extensions/\(name)/index.js")) == Data("preserved".utf8),
+                            "Control-character extension was moved or changed")
+            }
+            try require(files.data(other.appendingPathComponent("index.js")) == Data("user preserved".utf8), "Control-character user data changed")
         }
         test("Restore conflicts preserve both replacement content and the recovery payload") { root, files in
             let (store, instance, user) = try maintenanceFixture(root, files)

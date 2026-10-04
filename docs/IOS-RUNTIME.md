@@ -14,6 +14,9 @@ commands. A timed-out transport retains the identity until stop confirmation.
 Worker stdout and stderr have separate bounded UTF-8 line buffers. Framed logs
 carry their captured instance and operation identities into native storage;
 unframed host output belongs to the runtime, not whichever instance is current.
+Captured native/Capacitor diagnostics are stored without publishing a log event,
+preventing listener delivery output from feeding itself back into the console.
+Only validated Worker frames and explicit native business logs publish events.
 Oversized lines and saturated output are discarded within explicit bounds.
 Native accepted log work is bounded through disk completion; this does not
 claim a global lifetime disk cap for all historical instance identities.
@@ -38,6 +41,10 @@ streams only filtered data into a fresh pinned runtime. Old dependencies, Git
 metadata, and, unless explicitly selected, `secrets.json`/`secrets.json.enc`
 never enter the destination. Files are SHA-256 verified, cancellation is checked
 between chunks, and selected source guards are checked again before completion.
+Flat single-user folders and ZIP contents go into `data/default-user`; multi-user
+data roots retain their original user directories. A user handle named `chats`
+or `characters` remains a user directory, not a flat-data marker. Mixed flat and
+nested user layouts require an explicit source selection rather than guessing.
 Migration is limited to 32,768 entries, 64 levels, and 2 GiB of user data. ZIP
 imports have separate compressed/extraction limits. A selected external folder
 does not authorize reading an outside `dataRoot`; select that data root itself.
@@ -55,6 +62,10 @@ Recovery refuses same-name replacements, changed settings, metadata, payloads,
 or instance configuration. Completed records are archived outside the active
 recovery list. Inspection is bounded and a partial list reports overflow;
 empty prepared records do not consume the 256-payload active recovery capacity.
+Expiration removes only expired tokens. Issuing another scan or recovery token
+at the global capacity refuses that new token without discarding other instances'
+live plans. User and extension names with terminal line controls are excluded
+before snapshots, so maintenance cannot quarantine an unrecoverable name.
 
 `IOSRemoteCredentials` stores one atomic Keychain record per remote identity.
 Passwords never reach JavaScript, URLs, browser storage, or logs. Credentials
@@ -107,6 +118,14 @@ classes, avoiding the built-in Undici HTTP parser. Tiktoken imports remain
 possible, but unavailable tokenization throws `ERR_IOS_WASM_UNAVAILABLE`
 instead of inventing token IDs or empty decoded text.
 
+The supervisor selects the real server working directory before creating its
+Worker. The loader verifies that inherited directory before importing server
+code. Upstream's unconditional same-directory `process.chdir` is an idempotent
+Worker-local confirmation; a request for another directory fails explicitly.
+This does not provide arbitrary Worker directory changes. A stopped Worker must
+terminate before the host selects another instance directory. Main-thread loader
+execution retains normal `process.chdir` behavior.
+
 Detected startup errors write `server-failed.json` beside the server directory.
 The native readiness poll and simulator test read this marker instead of
 waiting for the entire timeout. Simulator acceptance requires HTTP 200, a
@@ -135,6 +154,11 @@ archived unsigned Release IPA. Its capability-probe
 process never creates a production console or deploys an instance. Tests,
 source assertions, host fixtures, simulator acceptance, and physical-device
 acceptance are distinct evidence categories.
+The current harness contains 27 fixture groups, including full-capacity token
+recovery, flat/multi-user migration layouts, and captured-output event routing.
+Debug bridge rejection envelopes retain bounded, redacted native diagnostics;
+oversized diagnostics fail closed without leaking a truncated credential.
+WebKit fallback reports only a sanitized domain and numeric code.
 
 Prepare a disposable SillyTavern copy with the workflow's pinned revision and
 dependencies. Do not use a personal installation: compatibility preparation
@@ -155,9 +179,13 @@ SILLYCLIENT_IOS_SERVER=/path/to/disposable/SillyTavern \
 `SILLYCLIENT_TEST_LOG` optionally preserves the full server subprocess log.
 The integration test uses fresh synthetic user data and an ephemeral loopback
 port. It disables WASM, blocks runtime Webpack imports, checks outbound fetch
-against the local server, and verifies homepage and asset responses. It kills
-its child and removes synthetic data afterward. Run it serially for any one
-prepared server copy.
+against the local server, and verifies homepage and asset responses. Its second
+case runs the production supervisor and loader with the real prepared server,
+checks actual Worker fetch/response classes, confirms listener closure, and
+restarts with a new operation in the same host process. Worker output is decoded
+from its identity-bound frames rather than treating a host log as Worker proof.
+Both cases kill and await their child processes before clearing markers and
+removing synthetic data. Run them serially for any one prepared server copy.
 
 The host integration test intentionally uses Node 18.20.4. Desktop Node
 22.16.0 eagerly initializes Undici through ESM `node:http` exports under

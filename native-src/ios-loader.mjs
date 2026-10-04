@@ -140,13 +140,38 @@ if (!fs.existsSync(serverEntry)) {
 console.log(`[ios-loader] SillyTavern serverDirectory: ${serverDir}`);
 console.log(`[ios-loader] Loading server entry: ${serverEntry}`);
 
-// 确保当前工作目录切换为 serverDir
-if (process.cwd() !== serverDir) {
+if (isMainThread) {
+    if (process.cwd() !== serverDir) {
+        try {
+            process.chdir(serverDir);
+            console.log(`[ios-loader] Successfully changed cwd to: ${serverDir}`);
+        } catch (chdirErr) {
+            console.log('[ios-loader] Warning: failed to chdir to serverDir:', chdirErr);
+        }
+    }
+} else {
     try {
-        process.chdir(serverDir);
-        console.log(`[ios-loader] Successfully changed cwd to: ${serverDir}`);
-    } catch (chdirErr) {
-        console.log('[ios-loader] Warning: failed to chdir to serverDir:', chdirErr);
+        // The host selects CWD before creating a Worker; upstream repeats that selection.
+        const expectedDirectory = fs.realpathSync(serverDir);
+        if (fs.realpathSync(process.cwd()) !== expectedDirectory) {
+            throw new Error('The server Worker did not inherit its prepared runtime directory from the host');
+        }
+        process.chdir = directory => {
+            if (typeof directory !== 'string') {
+                const error = new TypeError('The directory argument must be a string');
+                error.code = 'ERR_INVALID_ARG_TYPE';
+                throw error;
+            }
+            if (fs.realpathSync(process.cwd()) !== expectedDirectory
+                || fs.realpathSync(path.resolve(directory)) !== expectedDirectory) {
+                const error = new Error('Server Workers cannot change the host working directory');
+                error.code = 'ERR_IOS_WORKER_CWD_CHANGE';
+                throw error;
+            }
+        };
+    } catch (error) {
+        reportRuntimeFailure(error);
+        throw error;
     }
 }
 

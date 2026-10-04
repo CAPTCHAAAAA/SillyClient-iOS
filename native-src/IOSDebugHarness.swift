@@ -16,6 +16,58 @@ public final class IOSDebugHarness {
         "restoreInstanceMaintenance", "migrateInstance", "uninstallInstance", "getLogs"
     ]
 
+    static let bridgeInvocationScript = """
+        const diagnostic = value => {
+            const tooLarge = method + ': Native method failed; diagnostic exceeded safe limit';
+            if (typeof value === 'string' && value.length > 4096) return tooLarge;
+            let text = typeof value === 'string' ? value : 'Native method rejected without a diagnostic';
+            const pending = [options];
+            let remaining = 128;
+            while (pending.length && remaining-- > 0) {
+                const current = pending.pop();
+                if (!current || typeof current !== 'object') continue;
+                for (const [key, secret] of Object.entries(current)) {
+                    if (typeof secret === 'string' && secret && /password|passwd|secret|token|api[_-]?key|authorization|credential/i.test(key)) {
+                        if (secret.length > 2048) {
+                            const start = text.indexOf(secret.slice(0, 64));
+                            if (start >= 0) text = text.slice(0, start) + '[redacted]';
+                        } else {
+                            text = text.split(secret).join('[redacted]');
+                            if (text.length > 4096) return tooLarge;
+                        }
+                    } else if (secret && typeof secret === 'object') {
+                        pending.push(secret);
+                    }
+                }
+            }
+            if (pending.length) return 'Native method failed; sensitive-option scan limit reached';
+            return text
+                .replace(/(https?:\\/\\/)[^\\s/?#]*@/gi, '$1[redacted]@')
+                .replace(/\\b(Basic|Bearer)\\s+[^\\s"'<>;,]+/gi, '$1 [redacted]')
+                .replace(/([?&](?:password|passwd|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|auth|authorization|credential)=)[^&#\\s]*/gi, '$1[redacted]')
+                .replace(/(["']?(?:password|passwd|secret|token|api[_-]?key|authorization|credential)["']?\\s*[:=]\\s*)(?:"[^"]*"|'[^']*'|[^\\s,;]+)/gi, '$1[redacted]')
+                .slice(0, 2048);
+        };
+        try {
+            const plugin = window.Capacitor?.Plugins?.TarvenEnv;
+            if (!plugin || typeof plugin[method] !== 'function') throw new Error('Native bridge method is unavailable');
+            return { success: true, result: (await plugin[method](options)) ?? null };
+        } catch (error) {
+            const code = typeof error?.code === 'number' && Number.isFinite(error.code) ? String(error.code)
+                : typeof error?.code === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(error.code) ? error.code : '';
+            const message = typeof error?.message === 'string' ? error.message
+                : typeof error === 'string' ? error : 'Native method rejected without a diagnostic';
+            return { success: false, error: diagnostic(method + (code ? ' [' + code + ']' : '') + ': ' + message) };
+        }
+        """
+
+    static func webKitFailureDescription(_ error: Error) -> String {
+        let native = error as NSError
+        let domain = String(native.domain.prefix(80))
+            .replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "_", options: .regularExpression)
+        return "WebKit bridge evaluation failed (\(domain):\(native.code))"
+    }
+
     public init() {
         directory = Self.testDirectory()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -68,15 +120,17 @@ public final class IOSDebugHarness {
             respond(id, ["success": false, "error": "Unsupported test method"])
             return
         }
-        webView.callAsyncJavaScript("""
-            const plugin = window.Capacitor?.Plugins?.TarvenEnv;
-            if (!plugin || typeof plugin[method] !== 'function') throw new Error('Native bridge method is unavailable: ' + method);
-            return await plugin[method](options);
-            """, arguments: ["method": method, "options": request["options"] as? [String: Any] ?? [:]],
+        webView.callAsyncJavaScript(Self.bridgeInvocationScript, arguments: ["method": method, "options": request["options"] as? [String: Any] ?? [:]],
             in: nil, in: .page) { [weak self] result in
                 switch result {
-                case .success(let value): self?.respond(id, ["success": true, "result": value])
-                case .failure(let error): self?.respond(id, ["success": false, "error": error.localizedDescription])
+                case .success(let value):
+                    guard let response = value as? [String: Any], response["success"] as? Bool != nil else {
+                        self?.respond(id, ["success": false, "error": "Native bridge returned an invalid test response"])
+                        return
+                    }
+                    self?.respond(id, response)
+                case .failure(let error):
+                    self?.respond(id, ["success": false, "error": Self.webKitFailureDescription(error)])
                 }
             }
     }
