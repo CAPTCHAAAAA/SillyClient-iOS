@@ -9,6 +9,7 @@ CAP_PLUGIN(TarvenEnvPlugin, "TarvenEnv",
     CAP_PLUGIN_METHOD(scanInstances, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(provisionAndStart, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(enterImmersive, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(openExternalUrl, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(exitImmersive, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(returnToTavern, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(closeTavern, CAPPluginReturnPromise);
@@ -33,6 +34,10 @@ CAP_PLUGIN(TarvenEnvPlugin, "TarvenEnv",
     CAP_PLUGIN_METHOD(uninstallInstance, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(cleanGarbage, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(deleteGarbageItem, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(scanInstanceMaintenance, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(applyInstanceMaintenance, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(listInstanceMaintenanceRecovery, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(restoreInstanceMaintenance, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(openFilesApp, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(setSecret, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(getSecret, CAPPluginReturnPromise);
@@ -40,5 +45,7 @@ CAP_PLUGIN(TarvenEnvPlugin, "TarvenEnv",
     CAP_PLUGIN_METHOD(readTextFile, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(migrateInstance, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(checkUpdate, CAPPluginReturnPromise);
+#if DEBUG
     CAP_PLUGIN_METHOD(dismissPickerForTesting, CAPPluginReturnPromise);
+#endif
 )

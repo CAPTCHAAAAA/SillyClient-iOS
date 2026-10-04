@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 const [device, evidenceDir = 'evidence'] = process.argv.slice(2);
 if (!device) {
@@ -19,7 +19,7 @@ function captureScreenshot(name) {
     const filename = path.join(outDir, `${name}.png`);
     try {
         execFileSync('xcrun', ['simctl', 'io', device, 'screenshot', filename], {
-            timeout: 15000,
+            timeout: 10000,
             stdio: 'ignore',
         });
         console.log(`[Recorder] Captured screenshot: ${name}.png`);
@@ -28,21 +28,12 @@ function captureScreenshot(name) {
     }
 }
 
-// 1. Initial screenshot
-captureScreenshot('00-simulator-boot');
+// 1. Initial screenshot after simulator boots
+setTimeout(() => {
+    captureScreenshot('00-simulator-ready');
+}, 1000);
 
-// 2. Start video recording in background
-const videoPath = path.join(outDir, 'simulator-walkthrough.mp4');
-console.log(`[Recorder] Starting screen recording to ${videoPath}...`);
-const videoProcess = spawn('xcrun', ['simctl', 'io', device, 'recordVideo', videoPath], {
-    stdio: 'ignore',
-});
-
-videoProcess.on('error', err => {
-    console.warn(`[Recorder] Video recording process error: ${err.message}`);
-});
-
-// 3. Monitor simulator-results.json for step completions
+// 2. Monitor simulator-results.json for step completions
 const resultsFile = path.join(outDir, 'simulator-results.json');
 let capturedSteps = 0;
 
@@ -59,19 +50,15 @@ const pollInterval = setInterval(() => {
             captureScreenshot(`${num}-${slug}`);
         }
     } catch {}
-}, 300);
+}, 500);
 
-// 4. Graceful shutdown handler
+// 3. Graceful shutdown handler
 function stopRecording() {
     clearInterval(pollInterval);
     captureScreenshot('99-simulator-final');
-    if (videoProcess && !videoProcess.killed) {
-        console.log('[Recorder] Stopping video recording cleanly...');
-        videoProcess.kill('SIGINT');
-    }
     setTimeout(() => {
         process.exit(0);
-    }, 2000);
+    }, 1000);
 }
 
 process.on('SIGINT', stopRecording);
