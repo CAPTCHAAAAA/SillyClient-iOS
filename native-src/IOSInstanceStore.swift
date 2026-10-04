@@ -512,7 +512,7 @@ final class IOSInstanceStore {
             try NodeRunner.shared.stoppedMutation(instance: id) {
                 records.removeValue(forKey: id)
                 records.removeValue(forKey: cleanId)
-                try files.writeJSON(records, to: registryURL)
+                try self.files.writeJSON(records, to: self.registryURL)
             }
             return ["success": true, "freedBytes": 0]
         }
