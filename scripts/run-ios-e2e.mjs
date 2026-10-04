@@ -183,13 +183,19 @@ async function verifyReady(operationId) {
 async function verifyTavern() {
     const deadline = Date.now() + 30000;
     let actual;
+    let lastError;
     while (Date.now() < deadline) {
-        actual = await command(undefined, {}, 'tavern');
-        if (actual?.hasChat && actual?.hasInput && actual?.hasClient && actual.ready === 'complete') break;
+        try {
+            actual = await command(undefined, {}, 'tavern');
+            if (actual?.hasChat && actual?.hasInput && actual?.hasClient && actual.ready === 'complete') break;
+        } catch (error) {
+            lastError = error;
+            assertAppAlive();
+        }
         await sleep(300);
     }
     assert.ok(actual?.hasChat && actual?.hasInput && actual?.hasClient && actual.ready === 'complete',
-        'Real Tavern JavaScript and DOM did not become ready');
+        `Real Tavern JavaScript and DOM did not become ready: ${lastError?.message || ''}`);
     assert.equal(new URL(actual.url).origin, origin);
     return actual;
 }

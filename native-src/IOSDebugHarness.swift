@@ -137,12 +137,31 @@ public final class IOSDebugHarness {
                 return
             }
             tavern.evaluateJavaScript("""
-                ({url: location.href, ready: document.readyState, hasChat: !!document.querySelector('#chat'),
-                  hasInput: !!document.querySelector('#send_textarea'), title: document.title,
-                  hasClient: typeof window.SillyTavern?.getContext === 'function' && typeof window.jQuery === 'function'})
+                (function() {
+                    try {
+                        return JSON.stringify({
+                            url: location.href || '',
+                            ready: document.readyState || '',
+                            hasChat: Boolean(document.querySelector('#chat')),
+                            hasInput: Boolean(document.querySelector('#send_textarea')),
+                            title: document.title || '',
+                            hasClient: typeof window.SillyTavern?.getContext === 'function' && typeof window.jQuery === 'function'
+                        });
+                    } catch (e) {
+                        return JSON.stringify({ ready: 'loading', error: String(e) });
+                    }
+                })()
                 """) { [weak self] result, error in
-                self?.respond(id, ["success": error == nil, "result": result ?? NSNull(),
-                                  "error": error?.localizedDescription ?? ""])
+                if let str = result as? String,
+                   let data = str.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    self?.respond(id, ["success": true, "result": obj, "error": ""])
+                } else if error == nil, let dict = result as? [String: Any] {
+                    self?.respond(id, ["success": true, "result": dict, "error": ""])
+                } else {
+                    self?.respond(id, ["success": false, "result": NSNull(),
+                                      "error": error?.localizedDescription ?? "Evaluation failed"])
+                }
             }
             return
         }
