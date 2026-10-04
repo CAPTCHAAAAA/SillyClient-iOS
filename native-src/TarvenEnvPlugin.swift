@@ -29,7 +29,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             "readTextFile", "migrateInstance", "sendCommand", "reloadTavern", "clearWebViewData",
             "setPullToRefresh", "uninstallInstance", "cleanGarbage", "deleteGarbageItem", "openFilesApp",
             "setSecret", "getSecret", "deleteSecret", "checkUpdate", "scanInstanceMaintenance",
-            "applyInstanceMaintenance", "listInstanceMaintenanceRecovery", "restoreInstanceMaintenance"
+            "applyInstanceMaintenance", "listInstanceMaintenanceRecovery", "restoreInstanceMaintenance",
+            "checkLegacyInstances", "migrateLegacyInstances", "renameInstance", "relocateInstance"
         ]
         #if DEBUG
         names.append("dismissPickerForTesting")
@@ -604,6 +605,26 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         pendingPickerCall?.reject("Selection cancelled")
         pendingPickerCall = nil
+    }
+    @objc func checkLegacyInstances(_ call: CAPPluginCall) {
+        call.resolve(["instances": []])
+    }
+    @objc func migrateLegacyInstances(_ call: CAPPluginCall) {
+        call.resolve(["success": true, "results": []])
+    }
+    @objc func renameInstance(_ call: CAPPluginCall) {
+        perform(call) {
+            let id = try self.id(call)
+            let newName = call.getString("newName") ?? id
+            return try self.store.rename(instanceId: id, newName: newName)
+        }
+    }
+    @objc func relocateInstance(_ call: CAPPluginCall) {
+        perform(call) {
+            let id = try self.id(call)
+            let targetPath = call.getString("targetPath")
+            return try self.store.relocate(instanceId: id, targetPath: targetPath)
+        }
     }
     #if DEBUG
     @objc func dismissPickerForTesting(_ call: CAPPluginCall) {

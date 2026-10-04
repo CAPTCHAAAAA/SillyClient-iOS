@@ -471,6 +471,9 @@ async function simulateDriver(scenario = 'success') {
             return { success: true, result: { ready: 'complete', hasChat: true, hasInput: true, hasClient: true,
                 title: 'SillyTavern', url: 'http://127.0.0.1:8000/' } };
         }
+        if (request.action === 'evalConsole') {
+            return { success: true, result: null };
+        }
         const options = request.options;
         const success = result => ({ success: true, result });
         const reject = error => ({ success: false, error });

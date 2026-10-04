@@ -45,6 +45,10 @@ CAP_PLUGIN(TarvenEnvPlugin, "TarvenEnv",
     CAP_PLUGIN_METHOD(readTextFile, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(migrateInstance, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(checkUpdate, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(checkLegacyInstances, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(migrateLegacyInstances, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(renameInstance, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(relocateInstance, CAPPluginReturnPromise);
 #if DEBUG
     CAP_PLUGIN_METHOD(dismissPickerForTesting, CAPPluginReturnPromise);
 #endif

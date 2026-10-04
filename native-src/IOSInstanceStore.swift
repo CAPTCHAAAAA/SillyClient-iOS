@@ -550,4 +550,45 @@ final class IOSInstanceStore {
         try fm.removeItem(at: files.checked(target))
         return ["success": true, "freedBytes": 0]
     }
+
+    func rename(instanceId: String, newName: String) throws -> [String: Any] {
+        let oldId = try Self.identity(instanceId)
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw IOSFileError.invalid("A non-empty new instance name is required")
+        }
+        var records = try registry()
+        var record = records[oldId] ?? [:]
+        record["name"] = trimmed
+        records[oldId] = record
+        try self.files.writeJSON(records, to: registryURL)
+        let dir = try? directory(oldId)
+        return [
+            "success": true,
+            "oldId": oldId,
+            "newId": oldId,
+            "oldPath": dir?.path ?? "",
+            "newPath": dir?.path ?? ""
+        ]
+    }
+
+    func relocate(instanceId: String, targetPath: String?) throws -> [String: Any] {
+        let id = try Self.identity(instanceId)
+        let sourceDir = try directory(id)
+        if targetPath == nil || targetPath == sourceDir.path {
+            return ["success": true, "instanceId": id, "oldPath": sourceDir.path, "newPath": sourceDir.path, "unchanged": true]
+        }
+        let target = try IOSInstallationLocations.path(targetPath!)
+        guard target.path != sourceDir.path else {
+            return ["success": true, "instanceId": id, "oldPath": sourceDir.path, "newPath": sourceDir.path, "unchanged": true]
+        }
+        try files.move(sourceDir, to: target)
+        var records = try registry()
+        var record = records[id] ?? [:]
+        record["path"] = target.path
+        record["documentsRelativePath"] = nil
+        records[id] = record
+        try self.files.writeJSON(records, to: registryURL)
+        return ["success": true, "instanceId": id, "oldPath": sourceDir.path, "newPath": target.path, "unchanged": false]
+    }
 }

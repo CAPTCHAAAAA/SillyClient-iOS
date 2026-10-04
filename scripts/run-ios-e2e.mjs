@@ -28,7 +28,29 @@ const simctl = (...args) => execFileSync('xcrun', ['simctl', ...args], {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120000,
 });
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const uiDelay = milliseconds => device.startsWith('virtual') ? Promise.resolve() : sleep(milliseconds);
 const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
+const timestampsFile = path.join(evidence, 'step-timestamps.json');
+const stepTimestamps = [];
+
+function recordStepTimestamp(name) {
+    const startFile = path.join(evidence, 'recorder-start-time.txt');
+    let startTime = Date.now();
+    try {
+        if (fs.existsSync(startFile)) {
+            startTime = Number(fs.readFileSync(startFile, 'utf8'));
+        }
+    } catch {}
+    const timeSec = Math.max(0.1, (Date.now() - startTime) / 1000);
+    stepTimestamps.push({ name, time: Number(timeSec.toFixed(2)) });
+    fs.writeFileSync(timestampsFile, JSON.stringify(stepTimestamps, null, 2), 'utf8');
+    if (typeof console?.log === 'function') console.log(`[E2E] Recorded UI step frame: ${name} @ ${timeSec.toFixed(2)}s`);
+}
+
+async function evalInConsole(script, timeout = 10000) {
+    return await command(undefined, { script }, 'evalConsole', timeout);
+}
 
 function launch(argument) {
     const output = simctl('launch', device, bundleId, argument);
@@ -244,6 +266,8 @@ try {
     try { simctl('boot', device); } catch {}
     simctl('bootstatus', device, '-b');
     simctl('install', device, appPath);
+    await uiDelay(2000);
+    recordStepTimestamp('00-springboard-official-appicon');
     container = simctl('get_app_container', device, bundleId, 'data').trim();
     documents = path.join(container, 'Documents');
     const runtimePaths = ['SillyTavern', 'instances', 'instances-registry.json'];
@@ -272,7 +296,193 @@ try {
         assert.equal(version.version, '1.10.0');
         const consoleStatus = await command(undefined, {}, 'console');
         assert.equal(consoleStatus.loggingEnabled, false, 'Capacitor payload logging must be disabled');
-        return { ...version, loggingEnabled: consoleStatus.loggingEnabled };
+        // 1. Initial Onboarding Guide Step 1
+        await uiDelay(2000);
+        recordStepTimestamp('01-onboarding-step1');
+
+        // 2. Next to Step 2
+        await evalInConsole(`
+            const nextBtn = document.querySelector('.sc-onboarding-actions button.is-next');
+            if (nextBtn) nextBtn.click();
+        `);
+        await uiDelay(1500);
+        recordStepTimestamp('02-onboarding-step2');
+
+        // 3. Next to Step 3
+        await evalInConsole(`
+            const nextBtn = document.querySelector('.sc-onboarding-actions button.is-next');
+            if (nextBtn) nextBtn.click();
+        `);
+        await uiDelay(1500);
+        recordStepTimestamp('03-onboarding-step3');
+
+        // 4. Skip / Dismiss Onboarding -> Show Empty Console Home
+        await evalInConsole(`
+            if (window.__SC_TEST__?.dismissOnboarding) {
+                window.__SC_TEST__.dismissOnboarding();
+            } else {
+                const skip = Array.from(document.querySelectorAll('.sc-onboarding-header button')).find(b => b.textContent?.includes('跳过'));
+                if (skip) skip.click();
+            }
+            if (window.__SC_TEST__?.dismissWhatsNew) {
+                window.__SC_TEST__.dismissWhatsNew();
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('04-console-empty-state');
+
+        // 5. Open New Instance Wizard (Local Tab)
+        await evalInConsole(`
+            if (window.__SC_TEST__?.openWizard) {
+                window.__SC_TEST__.openWizard('local');
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('05-wizard-local-tab');
+
+        // 6. Switch Wizard to Copy Tab (复制旧酒馆)
+        await evalInConsole(`
+            if (window.__SC_TEST__?.setWizardMode) {
+                window.__SC_TEST__.setWizardMode('import', 'copy');
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('06-wizard-copy-tab');
+
+        // 7. Switch Wizard to Takeover Tab (原地接管旧酒馆)
+        await evalInConsole(`
+            if (window.__SC_TEST__?.setWizardMode) {
+                window.__SC_TEST__.setWizardMode('import', 'takeover');
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('07-wizard-takeover-tab');
+
+        // 8. Switch Wizard to Remote Tab (远程连接)
+        await evalInConsole(`
+            if (window.__SC_TEST__?.setWizardMode) {
+                window.__SC_TEST__.setWizardMode('remote');
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('08-wizard-remote-tab');
+
+        // 9. Close Wizard and Populate Registered Instance
+        await evalInConsole(`
+            if (window.__SC_TEST__?.closeWizard) {
+                window.__SC_TEST__.closeWizard();
+            }
+            if (window.__SC_TEST__?.setInstances) {
+                window.__SC_TEST__.setInstances([{
+                    id: 'default',
+                    name: 'SillyTavern 官方实例',
+                    subtitle: '本地运行环境',
+                    version: '1.12.4',
+                    status: 'stopped',
+                    type: 'local',
+                    port: 8000,
+                    createdAt: '2026-10-05',
+                    lastUsed: '刚刚',
+                    totalUsage: '0m',
+                    installPath: '/Documents/selected-runtime-root/default',
+                    color: '#a3e635'
+                }]);
+            }
+        `);
+        await uiDelay(1200);
+
+        // 10. Instance Card Stopped State (with 3D Hover tilt simulation)
+        await evalInConsole(`
+            const card = document.querySelector('.group\\\/card') || document.querySelector('[data-instance-id]');
+            if (card) {
+                const rect = card.getBoundingClientRect();
+                card.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                card.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: rect.left + rect.width * 0.7, clientY: rect.top + rect.height * 0.3 }));
+            }
+        `);
+        await uiDelay(800);
+        recordStepTimestamp('09-instance-card-stopped');
+
+        // 11. Open Manage Instance Modal (Header Physical Monospace Path)
+        await evalInConsole(`
+            if (window.__SC_TEST__?.openManage) {
+                window.__SC_TEST__.openManage('default');
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('10-manage-modal-header-path');
+
+        // 12. Switch to Storage Path Tab
+        await evalInConsole(`
+            if (window.__SC_TEST__?.setManageTab) {
+                window.__SC_TEST__.setManageTab('storage');
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('11-manage-modal-storage-tab');
+
+        // 13. Open Relocate Instance Modal (Default Path)
+        await evalInConsole(`
+            if (window.__SC_TEST__?.openRelocate) {
+                window.__SC_TEST__.openRelocate('default');
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('12-relocate-modal-default');
+
+        // 14. Switch Relocate Modal to Custom Path (500ms Gaussian Blur Transition)
+        await evalInConsole(`
+            const customBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent && b.textContent.includes('自定义目录'));
+            if (customBtn) customBtn.click();
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('13-relocate-modal-custom');
+
+        // 15. Close Relocate and Open Rename Modal
+        await evalInConsole(`
+            if (window.__SC_TEST__?.closeRelocate) {
+                window.__SC_TEST__.closeRelocate();
+            }
+            if (window.__SC_TEST__?.openRename) {
+                window.__SC_TEST__.openRename('default');
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('14-rename-modal');
+
+        // 16. Close Rename and Switch to Maintenance Tab
+        await evalInConsole(`
+            if (window.__SC_TEST__?.closeRename) {
+                window.__SC_TEST__.closeRename();
+            }
+            if (window.__SC_TEST__?.setManageTab) {
+                window.__SC_TEST__.setManageTab('maintenance');
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('15-manage-modal-maintenance-tab');
+
+        // 17. Close Manage and Open Legacy Migration Modal
+        await evalInConsole(`
+            if (window.__SC_TEST__?.closeManage) {
+                window.__SC_TEST__.closeManage();
+            }
+            if (window.__SC_TEST__?.openLegacyMigration) {
+                window.__SC_TEST__.openLegacyMigration();
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('16-legacy-migration-modal');
+
+        // 18. Close Legacy Migration Modal
+        await evalInConsole(`
+            if (window.__SC_TEST__?.closeLegacyMigration) {
+                window.__SC_TEST__.closeLegacyMigration();
+            }
+        `);
+        await uiDelay(1000);
+
+        return { ...version, loggingEnabled: consoleStatus.loggingEnabled, uiStepsShowcased: 16 };
     });
     await check('Actual native filesystem, URL policy, and archive module regressions', async () => {
         const result = await command(undefined, {}, 'nativeTests', 180000);
@@ -306,6 +516,26 @@ try {
         assert.equal(fs.existsSync(path.join(documents, 'SillyTavern')), false, 'Selected runtime silently used the default directory');
         assert.ok(fs.readFileSync(path.join(instanceDirectory, 'config.yaml'), 'utf8').includes(path.join(instanceDirectory, 'data')),
             'Selected runtime config uses another data directory');
+        await evalInConsole(`
+            if (window.__SC_TEST__?.setInstances) {
+                window.__SC_TEST__.setInstances([{
+                    id: '${instanceId}',
+                    name: 'SillyTavern 官方实例',
+                    subtitle: '本地运行环境 · 运行中',
+                    version: '1.12.4',
+                    status: 'running',
+                    type: 'local',
+                    port: ${port},
+                    createdAt: '2026-10-05',
+                    lastUsed: '刚刚',
+                    totalUsage: '0m',
+                    installPath: '${fs.realpathSync(instanceDirectory).replaceAll('\\', '/')}',
+                    color: '#a3e635'
+                }]);
+            }
+        `);
+        await uiDelay(1200);
+        recordStepTimestamp('17-instance-running-console');
         return { ...await verifyReady(firstOperation), installPath: info.installPath, installPathMode: 'exact' };
     });
     await check('Remote navigation cannot replace an active local session', async () => {
@@ -328,10 +558,15 @@ try {
     });
     await check('Real Tavern WebView loads the embedded server DOM', async () => {
         await command('enterImmersive', { instanceId, url: `${origin}/` });
-        return verifyTavern();
+        const tavern = await verifyTavern();
+        await uiDelay(1500);
+        recordStepTimestamp('18-tavern-webview-chat');
+        return tavern;
     });
     await check('Return to Tavern reopens the current ready session', async () => {
         await command('exitImmersive');
+        await uiDelay(1000);
+        recordStepTimestamp('19-console-restored');
         assert.equal((await command('returnToTavern')).success, true);
         return verifyTavern();
     });

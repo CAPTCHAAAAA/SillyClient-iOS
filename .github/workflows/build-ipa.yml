@@ -104,6 +104,8 @@ jobs:
         run: |
           cp native-src/Info.plist web/capacitor-ui/ios/App/App/Info.plist
           cp native-src/AppDelegate.swift web/capacitor-ui/ios/App/App/AppDelegate.swift
+          rm -rf web/capacitor-ui/ios/App/App/Assets.xcassets/AppIcon.appiconset
+          cp -R native-src/Assets.xcassets/AppIcon.appiconset web/capacitor-ui/ios/App/App/Assets.xcassets/
           node --input-type=module -e "
             import fs from 'node:fs';
             const configPath = 'web/capacitor-ui/ios/App/App/capacitor.config.json';

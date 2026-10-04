@@ -18,7 +18,7 @@ import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
 import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId } from "@/capacitor-plugin";
-import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection } from "@/lib/install-location";
+import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection, sanitizeFolderName } from "@/lib/install-location";
 import { normalizeStoredInstances, serializeInstanceRecords, parseInstanceBackup, type StoredInstance } from "@/lib/instance-persistence";
 import { GLOBAL_LOG_KEY, instanceLogs, type LogLine } from "@/lib/log-store";
 import { OperationCoordinator, OperationCancelledError, type OperationContext } from "@/lib/operation-coordinator";
@@ -26,6 +26,8 @@ import { APP_VERSION } from "@/constants/app-version";
 import { fetchAppUpdate } from "@/lib/app-update";
 import OnboardingGuide from "@/components/onboarding/OnboardingGuide";
 import { WhatsNewModal } from "@/components/modals/WhatsNewModal";
+import { LegacyMigrationModal, type LegacyMigrationItem } from "@/components/modals/LegacyMigrationModal";
+import { RelocateInstanceModal } from "@/components/modals/RelocateInstanceModal";
 import { LAYERS } from "@/constants/layers";
 import { useLayerStack } from "@/hooks/useLayerStack";
 import { LayerBackdrop } from "@/components/common/LayerBackdrop";
@@ -214,6 +216,12 @@ function SillyClientLauncher() {
     () => (!isWeb || isWindows) && !isShowcase && localStorage.getItem(ONBOARDING_KEY) === ONBOARDING_VERSION && localStorage.getItem(WHATS_NEW_KEY) !== WHATS_NEW_VERSION,
   );
   const [isWhatsNewClosing, setIsWhatsNewClosing] = useState(false);
+  const [showLegacyMigration, setShowLegacyMigration] = useState(false);
+  const [isLegacyMigrationClosing, setIsLegacyMigrationClosing] = useState(false);
+  const [legacyMigrationList, setLegacyMigrationList] = useState<LegacyMigrationItem[]>([]);
+  const [relocatingInstance, setRelocatingInstance] = useState<TavernInstance | null>(null);
+  const [showRelocateModal, setShowRelocateModal] = useState(false);
+  const [isRelocateModalClosing, setIsRelocateModalClosing] = useState(false);
   const [instances, setInstances] = useState<TavernInstance[]>(() => {
     if (isShowcase) return [];
     const loaded = loadInstances();
@@ -391,6 +399,8 @@ function SillyClientLauncher() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [isRenameClosing, setIsRenameClosing] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [isRenamingSaving, setIsRenamingSaving] = useState(false);
 
   // 数据导入文件 ref
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -643,9 +653,9 @@ function SillyClientLauncher() {
     return () => { cancelled = true; };
   }, [isShowcase]);
 
-  // 管理面板打开且切到关于页时,拉取真实实例数据
+  // 管理面板打开时，立即拉取真实实例数据
   useEffect(() => {
-    if (!showManagePanel || (manageTab !== "about" && manageTab !== "storage")) return;
+    if (!showManagePanel) return;
     const t = showManagePanel;
     setAboutInfo(null);
     (async () => {
@@ -678,7 +688,7 @@ function SillyClientLauncher() {
         }
       } catch { /* 远程或非 Capacitor */ }
     })();
-  }, [showManagePanel, manageTab]);
+  }, [showManagePanel]);
 
   const toggleBgPanel = () => {
     if (showBgPanel) {
@@ -1366,7 +1376,7 @@ function SillyClientLauncher() {
         return;
       }
       instanceDisplayName = rawGivenName;
-      safeCandidateId = rawGivenName.replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^[._-]+|[._-]+$/g, "") || "instance";
+      safeCandidateId = sanitizeFolderName(rawGivenName);
     } else {
       // 未输入名称时自动编号：新实例、新实例 (2)、新实例 (3)...
       const baseName = "新实例";
@@ -1379,14 +1389,14 @@ function SillyClientLauncher() {
         chosenName = `${baseName} (${counter++})`;
       }
       instanceDisplayName = chosenName;
-      safeCandidateId = chosenName.replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^[._-]+|[._-]+$/g, "") || "instance";
+      safeCandidateId = sanitizeFolderName(chosenName);
     }
 
     let candidateId = safeCandidateId;
     let counter = 2;
     const existingIds = new Set(instances.map(i => (i.installDir || i.id).toLowerCase()));
     while (existingIds.has(candidateId.toLowerCase())) {
-      candidateId = `${safeCandidateId}-${counter++}`;
+      candidateId = `${safeCandidateId} (${counter++})`;
     }
     const instanceId = candidateId;
     const operation = operations.begin(instanceId, "create");
@@ -1790,10 +1800,85 @@ function SillyClientLauncher() {
     setIsRenameClosing(true);
     renameCloseTimerRef.current = setTimeout(() => {
       setRenamingId(null);
+      setRenameValue("");
+      setRenameError(null);
       setIsRenameClosing(false);
       renameCloseTimerRef.current = null;
     }, PANEL_EXIT_MS);
   }, [isRenameClosing, renamingId]);
+
+  const executeRenameInstance = useCallback(async (instanceId: string, newName: string): Promise<boolean> => {
+    const trimmed = newName.trim();
+    if (!trimmed) return false;
+
+    const target = instances.find(inst => inst.id === instanceId);
+    if (!target) return false;
+
+    // 如果名称没有发生改变，直接返回成功
+    if (trimmed === (target.subtitle || target.name)) {
+      return true;
+    }
+
+    // 远程实例无本地文件系统目录，仅更新显示名称
+    if (target.type === "remote") {
+      setInstances(prev => prev.map(inst => inst.id === instanceId ? { ...inst, name: trimmed, subtitle: trimmed } : inst));
+      setShowManagePanel(prev => prev && prev.id === instanceId ? { ...prev, name: trimmed, subtitle: trimmed } : prev);
+      return true;
+    }
+
+    // 严密保护：如果实例正在运行，无法安全重命名底层文件夹
+    if (target.status === "running") {
+      throw new Error("实例正在运行中，请先停止实例再执行重命名！");
+    }
+
+    const res = await TarvenEnv.renameInstance({
+      instanceId: target.installDir || target.id,
+      newName: trimmed,
+      installPath: target.installPath,
+    });
+
+    if (res && res.success) {
+      setInstances(prev => prev.map(inst => {
+        if (inst.id === instanceId || inst.installDir === instanceId) {
+          return {
+            ...inst,
+            id: res.newId,
+            name: trimmed,
+            subtitle: trimmed,
+            installDir: res.newId,
+            installPath: res.newPath,
+          };
+        }
+        return inst;
+      }));
+
+      setShowManagePanel(prev => {
+        if (prev && (prev.id === instanceId || prev.installDir === instanceId)) {
+          return {
+            ...prev,
+            id: res.newId,
+            name: trimmed,
+            subtitle: trimmed,
+            installDir: res.newId,
+            installPath: res.newPath,
+          };
+        }
+        return prev;
+      });
+
+      setInstanceSnapshots(prev => {
+        if (!prev[instanceId]) return prev;
+        const next = { ...prev };
+        next[res.newId] = next[instanceId];
+        delete next[instanceId];
+        return next;
+      });
+
+      return true;
+    }
+
+    return false;
+  }, [instances]);
 
   const openInstanceTerminal = useCallback((instance: TavernInstance) => {
     setTerminalInstanceId(instance.id);
@@ -2065,13 +2150,101 @@ function SillyClientLauncher() {
     }
   }, []);
 
+  const dismissLegacyMigration = useCallback(() => {
+    setIsLegacyMigrationClosing(true);
+    setTimeout(() => {
+      setShowLegacyMigration(false);
+      setIsLegacyMigrationClosing(false);
+    }, PANEL_EXIT_MS);
+  }, []);
+
+  const handleLegacyMigrationComplete = useCallback(() => {
+    if (TarvenEnv.scanInstances) {
+      TarvenEnv.scanInstances()
+        .then(({ instances: scanned }) => {
+          if (scanned && scanned.length > 0) {
+            setInstances((prev) => {
+              const updated = prev.map((inst) => {
+                const safeId = inst.installDir || inst.id;
+                const found = scanned.find((s) => s.instanceId === safeId);
+                if (found) {
+                  return {
+                    ...inst,
+                    installPath: found.path,
+                  };
+                }
+                return inst;
+              });
+              saveInstances(updated);
+              return updated;
+            });
+          }
+        })
+        .catch(() => {});
+    }
+  }, []);
+
   const dismissWhatsNew = useCallback(() => {
     localStorage.setItem(WHATS_NEW_KEY, WHATS_NEW_VERSION);
     setIsWhatsNewClosing(true);
     setTimeout(() => {
       setShowWhatsNew(false);
       setIsWhatsNewClosing(false);
+
+      // 公告关闭后，检测是否需要一键迁移旧版路径实例
+      if (isWindows && TarvenEnv.checkLegacyInstances) {
+        TarvenEnv.checkLegacyInstances()
+          .then(({ instances }) => {
+            if (instances && instances.length > 0) {
+              setLegacyMigrationList(instances);
+              setShowLegacyMigration(true);
+              setIsLegacyMigrationClosing(false);
+            }
+          })
+          .catch(() => {});
+      }
     }, PANEL_EXIT_MS);
+  }, [isWindows]);
+
+  const openRelocateModal = useCallback((target: TavernInstance) => {
+    setRelocatingInstance(target);
+    setShowRelocateModal(true);
+    setIsRelocateModalClosing(false);
+  }, []);
+
+  const closeRelocateModal = useCallback(() => {
+    setIsRelocateModalClosing(true);
+    setTimeout(() => {
+      setShowRelocateModal(false);
+      setIsRelocateModalClosing(false);
+      setRelocatingInstance(null);
+    }, PANEL_EXIT_MS);
+  }, []);
+
+  const handleInstanceRelocated = useCallback((instanceId: string, newPath: string) => {
+    setInstances((prev) => {
+      const updated = prev.map((inst) => {
+        if (inst.id === instanceId || inst.installDir === instanceId) {
+          return {
+            ...inst,
+            installPath: newPath,
+          };
+        }
+        return inst;
+      });
+      saveInstances(updated);
+      return updated;
+    });
+
+    setShowManagePanel((current) => {
+      if (current && (current.id === instanceId || current.installDir === instanceId)) {
+        return {
+          ...current,
+          installPath: newPath,
+        };
+      }
+      return current;
+    });
   }, []);
 
   const openWhatsNew = useCallback(() => {
@@ -2180,6 +2353,110 @@ function SillyClientLauncher() {
   useEffect(() => {
     if (activeCardMenu) return registerLayer("card_menu", closeCardMenu);
   }, [activeCardMenu, registerLayer, closeCardMenu]);
+
+  // 自动化测试与真机/模拟器端到端走查驱动入口
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      (window as unknown as { __SC_TEST__?: unknown }).__SC_TEST__ = {
+        dismissOnboarding: () => {
+          dismissOnboarding();
+        },
+        dismissWhatsNew: () => {
+          dismissWhatsNew();
+        },
+        openWizard: (mode: "local" | "import" | "remote" = "local", accessMode: "copy" | "takeover" = "copy") => {
+          setNewInstanceMode(mode);
+          if (mode === "import") {
+            setMigrationAccessMode(accessMode);
+          }
+          setShowNewInstancePanel(true);
+          setIsNewInstancePanelClosing(false);
+        },
+        closeWizard: () => {
+          setIsNewInstancePanelClosing(true);
+          setTimeout(() => {
+            setShowNewInstancePanel(false);
+            setIsNewInstancePanelClosing(false);
+          }, PANEL_EXIT_MS);
+        },
+        setWizardMode: (mode: "local" | "import" | "remote", accessMode: "copy" | "takeover" = "copy") => {
+          setNewInstanceMode(mode);
+          if (mode === "import") {
+            setMigrationAccessMode(accessMode);
+          }
+        },
+        openManage: (instanceId?: string) => {
+          const target = instances.find(i => i.id === instanceId) || instances[0] || DEMO_INSTANCE;
+          setShowManagePanel(target);
+          setIsManagePanelClosing(false);
+        },
+        setManageTab: (tab: ManageTab) => {
+          setManageTab(tab);
+        },
+        closeManage: () => {
+          closeManagePanel();
+        },
+        openRelocate: (instanceId?: string) => {
+          const target = instances.find(i => i.id === instanceId) || instances[0] || DEMO_INSTANCE;
+          setRelocatingInstance(target);
+          setShowRelocateModal(true);
+          setIsRelocateModalClosing(false);
+        },
+        closeRelocate: () => {
+          closeRelocateModal();
+        },
+        openRename: (instanceId?: string) => {
+          const target = instances.find(i => i.id === instanceId) || instances[0] || DEMO_INSTANCE;
+          setRenamingId(target.id);
+          setRenameValue(target.name || "SillyTavern 官方实例");
+          setRenameError(null);
+          setIsRenameClosing(false);
+        },
+        closeRename: () => {
+          closeRenameDialog();
+        },
+        openLegacyMigration: () => {
+          setLegacyMigrationList([
+            { instanceId: "legacy-v1-tavern", name: "旧版历史酒馆", currentPath: "/Documents/SillyTavern-Legacy", targetPath: "/Documents/instances/SillyTavern", version: "1.11.5" }
+          ]);
+          setShowLegacyMigration(true);
+          setIsLegacyMigrationClosing(false);
+        },
+        closeLegacyMigration: () => {
+          dismissLegacyMigration();
+        },
+        openMaintenance: (instanceId?: string) => {
+          const target = instances.find(i => i.id === instanceId) || instances[0] || DEMO_INSTANCE;
+          setMaintenanceInstance(target);
+        },
+        closeMaintenance: () => {
+          closeMaintenance();
+        },
+        setInstances: (newList: TavernInstance[]) => {
+          setInstances(newList);
+          saveInstances(newList);
+        },
+        setTheme: (style: ThemeStyle) => {
+          setThemeStyle(style);
+        },
+        getSnapshot: () => ({
+          instancesCount: instances.length,
+          showOnboarding,
+          showWhatsNew,
+          showNewInstancePanel,
+          showManagePanel: !!showManagePanel,
+          showRelocateModal,
+          showLegacyMigration,
+          renamingId,
+        })
+      };
+    }
+  }, [
+    instances, showOnboarding, showWhatsNew, showNewInstancePanel, showManagePanel,
+    showRelocateModal, showLegacyMigration, renamingId, dismissOnboarding, dismissWhatsNew,
+    closeManagePanel, closeRelocateModal, closeRenameDialog, dismissLegacyMigration,
+    closeMaintenance
+  ]);
 
   return (
     <div
@@ -2463,9 +2740,13 @@ function SillyClientLauncher() {
             setActiveCardMenu(inst.id);
             setIsCardMenuClosing(false);
           }}
-          onRenameSave={(instanceId, newName) => {
-            setInstances(prev => prev.map(inst => inst.id === instanceId ? { ...inst, name: newName, subtitle: newName } : inst));
-            setExternallyRenamingId(null);
+          onRenameSave={async (instanceId, newName) => {
+            try {
+              await executeRenameInstance(instanceId, newName);
+              setExternallyRenamingId(null);
+            } catch (err: any) {
+              alert(err?.message || "重命名实例文件夹失败");
+            }
           }}
           externallyRenamingId={externallyRenamingId}
           onClearExternalRenaming={() => setExternallyRenamingId(null)}
@@ -2634,26 +2915,27 @@ function SillyClientLauncher() {
       <RenameModal
         isOpen={!!renamingId}
         isClosing={isRenameClosing}
-        onClose={() => {
-          setIsRenameClosing(true);
-          setTimeout(() => {
-            setRenamingId(null);
-            setIsRenameClosing(false);
-          }, PANEL_EXIT_MS);
-        }}
+        onClose={closeRenameDialog}
         isLight={isLight}
         glassBg={glassBg}
         value={renameValue}
         onChange={setRenameValue}
-        onSave={() => {
-          if (renamingId && renameValue.trim()) {
-            setInstances(prev => prev.map(inst => inst.id === renamingId ? { ...inst, name: renameValue.trim(), subtitle: renameValue.trim() } : inst));
+        error={renameError}
+        saving={isRenamingSaving}
+        onSave={async () => {
+          if (!renamingId || !renameValue.trim() || isRenamingSaving) return;
+          setIsRenamingSaving(true);
+          setRenameError(null);
+          try {
+            const ok = await executeRenameInstance(renamingId, renameValue.trim());
+            if (ok) {
+              closeRenameDialog();
+            }
+          } catch (err: any) {
+            setRenameError(err?.message || "重命名实例失败，请检查文件夹权限");
+          } finally {
+            setIsRenamingSaving(false);
           }
-          setIsRenameClosing(true);
-          setTimeout(() => {
-            setRenamingId(null);
-            setIsRenameClosing(false);
-          }, PANEL_EXIT_MS);
         }}
       />
 
@@ -2852,6 +3134,7 @@ function SillyClientLauncher() {
         onOpenMaintenance={(inst) => {
           if (inst.type === "local") setMaintenanceInstance(inst);
         }}
+        onOpenRelocate={openRelocateModal}
         onOpenNewInstanceWizard={() => {
           closeManagePanel();
           setNewInstanceCompanionPresetEnabled(false);
@@ -2869,7 +3152,8 @@ function SillyClientLauncher() {
         onTriggerRename={(inst) => {
           closeManagePanel();
           setRenamingId(inst.id);
-          setRenameValue(inst.name);
+          setRenameValue(inst.subtitle || inst.name);
+          setRenameError(null);
           setIsRenameClosing(false);
         }}
         onTriggerDelete={(inst) => {
@@ -2925,6 +3209,28 @@ function SillyClientLauncher() {
         onClose={dismissWhatsNew}
         isLight={isLight}
         glassBg={glassBg}
+      />
+
+      {/* 新版本旧路径实例全屏一键迁移向导 */}
+      <LegacyMigrationModal
+        isOpen={showLegacyMigration}
+        isClosing={isLegacyMigrationClosing}
+        onClose={dismissLegacyMigration}
+        isLight={isLight}
+        glassBg={glassBg}
+        legacyInstances={legacyMigrationList}
+        onMigrationComplete={handleLegacyMigrationComplete}
+      />
+
+      {/* 单实例存储路径迁移模态框 */}
+      <RelocateInstanceModal
+        instance={relocatingInstance}
+        isOpen={showRelocateModal}
+        isClosing={isRelocateModalClosing}
+        onClose={closeRelocateModal}
+        isLight={isLight}
+        glassBg={glassBg}
+        onRelocated={handleInstanceRelocated}
       />
 
       {/* 【视觉与动效测试专用】底部悬浮调试板：仅在本地开发走查环境可见，用于设计验收与过渡动效测试，在任何正式生产构建（Windows/Android/Pages）中自动剔除 */}

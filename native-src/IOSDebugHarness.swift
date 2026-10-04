@@ -13,7 +13,8 @@ public final class IOSDebugHarness {
         "getInstanceInfo", "provisionAndStart", "stop", "returnToTavern", "enterImmersive",
         "exitImmersive", "closeTavern", "reloadTavern", "setPullToRefresh", "openExternalUrl",
         "scanInstanceMaintenance", "applyInstanceMaintenance", "listInstanceMaintenanceRecovery",
-        "restoreInstanceMaintenance", "migrateInstance", "uninstallInstance", "getLogs"
+        "restoreInstanceMaintenance", "migrateInstance", "uninstallInstance", "getLogs",
+        "checkLegacyInstances", "migrateLegacyInstances", "renameInstance", "relocateInstance"
     ]
 
     static let bridgeInvocationScript = """
@@ -123,6 +124,21 @@ public final class IOSDebugHarness {
         }
         if request["action"] as? String == "console" {
             webView.evaluateJavaScript("({loggingEnabled: window.Capacitor?.isLoggingEnabled})") { [weak self] result, error in
+                if let error = error {
+                    self?.respond(id, ["success": false, "error": Self.webKitFailureDescription(error)])
+                } else {
+                    self?.respond(id, ["success": true, "result": result ?? NSNull()])
+                }
+            }
+            return
+        }
+        if request["action"] as? String == "evalConsole" {
+            let script = (request["script"] as? String) ?? ((request["options"] as? [String: Any])?["script"] as? String)
+            guard let script = script else {
+                respond(id, ["success": false, "error": "Missing script parameter"])
+                return
+            }
+            webView.evaluateJavaScript(script) { [weak self] result, error in
                 if let error = error {
                     self?.respond(id, ["success": false, "error": Self.webKitFailureDescription(error)])
                 } else {

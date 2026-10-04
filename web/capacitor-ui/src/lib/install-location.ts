@@ -28,6 +28,14 @@ export function exactInstallTarget(value: string, mode: InstallPathMode, instanc
   return buildInstanceSubfolder(path, instanceIdOrName);
 }
 
+export function sanitizeFolderName(name: string): string {
+  return name
+    .trim()
+    .replace(/[\\/:*?"<>|\x00-\x1f]/g, "-")
+    .replace(/^[. ]+|[. ]+$/g, "")
+    .slice(0, 100) || "instance";
+}
+
 /**
  * Builds a dedicated subfolder for the instance under the parent directory.
  * If the path already ends with the instance name, avoids duplicating.
@@ -35,7 +43,7 @@ export function exactInstallTarget(value: string, mode: InstallPathMode, instanc
 export function buildInstanceSubfolder(parentDir: string, instanceName: string): string {
   const clean = parentDir.trim().replace(/^["']|["']$/g, "").trim().replace(/[\\/]+$/, "");
   const separator = clean.includes("\\") || /^[a-z]:/i.test(clean) ? "\\" : "/";
-  const safeName = instanceName.trim().replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^[._-]+|[._-]+$/g, "") || "instance";
+  const safeName = sanitizeFolderName(instanceName);
   const currentBase = clean.slice(clean.lastIndexOf(separator) + 1);
   if (currentBase.toLowerCase() === safeName.toLowerCase()) {
     return clean;
