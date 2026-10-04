@@ -11,6 +11,8 @@ import vm from 'node:vm';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
+const nativeFixtureNames = () =>
+    [...read('native-src/IOSNativeTests.swift').matchAll(/^        test\("([^"]+)"/gm)].map(match => match[1]);
 
 test('cloud verification never configures or calls a paid model API', () => {
     const workflow = read('.github/workflows/build-ipa.yml');
@@ -237,6 +239,53 @@ test('maintenance limits token issuance without invalidating another live plan',
     assert.doesNotMatch(list, /restores\.removeAll/);
 });
 
+test('maintenance capacity caches only conservative active guards within the current apply request', () => {
+    const maintenance = read('native-src/IOSInstanceMaintenance.swift');
+    const apply = maintenance.slice(maintenance.indexOf('func apply('),
+        maintenance.indexOf('private func requireRecoveryCapacity'));
+    assert.match(apply, /var activeRecoveryRecords: \[String: IOSFileGuard\] = \[:\]/);
+    assert.match(apply, /requireRecoveryCapacity\(plan\.root, activeRecords: &activeRecoveryRecords\)/);
+    const capacity = maintenance.slice(maintenance.indexOf('private func requireRecoveryCapacity'),
+        maintenance.indexOf('private func recoveryRecord'));
+    assert.match(capacity, /boundedChildren\(parent, limit: 4096\)/);
+    assert.match(capacity, /guard !listing\.truncated/);
+    assert.match(capacity, /exists\(child\.appendingPathComponent\("payload"\)\)/);
+    assert.match(capacity, /let current = try\? store\.files\.guardValue\(record\)/);
+    assert.match(capacity, /activeRecords\[record\.path\] == current[\s\S]*return true/);
+    assert.match(capacity, /guard phase != "restored" else \{ return false \}/);
+    assert.match(capacity, /if \(try\? store\.files\.guardValue\(record\)\) == current \{ observed\[record\.path\] = current \}/);
+    assert.match(capacity, /activeRecords = observed/);
+    assert.match(capacity, /guard active\.count < 256/);
+    assert.doesNotMatch(maintenance.slice(0, maintenance.indexOf('init(')), /var activeRecoveryRecords/);
+    assert.ok(capacity.indexOf('guard phase != "restored"') < capacity.indexOf('if (try? store.files.guardValue(record))'));
+});
+
+test('actual native fixtures reject capacity overflow after cached recovery metadata changes', () => {
+    const fixtures = read('native-src/IOSNativeTests.swift');
+    assert.match(fixtures, /Recovery capacity detects same-guard phase changes and resets between apply requests/);
+    assert.match(fixtures, /Cached restored metadata hid an active recovery payload/);
+    assert.match(fixtures, /A new apply request reused obsolete recovery phases/);
+    assert.match(fixtures, /Changed recovery metadata or capacity rejection altered original contents/);
+    assert.match(fixtures, /futimens\(handle\.fileDescriptor, &times\)/);
+    assert.match(fixtures, /files\.guardValue\(changedRecord\) == before/);
+    assert.match(fixtures, /try changePhase\("prepared"\)/);
+    assert.match(fixtures, /try changePhase\("restored"\)/);
+    const capacity = fixtures.slice(fixtures.indexOf('test("Recovery capacity detects same-guard'),
+        fixtures.indexOf('test("Control-character user'));
+    assert.match(capacity, /candidates\.count == 2/);
+    assert.match(capacity, /let chosen = candidates\.map \{ \["id": \$0\["id"\]!, "token": \$0\["token"\]!\] \}/);
+    assert.match(capacity, /scanId: scan\["scanId"\] as! String,[\s\S]*selections: chosen/);
+});
+
+test('simulator fixture acceptance matches every declared native group', () => {
+    const names = nativeFixtureNames();
+    const runner = read('scripts/run-ios-e2e.mjs');
+    assert.equal(new Set(names).size, names.length, 'Native fixture names must not be duplicated');
+    assert.ok(names.length > 0);
+    const expected = runner.match(/const nativeFixtureGroups = (\d+);/)?.[1];
+    assert.equal(Number(expected), names.length, 'Driver fixture count no longer matches the Swift suite');
+});
+
 test('maintenance rejects terminal line controls before taking a recoverable snapshot', () => {
     const maintenance = read('native-src/IOSInstanceMaintenance.swift');
     const segment = maintenance.slice(maintenance.indexOf('private func validSegment'),
@@ -382,8 +431,10 @@ async function simulateDriver(scenario = 'success') {
                 }));
                 return undefined;
             }
-            return { success: true, result: { success: true,
-                results: Array.from({ length: 27 }, (_, index) => ({ name: `Virtual group ${index}`, passed: true })) } };
+            const names = nativeFixtureNames();
+            if (scenario === 'native-fixture-incomplete') names.pop();
+            if (scenario === 'native-fixture-duplicate') names[names.length - 1] = names[0];
+            return { success: true, result: { success: true, results: names.map(name => ({ name, passed: true })) } };
         }
         if (request.action === 'tavern') {
             return { success: true, result: { ready: 'complete', hasChat: true, hasInput: true, hasClient: true,
@@ -637,7 +688,7 @@ test('real simulator driver completes all lifecycle stages using isolated protoc
     assert.equal(actual.error, undefined, actual.error?.message);
     assert.equal(actual.report.results.length, 22);
     assert.ok(actual.report.results.every(result => result.passed));
-    assert.equal(actual.report.results.find(result => result.name.includes('native filesystem')).actual.groups, 27);
+    assert.equal(actual.report.results.find(result => result.name.includes('native filesystem')).actual.groups, nativeFixtureNames().length);
     assert.equal(actual.report.results.find(result => result.name.includes('Real Capacitor')).actual.loggingEnabled, false);
     const remoteRejection = actual.report.results.find(result => result.name.includes('Remote navigation')).actual;
     assert.equal(remoteRejection.rejected, true);
@@ -654,6 +705,22 @@ test('real simulator driver completes all lifecycle stages using isolated protoc
     assert.equal(actual.report.physicalDeviceTested, false);
     assert.equal(actual.report.visualReviewPerformed, false);
     assert.match(actual.hostDiagnostics, /Virtual host signing diagnostic log/);
+});
+
+test('simulator native fixtures reject an incomplete group list before starting the server', async () => {
+    const actual = await simulateDriver('native-fixture-incomplete');
+    assert.match(actual.error?.message, /Native tests did not report all current groups/);
+    assert.equal(actual.report.results.length, 4);
+    assert.equal(actual.report.results.at(-1).passed, false);
+    assert.equal(actual.listening, false);
+});
+
+test('simulator native fixtures reject duplicate group names before starting the server', async () => {
+    const actual = await simulateDriver('native-fixture-duplicate');
+    assert.match(actual.error?.message, /Native test group names must be distinct/);
+    assert.equal(actual.report.results.length, 4);
+    assert.equal(actual.report.results.at(-1).passed, false);
+    assert.equal(actual.listening, false);
 });
 
 test('simulator native fixture timeout retains the current group and completed timings', async () => {

@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import Darwin
 import ZIPFoundation
 import WebKit
 
@@ -590,6 +591,77 @@ enum IOSNativeTests {
             _ = try maintenance.restore(instance: "other-instance", recovery: recovery, token: token)
             try require(files.data(other.appendingPathComponent("index.js")) == Data("other backup".utf8), "Other recovery changed")
             try restoreOriginal(last)
+        }
+        test("Recovery capacity detects same-guard phase changes and resets between apply requests") { root, files in
+            let (store, instance, user) = try maintenanceFixture(root, files)
+            let parent = instance.appendingPathComponent(".sillyclient-maintenance/recovery")
+            func seed(_ phase: String) throws -> URL {
+                let folder = parent.appendingPathComponent(UUID().uuidString)
+                try files.createDirectory(folder)
+                try files.write(Data("retained recovery".utf8), to: folder.appendingPathComponent("payload"))
+                let record = folder.appendingPathComponent("record.json")
+                try files.writeJSON(["phase": phase], to: record)
+                return record
+            }
+            for _ in 0..<254 { _ = try seed("prepared") }
+            let changedRecord = try seed("restored")
+            func changePhase(_ phase: String) throws {
+                let before = try files.guardValue(changedRecord)
+                let changed = try JSONSerialization.data(withJSONObject: ["phase": phase],
+                                                        options: [.prettyPrinted, .sortedKeys])
+                try require(Int64(changed.count) == before.size, "Phase fixture changed its metadata size")
+                let handle = try FileHandle(forWritingTo: changedRecord)
+                defer { try? handle.close() }
+                try handle.write(contentsOf: changed)
+                var times = [timespec(tv_sec: 0, tv_nsec: Int(UTIME_OMIT)),
+                             timespec(tv_sec: Int(before.modifiedSeconds), tv_nsec: Int(before.modifiedNanos))]
+                try require(futimens(handle.fileDescriptor, &times) == 0, "Could not preserve fixture metadata timestamps")
+                try require(files.guardValue(changedRecord) == before, "Phase fixture changed its file guard")
+            }
+            for name in ["first", "second"] {
+                try files.createDirectory(user.appendingPathComponent("extensions/\(name)"))
+                try files.write(Data(name.utf8), to: user.appendingPathComponent("extensions/\(name)/index.js"))
+            }
+            var mutationRequested = false
+            var mutationPerformed = false
+            var mutationError: Error?
+            let maintenance = IOSInstanceMaintenance(store: store, now: {
+                if mutationRequested, !mutationPerformed, (try? files.children(parent).count) == 256 {
+                    mutationPerformed = true
+                    do { try changePhase("prepared") } catch { mutationError = error }
+                }
+                return 1000
+            })
+            let scan = try maintenance.scan("test-instance")
+            guard let candidates = scan["items"] as? [[String: Any]], candidates.count == 2,
+                  candidates.map({ $0["relativePath"] as? String ?? "" }) ==
+                    ["data/default-user/extensions/first", "data/default-user/extensions/second"] else {
+                throw IOSFileError.invalid("Both ordered capacity candidates are required")
+            }
+            let chosen = candidates.map { ["id": $0["id"]!, "token": $0["token"]!] }
+            mutationRequested = true
+            let applied = try maintenance.apply(instance: "test-instance", scanId: scan["scanId"] as! String,
+                                                selections: chosen)
+            if let error = mutationError { throw error }
+            guard mutationPerformed, let results = applied["results"] as? [[String: Any]], results.count == 2,
+                  results[0]["success"] as? Bool == true, results[1]["success"] as? Bool == false,
+                  let recovery = results[0]["recoveryId"] as? String else {
+                throw IOSFileError.invalid("Cached restored metadata hid an active recovery payload")
+            }
+            let first = parent.appendingPathComponent("\(recovery)/payload/index.js")
+            let second = user.appendingPathComponent("extensions/second/index.js")
+            try require(files.data(first) == Data("first".utf8) && files.data(second) == Data("second".utf8),
+                        "Changed recovery metadata or capacity rejection altered original contents")
+            try changePhase("restored")
+            let retry = try maintenance.scan("test-instance")
+            let reapplied = try maintenance.apply(instance: "test-instance", scanId: retry["scanId"] as! String,
+                                                  selections: selection(retry, kind: "broken_extension"))
+            try require(reapplied["success"] as? Bool == true, "A new apply request reused obsolete recovery phases")
+            guard let recovered = (reapplied["recoveryIds"] as? [String])?.first else {
+                throw IOSFileError.invalid("Retried recovery payload is missing")
+            }
+            try require(files.data(parent.appendingPathComponent("\(recovered)/payload/index.js")) == Data("second".utf8),
+                        "Retried maintenance changed its original payload")
         }
         test("Control-character user and extension names are preserved instead of becoming unrecoverable candidates") { root, files in
             let (store, _, user) = try maintenanceFixture(root, files)

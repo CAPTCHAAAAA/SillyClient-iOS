@@ -215,6 +215,7 @@ final class IOSInstanceMaintenance {
         let budget = IOSInspectionBudget()
         var results: [[String: Any]] = []
         var recoveryIds: [String] = []
+        var activeRecoveryRecords: [String: IOSFileGuard] = [:]
         var total: Int64 = 0
         for candidate in selected {
             var result: [String: Any] = ["id": candidate.id, "success": false, "action": candidate.action,
@@ -229,7 +230,7 @@ final class IOSInstanceMaintenance {
                 try validateReferences(candidate, root: plan.root)
                 let recovery = UUID().uuidString
                 let folder = plan.root.appendingPathComponent("\(base)/recovery/\(recovery)")
-                try requireRecoveryCapacity(plan.root)
+                try requireRecoveryCapacity(plan.root, activeRecords: &activeRecoveryRecords)
                 try files.createDirectory(folder)
                 let payload = folder.appendingPathComponent("payload")
                 createdRecovery = (recovery, payload)
@@ -298,18 +299,28 @@ final class IOSInstanceMaintenance {
             "freedBytes": 0, "quarantinedBytes": total, "recoveryIds": recoveryIds]
     }
 
-    private func requireRecoveryCapacity(_ root: URL) throws {
+    private func requireRecoveryCapacity(_ root: URL, activeRecords: inout [String: IOSFileGuard]) throws {
         let parent = root.appendingPathComponent("\(base)/recovery")
-        guard store.files.exists(parent) else { return }
+        guard store.files.exists(parent) else { activeRecords.removeAll(); return }
         let listing = try store.files.boundedChildren(parent, limit: 4096)
         guard !listing.truncated else { throw IOSFileError.invalid("Recovery inspection limit reached; existing records were preserved") }
+        var observed: [String: IOSFileGuard] = [:]
         let active = try listing.items.filter { child in
             guard try store.files.guardValue(child).isDirectory else { return false }
             guard store.files.exists(child.appendingPathComponent("payload")) else { return false }
             let record = child.appendingPathComponent("record.json")
+            guard let current = try? store.files.guardValue(record) else { return true }
+            // A guard cannot prove unchanged contents, so only cache the conservative active conclusion.
+            if activeRecords[record.path] == current {
+                observed[record.path] = current
+                return true
+            }
             let phase = (try? store.files.json(record))?["phase"] as? String
-            return phase != "restored"
+            guard phase != "restored" else { return false }
+            if (try? store.files.guardValue(record)) == current { observed[record.path] = current }
+            return true
         }
+        activeRecords = observed
         guard active.count < 256 else { throw IOSFileError.invalid("Recovery capacity reached; restore or retain existing backups before applying more changes") }
     }
 

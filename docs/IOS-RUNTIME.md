@@ -70,6 +70,11 @@ Expiration removes only expired tokens. Issuing another scan or recovery token
 at the global capacity refuses that new token without discarding other instances'
 live plans. User and extension names with terminal line controls are excluded
 before snapshots, so maintenance cannot quarantine an unrecoverable name.
+Capacity inspection retains a request-local cache only for records conservatively
+counted as active. Directory enumeration, payload presence, and file guards are
+still checked for each selection. Restored phases are always read afresh because
+an unchanged file guard is not a content hash; the cache never frees capacity.
+It is discarded between requests and pruned to each bounded listing.
 
 `IOSRemoteCredentials` stores one atomic Keychain record per remote identity.
 Passwords never reach JavaScript, URLs, browser storage, or logs. Credentials
@@ -158,8 +163,11 @@ archived unsigned Release IPA. Its capability-probe
 process never creates a production console or deploys an instance. Tests,
 source assertions, host fixtures, simulator acceptance, and physical-device
 acceptance are distinct evidence categories.
-The current harness contains 27 fixture groups, including full-capacity token
+The current harness contains 28 fixture groups, including full-capacity token
 recovery, flat/multi-user migration layouts, and captured-output event routing.
+The capacity regression also changes a restored record's phase in place while
+preserving its exact file guard, then checks overflow rejection and a fresh
+request's capacity accounting.
 Each group persists its request-bound progress and elapsed time before the next
 group starts. The driver retains that report on failure and uses a bounded
 three-minute deadline for the complete filesystem-heavy native suite. This is

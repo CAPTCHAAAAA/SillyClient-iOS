@@ -21,6 +21,7 @@ const port = 8000;
 const origin = `http://127.0.0.1:${port}`;
 const firstOperation = `simulator-${randomUUID()}`;
 const secondOperation = `simulator-${randomUUID()}`;
+const nativeFixtureGroups = 28;
 const simctl = (...args) => execFileSync('xcrun', ['simctl', ...args], {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120000,
 });
@@ -268,7 +269,12 @@ try {
     await check('Actual native filesystem, URL policy, and archive module regressions', async () => {
         const result = await command(undefined, {}, 'nativeTests', 180000);
         fs.writeFileSync(path.join(evidence, 'native-module-results.json'), JSON.stringify(result, null, 2));
-        assert.ok(Array.isArray(result.results) && result.results.length === 27, 'Native tests did not report all 27 current groups');
+        assert.ok(Array.isArray(result.results) && result.results.length === nativeFixtureGroups,
+            'Native tests did not report all current groups');
+        assert.ok(result.results.every(item => typeof item.name === 'string' && item.name.length > 0),
+            'Native test groups must have names');
+        assert.equal(new Set(result.results.map(item => item.name)).size, nativeFixtureGroups,
+            'Native test group names must be distinct');
         assert.equal(result.success, true, JSON.stringify(result.results.filter(item => item.passed !== true)));
         assert.ok(result.results.every(item => item.passed === true), 'One or more real Swift test groups failed');
         return { groups: result.results.length, ...result };
