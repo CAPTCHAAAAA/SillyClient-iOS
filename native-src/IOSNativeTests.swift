@@ -45,6 +45,182 @@ enum IOSNativeTests {
             progress?(["currentGroup": name, "completedGroups": results.count, "results": results, "state": "completed"])
         }
         defer { try? FileManager.default.removeItem(at: parent) }
+        test("Installation paths require absolute local paths and preserve quoted file URL semantics") { root, _ in
+            let selected = root.appendingPathComponent("selected root")
+            try require(IOSInstallationLocations.path("  \"\(selected.path)\"  ").path == selected.path, "Quoted path changed")
+            try require(IOSInstallationLocations.path(selected.absoluteString).path == selected.path, "File URL changed")
+            for raw in ["", "folder", "https://example.test/folder", "file://other-host/folder",
+                        root.path + "/../outside", root.path + "/unsafe\nsuffix", "D:\\Tavern", "/unsafe\u{2028}name"] {
+                try rejects("Unsafe installation path was accepted") { _ = try IOSInstallationLocations.path(raw) }
+            }
+        }
+        test("Documents root and exact installation modes persist and reject conflicting instance paths") { root, files in
+            let store = IOSInstanceStore(root: root)
+            let selected = root.appendingPathComponent("selected-root")
+            try files.createDirectory(selected)
+            try require(store.locations.select(selected).path == selected.path, "Selected sandbox root changed")
+            let target = selected.appendingPathComponent("custom-instance")
+            let location = try store.location("custom-instance", installPath: selected.path, installPathMode: "root", requireExisting: false)
+            try require(location.directory.path == target.path, "Root mode did not append the instance identity")
+            try require(store.location("custom-instance", installPath: target.path, requireExisting: false).directory.path == target.path,
+                        "Exact mode appended the instance twice")
+            try files.createDirectory(target)
+            try files.writeJSON(["custom-instance": ["path": target.path, "documentsRelativePath": "selected-root/custom-instance",
+                "directoryIdentity": try files.guardValue(target).identity]], to: root.appendingPathComponent("instances-registry.json"))
+            let recreated = IOSInstanceStore(root: root)
+            try require(recreated.directory("custom-instance").path == target.path, "New store forgot its registered custom path")
+            try require(recreated.location("custom-instance", installPath: target.path + "/").directory.path == target.path,
+                        "A trailing directory separator conflicted with the registered path")
+            try require(recreated.location("custom-instance", installPath: selected.path + "/", installPathMode: "root").directory.path == target.path,
+                        "Root mode changed after its previously missing destination was created")
+            try require(recreated.info("custom-instance")["installPath"] as? String == target.path, "Info reported a default path")
+            try rejects("Registered instance was silently relocated") {
+                _ = try recreated.location("custom-instance", installPath: root.appendingPathComponent("elsewhere").path)
+            }
+            try rejects("Nested instance path was accepted") {
+                _ = try recreated.location("nested", installPath: target.appendingPathComponent("nested").path, requireExisting: false)
+            }
+            try rejects("Ancestor instance path was accepted") {
+                _ = try recreated.location("ancestor", installPath: selected.path, requireExisting: false)
+            }
+            try rejects("Documents root became an uninstallable instance") {
+                _ = try recreated.location("root-instance", installPath: root.path, requireExisting: false)
+            }
+            try rejects("Root mode accepted no selected path") { _ = try recreated.location("missing", installPathMode: "root", requireExisting: false) }
+            let unrelated = root.appendingPathComponent("unregistered-user-directory")
+            try files.createDirectory(unrelated)
+            try files.write(Data("must survive".utf8), to: unrelated.appendingPathComponent("retained"))
+            try rejects("Unregistered directory could be uninstalled") { _ = try recreated.uninstall("unregistered", installPath: unrelated.path) }
+            try require(files.data(unrelated.appendingPathComponent("retained")) == Data("must survive".utf8), "Uninstall deleted unrelated data")
+            let replacement = selected.appendingPathComponent("replacement")
+            try files.move(target, to: replacement)
+            try files.createDirectory(target)
+            try rejects("Replaced registered directory was accepted") { _ = try recreated.directory("custom-instance") }
+            let unavailable = try recreated.records().first { $0["instanceId"] as? String == "custom-instance" }
+            try require(unavailable?["status"] as? String == "unavailable", "Unavailable registration disappeared from scan")
+        }
+        test("Persistent external root bookmarks retain bounded leases and fail closed after lost authorization") { root, files in
+            let documents = root.appendingPathComponent("documents")
+            let selected = root.appendingPathComponent("external-root")
+            try files.createDirectory(documents)
+            try files.createDirectory(selected)
+            var scopes = 0
+            var stale = false
+            var permitted = true
+            var moved = false
+            func authorizations() -> IOSInstallationLocations {
+                IOSInstallationLocations(documents: documents, makeBookmark: { Data($0.path.utf8) },
+                    resolveBookmark: { (moved ? root : URL(fileURLWithPath: String(decoding: $0, as: UTF8.self)), stale) },
+                    startScope: { _ in if permitted { scopes += 1 }; return permitted },
+                    stopScope: { _ in scopes -= 1 }, externalCapability: { _ in })
+            }
+            let original = authorizations()
+            try require(original.select(selected).path == selected.path && scopes == 0, "Picker authorization leaked its scope")
+            var lease: IOSInstallationLocation? = try authorizations().acquire(selected.appendingPathComponent("instance"))
+            try require(scopes == 1 && lease?.root.path == selected.path, "Recreated authority did not resolve the saved bookmark")
+            try rejects("External lease authorized a sibling path") { _ = try lease!.files.checked(documents, allowMissing: true) }
+            lease = nil
+            try require(scopes == 0, "Stopped lease did not release security scope")
+            stale = true
+            try rejects("Stale bookmark used another runtime") { _ = try authorizations().acquire(selected.appendingPathComponent("instance")) }
+            stale = false
+            permitted = false
+            try rejects("Lost authorization fell back internally") { _ = try authorizations().acquire(selected.appendingPathComponent("instance")) }
+            permitted = true
+            moved = true
+            try rejects("Moved bookmark substituted another directory") { _ = try authorizations().acquire(selected.appendingPathComponent("instance")) }
+            moved = false
+            let old = root.appendingPathComponent("original-root")
+            try files.move(selected, to: old)
+            try files.createDirectory(selected)
+            try rejects("Same-path replacement root was trusted") { _ = try authorizations().acquire(selected.appendingPathComponent("instance")) }
+            try require(scopes == 0, "Rejected bookmark leaked security scope")
+            let denied = IOSInstallationLocations(documents: documents, makeBookmark: { _ in Data([1]) },
+                startScope: { _ in true }, stopScope: { _ in },
+                externalCapability: { _ in throw IOSFileError.invalid("Unsupported provider fixture") })
+            try rejects("Unsupported provider was persisted") { _ = try denied.select(selected) }
+        }
+        test("Custom installation commits at the selected root and can recover registration without replacing data") { root, files in
+            let store = IOSInstanceStore(root: root)
+            let selected = root.appendingPathComponent("selected-root")
+            try files.createDirectory(selected)
+            try store.locations.select(selected)
+            let id = "actual-custom-runtime"
+            let target = selected.appendingPathComponent(id)
+            func prepare(_ mode: String, path: String, persistedSelections: Bool = false) throws {
+                let operation = UUID().uuidString
+                try NodeRunner.shared.reserve(instance: id, operation: operation)
+                defer {
+                    let stopped = DispatchSemaphore(value: 0)
+                    NodeRunner.shared.stop(instance: id, operation: operation) { _ in stopped.signal() }
+                    _ = stopped.wait(timeout: .now() + 5)
+                }
+                let actual = try store.prepare(instance: id, operation: operation, version: "stable", localZip: nil,
+                    installPath: path, installPathMode: mode, port: 8123, config: nil,
+                    preinstall: persistedSelections ? ["revision": 1, "extensionIds": ["already-created"]] : nil,
+                    companion: persistedSelections ? ["bundleId": "sc-bordeaux", "revision": 1] : nil)
+                try require(actual.path == target.path, "Preparation used the default directory")
+            }
+            try prepare("root", path: selected.path)
+            let marker = target.appendingPathComponent("data/retained-user-data")
+            try files.write(Data("preserved".utf8), to: marker)
+            let server = try files.snapshot(target.appendingPathComponent("server.js"))
+            try files.writeJSON([:], to: root.appendingPathComponent("instances-registry.json"))
+            try prepare("exact", path: target.path, persistedSelections: true)
+            try require(files.snapshot(target.appendingPathComponent("server.js")) == server, "Recovery replaced the pinned runtime")
+            try require(files.data(marker) == Data("preserved".utf8), "Registration recovery replaced user data")
+            let recreated = IOSInstanceStore(root: root)
+            try require(recreated.info(id)["installPath"] as? String == target.path, "Recreated store lost custom registration")
+            try require(!files.exists(root.appendingPathComponent("instances/\(id)")), "A fallback runtime was also created")
+            let sibling = selected.appendingPathComponent("unrelated")
+            try files.write(Data("untouched".utf8), to: sibling)
+            try require(recreated.uninstall(id, installPath: target.path)["success"] as? Bool == true, "Custom uninstall failed")
+            try require(!files.exists(target) && files.exists(selected) && files.data(sibling) == Data("untouched".utf8),
+                        "Uninstall removed the selected root or unrelated data")
+        }
+        test("Custom copy migration and maintenance share the registered directory and preserve their source") { root, files in
+            let store = IOSInstanceStore(root: root)
+            let selected = root.appendingPathComponent("migration-root")
+            let source = root.appendingPathComponent("source-user")
+            try files.createDirectory(selected)
+            try files.createDirectory(source.appendingPathComponent("chats"))
+            try files.createDirectory(source.appendingPathComponent("extensions/broken-custom"))
+            try files.write(Data("chat-preserved".utf8), to: source.appendingPathComponent("chats/chat.jsonl"))
+            try files.writeJSON(["unrelated": true], to: source.appendingPathComponent("settings.json"))
+            try files.write(Data("extension-preserved".utf8), to: source.appendingPathComponent("extensions/broken-custom/index.js"))
+            let before = try files.snapshot(source)
+            let id = "custom-copy-runtime"
+            let operation = UUID().uuidString
+            try NodeRunner.shared.reserve(instance: id, operation: operation)
+            let target: URL
+            do {
+                target = try store.migrate(instance: id, operation: operation, sourcePath: source.path,
+                    targetPath: selected.path, installPathMode: "root", mode: "copy", includeSecrets: false, preinstall: nil)
+            } catch {
+                let stopped = DispatchSemaphore(value: 0)
+                NodeRunner.shared.stop(instance: id, operation: operation) { _ in stopped.signal() }
+                _ = stopped.wait(timeout: .now() + 5)
+                throw error
+            }
+            let stopped = DispatchSemaphore(value: 0)
+            NodeRunner.shared.stop(instance: id, operation: operation) { _ in stopped.signal() }
+            try require(stopped.wait(timeout: .now() + 5) == .success, "Migration reservation did not stop")
+            try require(target.path == selected.appendingPathComponent(id).path, "Copy used an internal fallback")
+            let maintenance = IOSInstanceMaintenance(store: IOSInstanceStore(root: root))
+            let scan = try maintenance.scan(id)
+            let candidate = (scan["items"] as! [[String: Any]]).first!
+            let applied = try maintenance.apply(instance: id, scanId: scan["scanId"] as! String,
+                selections: [["id": candidate["id"]!, "token": candidate["token"]!]])
+            try require(applied["success"] as? Bool == true, "Custom extension was not quarantined")
+            let recovery = (try maintenance.list(id)["items"] as! [[String: Any]]).first!
+            try require(maintenance.restore(instance: id, recovery: recovery["recoveryId"] as! String,
+                token: recovery["token"] as! String)["success"] as? Bool == true, "Custom recovery failed")
+            try require(files.snapshot(source) == before, "Copy or maintenance changed its source")
+            try require(files.data(target.appendingPathComponent("data/default-user/chats/chat.jsonl")) == Data("chat-preserved".utf8),
+                        "Custom copy orphaned user data")
+            _ = try store.uninstall(id, installPath: target.path)
+            try require(files.snapshot(source) == before && files.exists(selected), "Custom uninstall changed source or selected root")
+        }
         test("Credential-free URL validation and origin boundaries") { _, _ in
             for raw in ["javascript:alert(1)", "file:///tmp/test", "https://user:pass@example.com", "//example.com", "https:///"] {
                 do {
@@ -372,15 +548,29 @@ enum IOSNativeTests {
         }
         test("YAML configuration preserves unrelated values and validates Boolean and heartbeat inputs") { root, files in
             let store = IOSInstanceStore(root: root)
-            try files.write(Data("unrelated: preserved\n".utf8), to: root.appendingPathComponent("config.yaml"))
+            let configURL = root.appendingPathComponent("config.yaml")
+            try files.write(Data("unrelated: preserved\nprotocol:\n  unrelatedProtocol: retained\nbrowserLaunch:\n  unrelatedBrowser: retained\n".utf8), to: configURL)
             try store.updateConfig(root, port: 8123, config: ["ipv4": false, "ipv6": true, "heartbeat": 20])
             try require(!store.ipv4(root), "IPv6-only configuration was not applied")
             let yaml = String(data: try files.data(root.appendingPathComponent("config.yaml")), encoding: .utf8) ?? ""
-            try require(yaml.contains("preserved") && yaml.contains("8123"), "Unrelated YAML or port was lost")
+            try require(yaml.contains("preserved") && yaml.contains("8123") && yaml.contains("unrelatedProtocol") && yaml.contains("unrelatedBrowser"),
+                        "Unrelated YAML, mapping sibling, or port was lost")
             let invalidValues: [[String: Any]] = [["heartbeat": true], ["heartbeat": -1], ["heartbeat": 1.5], ["heartbeat": "20"],
-                                                 ["ipv4": 1], ["ipv4": false, "ipv6": false]]
+                                                 ["heartbeat": 2147483648], ["ipv4": 1], ["ipv4": false, "ipv6": false], ["unknown": true]]
+            let original = try files.data(configURL)
             for invalid in invalidValues {
                 try rejects("Invalid configuration was accepted") { try store.updateConfig(root, port: 8123, config: invalid) }
+                try require(files.data(configURL) == original, "Rejected configuration changed the original YAML")
+            }
+            try store.updateConfig(root, port: 8123, config: ["heartbeat": 2147483647])
+            try require(String(decoding: files.data(configURL), as: UTF8.self).contains("2147483647"), "Maximum cross-platform heartbeat was rejected")
+            for key in ["protocol", "browserLaunch"] {
+                for conflicting in ["false", "legacy-scalar", "[one, two]", "null"] {
+                    let bytes = Data("unrelated: preserved\n\(key): \(conflicting)\n".utf8)
+                    try files.write(bytes, to: configURL)
+                    try rejects("Existing conflicting YAML mapping was replaced") { try store.updateConfig(root, port: 8123, config: [:]) }
+                    try require(files.data(configURL) == bytes, "Conflicting existing mapping was not preserved")
+                }
             }
         }
         test("Preinstalled manifest validation accepts omitted, null, and empty optional assets") { root, files in

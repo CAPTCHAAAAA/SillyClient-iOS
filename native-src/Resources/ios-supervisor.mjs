@@ -165,6 +165,72 @@ function probe(port, host) {
     });
 }
 
+function authorizedLocation(request) {
+    const file = path.join(directory, 'locations.json');
+    let before;
+    try { before = fs.lstatSync(file); }
+    catch (error) {
+        if (error.code !== 'ENOENT' || process.env.SILLYCLIENT_INSTANCES_ROOT) {
+            throw new Error('Native runtime location authorization is unavailable');
+        }
+        return;
+    }
+    if (!before.isFile() || before.isSymbolicLink() || before.size > 65536) {
+        throw new Error('Native runtime location authorization is invalid');
+    }
+    const descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    let location;
+    try {
+        const opened = fs.fstatSync(descriptor);
+        if (opened.ino !== before.ino || (before.dev !== 0 && opened.dev !== before.dev) || opened.size !== before.size) {
+            throw new Error('Native runtime authorization identity changed');
+        }
+        const bytes = Buffer.alloc(before.size);
+        if (fs.readSync(descriptor, bytes, 0, bytes.length, 0) !== bytes.length) {
+            throw new Error('Native runtime authorization is incomplete');
+        }
+        location = JSON.parse(bytes);
+        const after = fs.fstatSync(descriptor);
+        if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+            throw new Error('Native runtime authorization changed while being read');
+        }
+    } finally { fs.closeSync(descriptor); }
+    if (location.revision !== 1 || location.instanceId !== request.instanceId
+        || location.operationId !== request.operationId) throw new Error('Runtime location belongs to another operation');
+    const root = location.root;
+    if (typeof root !== 'string' || !path.isAbsolute(root) || fs.realpathSync(root) !== root) {
+        throw new Error('Unsafe authorized runtime root');
+    }
+    const identity = (file, device, inode) => {
+        const actual = fs.lstatSync(file, { bigint: true });
+        if (!actual.isDirectory() || actual.isSymbolicLink()
+            || String(BigInt.asUintN(32, actual.dev)) !== device || String(actual.ino) !== inode) {
+            throw new Error('Authorized runtime directory was replaced');
+        }
+    };
+    identity(root, location.rootDevice, location.rootInode);
+    for (const name of ['serverDirectory', 'dataDirectory', 'configPath']) {
+        const raw = request[name];
+        if (typeof raw !== 'string' || raw !== location[name] || !path.isAbsolute(raw)) {
+            throw new Error('Runtime path differs from its native authorization');
+        }
+        const relative = path.relative(root, raw);
+        if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+            throw new Error('Runtime path is outside its authorized root');
+        }
+        let component = root;
+        for (const segment of relative.split(path.sep)) {
+            component = path.join(component, segment);
+            if (fs.lstatSync(component).isSymbolicLink()) throw new Error('Runtime paths cannot contain links');
+        }
+    }
+    if (request.dataDirectory !== path.join(request.serverDirectory, 'data')
+        || request.configPath !== path.join(request.serverDirectory, 'config.yaml')) {
+        throw new Error('Runtime data and configuration must belong to the authorized instance');
+    }
+    identity(request.serverDirectory, location.serverDevice, location.serverInode);
+}
+
 async function start(request) {
     if (!Number.isInteger(request.port) || request.port < 1 || request.port > 65535) {
         throw new Error('Invalid server port');
@@ -180,28 +246,11 @@ async function start(request) {
         }
         throw new Error('Stop the current session before starting another instance');
     }
+    authorizedLocation(request);
     const serverDirectory = fs.realpathSync(request.serverDirectory);
-    const managedRoot = process.env.SILLYCLIENT_INSTANCES_ROOT;
-    if (managedRoot) {
-        const root = fs.realpathSync(managedRoot);
-        const relative = path.relative(root, serverDirectory);
-        if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
-            throw new Error('The runtime is outside managed instance storage');
-        }
-        for (const raw of [request.serverDirectory, request.dataDirectory, request.configPath]) {
-            if (typeof raw !== 'string') throw new Error('The runtime path is missing');
-            const relative = path.relative(root, raw);
-            if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Unsafe runtime path');
-            let component = root;
-            for (const segment of relative.split(path.sep)) {
-                component = path.join(component, segment);
-                if (fs.lstatSync(component).isSymbolicLink()) throw new Error('Runtime paths cannot contain links');
-            }
-        }
-    }
     const loader = path.join(serverDirectory, 'ios-loader.mjs');
-    if (!fs.statSync(path.join(serverDirectory, 'server.js')).isFile()
-        || !fs.statSync(loader).isFile()) throw new Error('The prepared iOS runtime is incomplete');
+    if (!fs.lstatSync(path.join(serverDirectory, 'server.js')).isFile()
+        || !fs.lstatSync(loader).isFile()) throw new Error('The prepared iOS runtime is incomplete');
     process.chdir(serverDirectory);
     const session = {
         instanceId: request.instanceId, operationId: request.operationId,

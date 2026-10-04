@@ -61,7 +61,7 @@ function prepareActualLoader(server, contents) {
     `);
 }
 
-async function fixture(t, { asynchronousOutput = false, actualLoader = false } = {}) {
+async function fixture(t, { asynchronousOutput = false, actualLoader = false, authorization = false } = {}) {
     const parent = process.env.SILLYCLIENT_TEST_TMP || os.tmpdir();
     fs.mkdirSync(parent, { recursive: true });
     const directory = fs.mkdtempSync(path.join(parent, 'ios-supervisor-'));
@@ -70,6 +70,8 @@ async function fixture(t, { asynchronousOutput = false, actualLoader = false } =
     fs.mkdirSync(control);
     fs.mkdirSync(server);
     fs.writeFileSync(path.join(server, 'server.js'), '');
+    fs.mkdirSync(path.join(server, 'data'));
+    fs.writeFileSync(path.join(server, 'config.yaml'), 'listen: false\n');
     fs.writeFileSync(path.join(server, 'ios-loader.mjs'), `
         import http from 'node:http';
         import { parentPort } from 'node:worker_threads';
@@ -94,7 +96,8 @@ async function fixture(t, { asynchronousOutput = false, actualLoader = false } =
         await import(${JSON.stringify(pathToFileURL(supervisor).href)});
     `] : [supervisor];
     const child = spawn(process.execPath, arguments_, {
-        env: { ...process.env, SILLYCLIENT_CONTROL_DIR: control, SILLYCLIENT_STARTUP_TIMEOUT: '1200' },
+        env: { ...process.env, SILLYCLIENT_CONTROL_DIR: control, SILLYCLIENT_STARTUP_TIMEOUT: '1200',
+            ...(authorization ? { SILLYCLIENT_INSTANCES_ROOT: path.join(directory, 'default-storage') } : {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stdout.on('data', data => { stdout += data; output += data; });
@@ -120,8 +123,71 @@ async function fixture(t, { asynchronousOutput = false, actualLoader = false } =
         const frame = JSON.parse(line.slice(logPrefix.length));
         return { ...frame, line: Buffer.from(frame.lineBase64, 'base64').toString('utf8') };
     });
-    return { command, server, control, logs, output: () => output };
+    const authorize = options => {
+        const root = path.dirname(options.serverDirectory);
+        const rootStat = fs.lstatSync(root, { bigint: true });
+        const serverStat = fs.lstatSync(options.serverDirectory, { bigint: true });
+        const mapping = { revision: 1, instanceId: options.instanceId, operationId: options.operationId,
+            root: fs.realpathSync(root), rootDevice: String(BigInt.asUintN(32, rootStat.dev)), rootInode: String(rootStat.ino),
+            serverDirectory: fs.realpathSync(options.serverDirectory),
+            serverDevice: String(BigInt.asUintN(32, serverStat.dev)), serverInode: String(serverStat.ino),
+            dataDirectory: options.dataDirectory, configPath: options.configPath };
+        fs.writeFileSync(path.join(control, 'locations.json'), JSON.stringify(mapping));
+        return mapping;
+    };
+    return { command, authorize, server, control, logs, output: () => output };
 }
+
+test('native runtime authorization permits selected storage instead of substituting the default root', async t => {
+    const f = await fixture(t, { authorization: true });
+    const port = await freePort();
+    const options = { action: 'start', instanceId: 'custom-root', operationId: 'custom-operation', port,
+        serverDirectory: fs.realpathSync(f.server), dataDirectory: path.join(fs.realpathSync(f.server), 'data'),
+        configPath: path.join(fs.realpathSync(f.server), 'config.yaml') };
+    const denied = await f.command(options);
+    assert.equal(denied.success, false);
+    assert.match(denied.error, /authorization is unavailable/);
+    f.authorize(options);
+    assert.deepEqual(await f.command(options), { success: true, ready: true }, f.output());
+    assert.equal(await (await fetch(`http://127.0.0.1:${port}/`)).text(), 'actual-worker');
+    assert.equal((await f.command({ action: 'stop', instanceId: options.instanceId, operationId: options.operationId })).success, true);
+    const next = { ...options, operationId: 'custom-operation-restarted' };
+    const stale = await f.command(next);
+    assert.equal(stale.success, false);
+    assert.match(stale.error, /another operation/);
+    f.authorize(next);
+    assert.equal((await f.command(next)).ready, true);
+    assert.equal((await f.command({ action: 'stop', instanceId: next.instanceId, operationId: next.operationId })).success, true);
+});
+
+test('runtime authorization rejects forged paths, replaced directory identities, and unsafe metadata', async t => {
+    const f = await fixture(t, { authorization: true });
+    const options = { action: 'start', instanceId: 'guarded-root', operationId: 'guarded-operation', port: await freePort(),
+        serverDirectory: fs.realpathSync(f.server), dataDirectory: path.join(fs.realpathSync(f.server), 'data'),
+        configPath: path.join(fs.realpathSync(f.server), 'config.yaml') };
+    const mapping = f.authorize(options);
+    for (const altered of [
+        { ...options, dataDirectory: path.dirname(options.serverDirectory) },
+        { ...options, configPath: path.join(path.dirname(options.serverDirectory), 'other.yaml') },
+        { ...options, serverDirectory: path.dirname(options.serverDirectory), root: path.dirname(options.serverDirectory) },
+    ]) {
+        const result = await f.command(altered);
+        assert.equal(result.success, false);
+        assert.match(result.error, /differs from its native authorization/);
+    }
+    for (const field of ['rootInode', 'serverInode']) {
+        fs.writeFileSync(path.join(f.control, 'locations.json'), JSON.stringify({ ...mapping, [field]: '0' }));
+        const result = await f.command(options);
+        assert.equal(result.success, false);
+        assert.match(result.error, /directory was replaced/);
+    }
+    fs.writeFileSync(path.join(f.control, 'locations.json'), 'x'.repeat(65537));
+    const oversized = await f.command(options);
+    assert.equal(oversized.success, false);
+    assert.match(oversized.error, /authorization is invalid/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.control, 'status.json'))).state, 'idle');
+    await assert.rejects(fetch(`http://127.0.0.1:${options.port}/`));
+});
 
 test('embedded supervisor really starts, stops, and restarts an HTTP worker', async t => {
     const f = await fixture(t);

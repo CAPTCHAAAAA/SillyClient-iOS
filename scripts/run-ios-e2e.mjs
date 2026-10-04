@@ -15,13 +15,15 @@ const results = [];
 let documents;
 let container;
 let appPid;
+let installationRoot;
+let instanceDirectory;
 let commandInFlight = false;
 const instanceId = 'default';
 const port = 8000;
 const origin = `http://127.0.0.1:${port}`;
 const firstOperation = `simulator-${randomUUID()}`;
 const secondOperation = `simulator-${randomUUID()}`;
-const nativeFixtureGroups = 28;
+const nativeFixtureGroups = 33;
 const simctl = (...args) => execFileSync('xcrun', ['simctl', ...args], {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120000,
 });
@@ -280,11 +282,25 @@ try {
         return { groups: result.results.length, ...result };
     });
     await check('Real embedded server startup through the native plugin', async () => {
-        const result = await command('provisionAndStart', { instanceId, port, operationId: firstOperation }, 'call', 120000);
+        fs.mkdirSync(path.join(documents, 'selected-runtime-root'), { recursive: true });
+        installationRoot = fs.realpathSync(path.join(documents, 'selected-runtime-root'));
+        instanceDirectory = path.join(installationRoot, instanceId);
+        const selected = await command(undefined, { path: installationRoot }, 'installationRoot');
+        assert.equal(selected.path, installationRoot);
+        assert.equal(selected.installPathMode, 'root');
+        assert.equal(selected.persistentAuthorization, true);
+        const result = await command('provisionAndStart', { instanceId, port, operationId: firstOperation,
+            installPath: installationRoot, installPathMode: 'root' }, 'call', 120000);
         assert.equal(result.ready, true);
         assert.equal(result.instanceId, instanceId);
         assert.equal(result.operationId, firstOperation);
-        return verifyReady(firstOperation);
+        assert.equal(result.installPath, fs.realpathSync(instanceDirectory));
+        const info = await command('getInstanceInfo', { instanceId, installPath: result.installPath });
+        assert.equal(info.installPath, result.installPath, 'Info did not retain the selected runtime path');
+        assert.equal(fs.existsSync(path.join(documents, 'SillyTavern')), false, 'Selected runtime silently used the default directory');
+        assert.ok(fs.readFileSync(path.join(instanceDirectory, 'config.yaml'), 'utf8').includes(path.join(instanceDirectory, 'data')),
+            'Selected runtime config uses another data directory');
+        return { ...await verifyReady(firstOperation), installPath: info.installPath, installPathMode: 'exact' };
     });
     await check('Remote navigation cannot replace an active local session', async () => {
         const rejection = await rejectedCommand('enterImmersive', {
@@ -330,7 +346,8 @@ try {
         return rejectedCommand('returnToTavern', {});
     });
     await check('The existing instance restarts on the same port in the same application', async () => {
-        const result = await command('provisionAndStart', { instanceId, port, operationId: secondOperation }, 'call', 120000);
+        const result = await command('provisionAndStart', { instanceId, port, operationId: secondOperation,
+            installPath: instanceDirectory, installPathMode: 'exact' }, 'call', 120000);
         assert.equal(result.ready, true);
         assert.equal(result.instanceId, instanceId);
         assert.equal(result.operationId, secondOperation);
@@ -352,11 +369,27 @@ try {
         await command('stop', { instanceId, operationId: secondOperation }, 'call', 25000);
         return verifyStopped();
     });
+    await check('Application restart scans and starts the same selected runtime directory', async () => {
+        simctl('terminate', device, bundleId);
+        appPid = undefined;
+        launch('--sillyclient-test');
+        await waitForBridge();
+        const scan = await command('scanInstances');
+        const registered = scan.instances.find(item => item.instanceId === instanceId);
+        assert.equal(registered?.installPath, instanceDirectory, 'Relaunch scan forgot the selected directory');
+        const thirdOperation = `simulator-${randomUUID()}`;
+        const result = await command('provisionAndStart', { instanceId, operationId: thirdOperation, port,
+            installPath: instanceDirectory, installPathMode: 'exact' }, 'call', 120000);
+        assert.equal(result.installPath, instanceDirectory, 'Relaunch substituted another runtime');
+        const ready = await verifyReady(thirdOperation);
+        await command('stop', { instanceId, operationId: thirdOperation }, 'call', 25000);
+        return { ...ready, installPath: instanceDirectory, ...await verifyStopped() };
+    });
 
     const copiedInstance = `simulator-copy-${randomUUID()}`;
     const copyOperation = `simulator-${randomUUID()}`;
     const sourceDirectory = path.join(documents, 'ios-test', `copy-source-${randomUUID()}`);
-    const copiedDirectory = path.join(documents, 'instances', copiedInstance);
+    const copiedDirectory = path.join(installationRoot, copiedInstance);
     const userDirectory = path.join(copiedDirectory, 'data', 'default-user');
     const chatRelative = 'default-user/chats/bridge-chat.jsonl';
     const extensionRelative = 'data/default-user/extensions/broken-bridge-fixture';
@@ -420,6 +453,8 @@ try {
             instanceId: copiedInstance,
             operationId: copyOperation,
             sourcePath: fs.realpathSync(sourceDirectory),
+            targetPath: installationRoot,
+            installPathMode: 'root',
             mode: 'copy',
             includeSecrets: false,
         }, 'call', 120000);
@@ -542,6 +577,21 @@ try {
         assert.equal(digest(path.join(copiedExtension, 'index.js')), extensionHash);
         verifyCopiedData();
         return { ...rejection, ...await verifyStopped() };
+    });
+    await check('Custom runtime uninstall preserves the selected root, source, and unrelated files', async () => {
+        const unrelated = path.join(installationRoot, 'unrelated-user-file.txt');
+        fs.writeFileSync(unrelated, 'preserved unrelated file\n');
+        for (const [id, installPath] of [[copiedInstance, copiedDirectory], [instanceId, instanceDirectory]]) {
+            assert.equal((await command('uninstallInstance', { instanceId: id, installPath }, 'call', 30000)).success, true);
+            assert.equal(fs.existsSync(installPath), false, 'Uninstall left its registered runtime');
+        }
+        assert.equal(fs.statSync(installationRoot).isDirectory(), true, 'Uninstall removed the selected root');
+        assert.equal(fs.readFileSync(unrelated, 'utf8'), 'preserved unrelated file\n');
+        verifySource();
+        const scan = await command('scanInstances');
+        assert.equal(scan.instances.some(item => [copiedInstance, instanceId].includes(item.instanceId)), false,
+            'Removed runtimes remained registered');
+        return { selectedRootPreserved: true, sourcePreserved: true, unrelatedFilePreserved: true, ...await verifyStopped() };
     });
 } catch (error) {
     if (results.every(result => result.passed)) {

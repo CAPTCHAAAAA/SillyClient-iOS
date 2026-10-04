@@ -55,54 +55,56 @@ final class IOSInstanceMaintenance {
     private func validSegment(_ value: String) -> Bool {
         value != "." && value != ".." && value.range(of: "^[A-Za-z0-9_.-]{1,160}\\z", options: .regularExpression) != nil
     }
-    private func config(_ root: URL) throws -> (String, IOSFileGuard?) {
+    private func config(_ root: URL, files: IOSManagedFiles) throws -> (String, IOSFileGuard?) {
         let path = root.appendingPathComponent("config.yaml")
-        if !store.files.exists(path) { return ("missing", nil) }
-        let data = try store.files.data(path)
-        return (hash(data), try store.files.guardValue(path))
+        if !files.exists(path) { return ("missing", nil) }
+        let data = try files.data(path)
+        return (hash(data), try files.guardValue(path))
     }
-    private func validate(_ plan: Plan, hashConfig: Bool) throws {
-        guard try store.directory(plan.instance, maintenance: true) == plan.root,
-              try store.files.guardValue(plan.root).identity == plan.rootIdentity else {
+    private func validate(_ plan: Plan, files: IOSManagedFiles, hashConfig: Bool) throws {
+        guard try store.directory(plan.instance, maintenance: true).path == plan.root.path,
+              try files.guardValue(plan.root).identity == plan.rootIdentity else {
             throw IOSFileError.invalid("Instance directory identity changed")
         }
         let path = plan.root.appendingPathComponent("config.yaml")
         if let expected = plan.configGuard {
-            guard try store.files.guardValue(path) == expected else { throw IOSFileError.invalid("Instance configuration changed") }
-        } else if store.files.exists(path) { throw IOSFileError.invalid("Instance configuration changed") }
-        if hashConfig, try config(plan.root).0 != plan.configDigest { throw IOSFileError.invalid("Instance configuration contents changed") }
+            guard try files.guardValue(path) == expected else { throw IOSFileError.invalid("Instance configuration changed") }
+        } else if files.exists(path) { throw IOSFileError.invalid("Instance configuration changed") }
+        if hashConfig, try config(plan.root, files: files).0 != plan.configDigest { throw IOSFileError.invalid("Instance configuration contents changed") }
     }
-    private func validateReferences(_ candidate: Candidate, root: URL) throws {
+    private func validateReferences(_ candidate: Candidate, root: URL, files: IOSManagedFiles) throws {
         guard candidate.kind == "stale_extension_reference" else { return }
         let local = root.appendingPathComponent(candidate.relative).deletingLastPathComponent().appendingPathComponent("extensions")
         let global = root.appendingPathComponent("public/scripts/extensions/third-party")
         for reference in candidate.references {
             let name = String(reference.dropFirst("third-party/".count))
-            guard !store.files.exists(local.appendingPathComponent(name)),
-                  !store.files.exists(global.appendingPathComponent(name)) else {
+            guard !files.exists(local.appendingPathComponent(name)),
+                  !files.exists(global.appendingPathComponent(name)) else {
                 throw IOSFileError.invalid("A referenced extension was reinstalled; its disabled setting was preserved")
             }
         }
     }
-    private func users(_ root: URL) throws -> [URL] {
+    private func users(_ root: URL, files: IOSManagedFiles) throws -> [URL] {
         let data = root.appendingPathComponent("data")
-        if !store.files.exists(data) { return [] }
-        return try store.files.children(data, limit: 256).filter {
+        if !files.exists(data) { return [] }
+        return try files.children(data, limit: 256).filter {
             validSegment($0.lastPathComponent) && !$0.lastPathComponent.hasPrefix("_")
-                && (try? store.files.guardValue($0).isDirectory) == true
+                && (try? files.guardValue($0).isDirectory) == true
         }
     }
 
     func scan(_ instance: String) throws -> [String: Any] {
         expire()
         let id = try IOSInstanceStore.identity(instance)
-        let root = try store.directory(id, maintenance: true)
+        let location = try store.location(id)
+        defer { withExtendedLifetime(location) {} }
+        let root = location.directory
         try NodeRunner.shared.beginMaintenance(instance: id)
         defer { NodeRunner.shared.endMaintenance(instance: id) }
         scans = scans.filter { $0.value.instance != id }
         guard scans.count < 16 else { throw IOSFileError.invalid("Maintenance scan capacity reached; existing scans remain valid") }
-        let files = store.files
-        let configuration = try config(root)
+        let files = location.files
+        let configuration = try config(root, files: files)
         let identity = try files.guardValue(root).identity
         let budget = IOSInspectionBudget()
         var candidates: [Candidate] = []
@@ -117,7 +119,7 @@ final class IOSInstanceMaintenance {
                     ? "delete_cache" : "remove_disabled_reference",
                 description: description, snapshot: snapshot, references: references))
         }
-        for user in try users(root) {
+        for user in try users(root, files: files) {
             let extensions = user.appendingPathComponent("extensions")
             if files.exists(extensions) {
                 for entry in try files.children(extensions, limit: 512) {
@@ -188,7 +190,7 @@ final class IOSInstanceMaintenance {
         let scanId = UUID().uuidString
         let plan = Plan(instance: id, root: root, rootIdentity: identity, configDigest: configuration.0,
             configGuard: configuration.1, expires: now() + ttl, candidates: candidates)
-        try validate(plan, hashConfig: true)
+        try validate(plan, files: files, hashConfig: true)
         scans[scanId] = plan
         return ["instanceId": id, "scanId": scanId, "expiresAt": plan.expires * 1000,
             "items": candidates.map { $0.publicValue }, "warnings": warnings]
@@ -210,8 +212,10 @@ final class IOSInstanceMaintenance {
         }
         try NodeRunner.shared.beginMaintenance(instance: instance)
         defer { NodeRunner.shared.endMaintenance(instance: instance) }
-        try validate(plan, hashConfig: true)
-        let files = store.files
+        let location = try store.location(instance)
+        defer { withExtendedLifetime(location) {} }
+        let files = location.files
+        try validate(plan, files: files, hashConfig: true)
         let budget = IOSInspectionBudget()
         var results: [[String: Any]] = []
         var recoveryIds: [String] = []
@@ -222,15 +226,15 @@ final class IOSInstanceMaintenance {
                 "freedBytes": 0, "quarantinedBytes": 0]
             var createdRecovery: (String, URL)?
             do {
-                try validate(plan, hashConfig: true)
+                try validate(plan, files: files, hashConfig: true)
                 let source = plan.root.appendingPathComponent(candidate.relative)
                 guard try files.snapshot(source, budget: budget) == candidate.snapshot else {
                     throw IOSFileError.invalid("The selected content changed after scanning")
                 }
-                try validateReferences(candidate, root: plan.root)
+                try validateReferences(candidate, root: plan.root, files: files)
                 let recovery = UUID().uuidString
                 let folder = plan.root.appendingPathComponent("\(base)/recovery/\(recovery)")
-                try requireRecoveryCapacity(plan.root, activeRecords: &activeRecoveryRecords)
+                try requireRecoveryCapacity(plan.root, files: files, activeRecords: &activeRecoveryRecords)
                 try files.createDirectory(folder)
                 let payload = folder.appendingPathComponent("payload")
                 createdRecovery = (recovery, payload)
@@ -257,9 +261,9 @@ final class IOSInstanceMaintenance {
                     try files.write(original, to: payload, replace: false)
                     try files.writeJSON(record, to: recordURL, replace: false)
                     try NodeRunner.shared.stoppedMutation(instance: instance) {
-                        try validate(plan, hashConfig: false)
+                        try validate(plan, files: files, hashConfig: false)
                         try files.validate(candidate.snapshot, at: source)
-                        try validateReferences(candidate, root: plan.root)
+                        try validateReferences(candidate, root: plan.root, files: files)
                         try files.write(applied, to: source)
                     }
                     record["phase"] = "quarantined"
@@ -268,7 +272,7 @@ final class IOSInstanceMaintenance {
                 } else {
                     try files.writeJSON(record, to: recordURL, replace: false)
                     try NodeRunner.shared.stoppedMutation(instance: instance) {
-                        try validate(plan, hashConfig: false)
+                        try validate(plan, files: files, hashConfig: false)
                         try files.validate(candidate.snapshot, at: source)
                         try files.move(source, to: payload)
                     }
@@ -299,38 +303,38 @@ final class IOSInstanceMaintenance {
             "freedBytes": 0, "quarantinedBytes": total, "recoveryIds": recoveryIds]
     }
 
-    private func requireRecoveryCapacity(_ root: URL, activeRecords: inout [String: IOSFileGuard]) throws {
+    private func requireRecoveryCapacity(_ root: URL, files: IOSManagedFiles, activeRecords: inout [String: IOSFileGuard]) throws {
         let parent = root.appendingPathComponent("\(base)/recovery")
-        guard store.files.exists(parent) else { activeRecords.removeAll(); return }
-        let listing = try store.files.boundedChildren(parent, limit: 4096)
+        guard files.exists(parent) else { activeRecords.removeAll(); return }
+        let listing = try files.boundedChildren(parent, limit: 4096)
         guard !listing.truncated else { throw IOSFileError.invalid("Recovery inspection limit reached; existing records were preserved") }
         var observed: [String: IOSFileGuard] = [:]
         let active = try listing.items.filter { child in
-            guard try store.files.guardValue(child).isDirectory else { return false }
-            guard store.files.exists(child.appendingPathComponent("payload")) else { return false }
+            guard try files.guardValue(child).isDirectory else { return false }
+            guard files.exists(child.appendingPathComponent("payload")) else { return false }
             let record = child.appendingPathComponent("record.json")
-            guard let current = try? store.files.guardValue(record) else { return true }
+            guard let current = try? files.guardValue(record) else { return true }
             // A guard cannot prove unchanged contents, so only cache the conservative active conclusion.
             if activeRecords[record.path] == current {
                 observed[record.path] = current
                 return true
             }
-            let phase = (try? store.files.json(record))?["phase"] as? String
+            let phase = (try? files.json(record))?["phase"] as? String
             guard phase != "restored" else { return false }
-            if (try? store.files.guardValue(record)) == current { observed[record.path] = current }
+            if (try? files.guardValue(record)) == current { observed[record.path] = current }
             return true
         }
         activeRecords = observed
         guard active.count < 256 else { throw IOSFileError.invalid("Recovery capacity reached; restore or retain existing backups before applying more changes") }
     }
 
-    private func recoveryRecord(_ root: URL, instance: String, recovery: String) throws -> (URL, [String: Any], String, IOSFileGuard) {
+    private func recoveryRecord(_ root: URL, files: IOSManagedFiles, instance: String, recovery: String) throws -> (URL, [String: Any], String, IOSFileGuard) {
         guard UUID(uuidString: recovery) != nil else { throw IOSFileError.invalid("Invalid recovery identity") }
         let folder = root.appendingPathComponent("\(base)/recovery/\(recovery)")
         let recordURL = folder.appendingPathComponent("record.json")
-        let before = try store.files.guardValue(recordURL)
-        let bytes = try store.files.data(recordURL, maximum: 65536)
-        guard try store.files.guardValue(recordURL) == before else { throw IOSFileError.invalid("Recovery metadata changed while being read") }
+        let before = try files.guardValue(recordURL)
+        let bytes = try files.data(recordURL, maximum: 65536)
+        guard try files.guardValue(recordURL) == before else { throw IOSFileError.invalid("Recovery metadata changed while being read") }
         guard let value = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               value["revision"] as? Int == 1, value["owner"] as? String == "sillyclient",
               value["instanceId"] as? String == instance, value["recoveryId"] as? String == recovery,
@@ -356,11 +360,10 @@ final class IOSInstanceMaintenance {
         return (folder, value, hash(bytes), before)
     }
 
-    private func restoreValidation(_ root: URL, record: [String: Any], folder: URL,
+    private func restoreValidation(_ root: URL, files: IOSManagedFiles, record: [String: Any], folder: URL,
                                    budget: IOSInspectionBudget) throws -> String {
-        let files = store.files
         guard record["rootIdentity"] as? String == (try files.guardValue(root).identity),
-              record["configDigest"] as? String == (try config(root).0),
+              record["configDigest"] as? String == (try config(root, files: files).0),
               let expected = record["payloadDigest"] as? String, let relative = record["relativePath"] as? String else {
             throw IOSFileError.invalid("Recovery no longer belongs to this instance configuration")
         }
@@ -384,23 +387,26 @@ final class IOSInstanceMaintenance {
 
     func list(_ instance: String) throws -> [String: Any] {
         expire()
-        let root = try store.directory(instance, maintenance: true)
+        let location = try store.location(instance)
+        defer { withExtendedLifetime(location) {} }
+        let root = location.directory
+        let files = location.files
         try NodeRunner.shared.beginMaintenance(instance: instance)
         defer { NodeRunner.shared.endMaintenance(instance: instance) }
         restores = restores.filter { $0.value.instance != instance }
         let parent = root.appendingPathComponent("\(base)/recovery")
-        guard store.files.exists(parent) else { return ["items": [], "warnings": []] }
+        guard files.exists(parent) else { return ["items": [], "warnings": []] }
         var items: [[String: Any]] = []
         var warnings: [String] = []
         let budget = IOSInspectionBudget()
-        let listing = try store.files.boundedChildren(parent, limit: 4096)
+        let listing = try files.boundedChildren(parent, limit: 4096)
         if listing.truncated { warnings.append("Recovery inspection limit reached; additional records were preserved") }
         for child in listing.items {
             do {
                 let recovery = child.lastPathComponent
-                let (folder, record, digest, recordGuard) = try recoveryRecord(root, instance: instance, recovery: recovery)
+                let (folder, record, digest, recordGuard) = try recoveryRecord(root, files: files, instance: instance, recovery: recovery)
                 if record["phase"] as? String == "restored" { continue }
-                if !store.files.exists(folder.appendingPathComponent("payload")) { continue }
+                if !files.exists(folder.appendingPathComponent("payload")) { continue }
                 var value: [String: Any] = ["recoveryId": recovery, "createdAt": record["createdAt"] ?? 0,
                     "description": record["description"] ?? "Maintenance recovery", "relativePath": record["relativePath"] ?? "",
                     "kind": record["kind"] ?? "", "action": record["action"] ?? "",
@@ -409,7 +415,7 @@ final class IOSInstanceMaintenance {
                     guard restores.count < 256 else {
                         throw IOSFileError.invalid("Recovery token capacity reached; existing tokens remain valid")
                     }
-                    let payloadDigest = try restoreValidation(root, record: record, folder: folder, budget: budget)
+                    let payloadDigest = try restoreValidation(root, files: files, record: record, folder: folder, budget: budget)
                     let token = UUID().uuidString
                     restores[token] = RestorePlan(instance: instance, recovery: recovery,
                         recordDigest: digest, recordGuard: recordGuard, payloadDigest: payloadDigest, expires: now() + ttl)
@@ -429,26 +435,29 @@ final class IOSInstanceMaintenance {
         expire()
         guard let plan = restores.removeValue(forKey: token), plan.instance == instance, plan.recovery == recovery,
               plan.expires > now() else { throw IOSFileError.invalid("Recovery token expired or was already used") }
-        let root = try store.directory(instance, maintenance: true)
+        let location = try store.location(instance)
+        defer { withExtendedLifetime(location) {} }
+        let root = location.directory
+        let files = location.files
         try NodeRunner.shared.beginMaintenance(instance: instance)
         defer { NodeRunner.shared.endMaintenance(instance: instance) }
-        let (folder, record, digest, recordGuard) = try recoveryRecord(root, instance: instance, recovery: recovery)
+        let (folder, record, digest, recordGuard) = try recoveryRecord(root, files: files, instance: instance, recovery: recovery)
         guard record["phase"] as? String != "restored", digest == plan.recordDigest, recordGuard == plan.recordGuard,
-              try restoreValidation(root, record: record, folder: folder,
+              try restoreValidation(root, files: files, record: record, folder: folder,
             budget: IOSInspectionBudget()) == plan.payloadDigest else { throw IOSFileError.invalid("Recovery record changed") }
         let payload = folder.appendingPathComponent("payload")
         let target = root.appendingPathComponent(record["relativePath"] as! String)
-        let configBefore = try config(root)
+        let configBefore = try config(root, files: files)
         guard configBefore.0 == record["configDigest"] as? String else {
             throw IOSFileError.invalid("Instance configuration changed before restore")
         }
-        let payloadSnapshot = try store.files.snapshot(payload)
+        let payloadSnapshot = try files.snapshot(payload)
         let settings = record["kind"] as? String == "stale_extension_reference"
-        let targetSnapshot = settings ? try store.files.snapshot(target) : nil
-        let bytes = settings ? try store.files.data(payload) : nil
+        let targetSnapshot = settings ? try files.snapshot(target) : nil
+        let bytes = settings ? try files.data(payload) : nil
         if let bytes = bytes {
             guard hash(bytes) == record["payloadDigest"] as? String,
-                  hash(try store.files.data(target)) == record["appliedDigest"] as? String else {
+                  hash(try files.data(target)) == record["appliedDigest"] as? String else {
                 throw IOSFileError.invalid("Settings or recovery data changed before restore")
             }
         } else {
@@ -457,22 +466,22 @@ final class IOSInstanceMaintenance {
             }
         }
         try NodeRunner.shared.stoppedMutation(instance: instance) {
-            guard try store.files.guardValue(root).identity == record["rootIdentity"] as? String else {
+            guard try files.guardValue(root).identity == record["rootIdentity"] as? String else {
                 throw IOSFileError.invalid("Instance or payload identity changed before restore")
             }
-            try store.files.validate(payloadSnapshot, at: payload)
+            try files.validate(payloadSnapshot, at: payload)
             let configURL = root.appendingPathComponent("config.yaml")
             if let expected = configBefore.1 {
-                guard try store.files.guardValue(configURL) == expected else { throw IOSFileError.invalid("Instance configuration changed before restore") }
-            } else if store.files.exists(configURL) { throw IOSFileError.invalid("Instance configuration changed before restore") }
-            let currentRecord = try store.files.guardValue(folder.appendingPathComponent("record.json"))
+                guard try files.guardValue(configURL) == expected else { throw IOSFileError.invalid("Instance configuration changed before restore") }
+            } else if files.exists(configURL) { throw IOSFileError.invalid("Instance configuration changed before restore") }
+            let currentRecord = try files.guardValue(folder.appendingPathComponent("record.json"))
             guard currentRecord == recordGuard else { throw IOSFileError.invalid("Recovery metadata changed") }
             if let bytes = bytes, let expected = targetSnapshot {
-                try store.files.validate(expected, at: target)
-                try store.files.write(bytes, to: target)
+                try files.validate(expected, at: target)
+                try files.write(bytes, to: target)
             } else {
-                guard !store.files.exists(target) else { throw IOSFileError.invalid("Restore destination is occupied") }
-                try store.files.move(payload, to: target)
+                guard !files.exists(target) else { throw IOSFileError.invalid("Restore destination is occupied") }
+                try files.move(payload, to: target)
             }
         }
         var result: [String: Any] = ["success": true, "recoveryId": recovery, "relativePath": record["relativePath"] ?? ""]
@@ -480,10 +489,10 @@ final class IOSInstanceMaintenance {
             var completed = record
             completed["phase"] = "restored"
             completed["restoredAt"] = now() * 1000
-            try store.files.writeJSON(completed, to: folder.appendingPathComponent("record.json"))
+            try files.writeJSON(completed, to: folder.appendingPathComponent("record.json"))
             let history = root.appendingPathComponent("\(base)/history")
-            try store.files.createDirectory(history)
-            try store.files.move(folder, to: history.appendingPathComponent(recovery))
+            try files.createDirectory(history)
+            try files.move(folder, to: history.appendingPathComponent(recovery))
         } catch { result["warning"] = "Contents were restored, but recovery history could not be archived: \(error.localizedDescription)" }
         return result
     }

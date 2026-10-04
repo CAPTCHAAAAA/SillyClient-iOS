@@ -124,7 +124,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                                         else { KeepAliveService.shared.stop() }
                                         self.notifyListeners("ready", data: ["ready": true, "instanceId": instance,
                                             "operationId": operation, "port": port, "url": status["url"] ?? ""])
-                                        call.resolve(["ready": true, "instanceId": instance, "operationId": operation])
+                                        call.resolve(["ready": true, "instanceId": instance, "operationId": operation,
+                                            "installPath": directory.path, "installPathMode": "exact"])
                                     case .failure(let error): call.reject(error.localizedDescription)
                                     }
                                 }
@@ -434,7 +435,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                     defer { scoped?.stopAccessingSecurityScopedResource() }
                     do {
                         let target = try self.store.migrate(instance: instance, operation: operation, sourcePath: source,
-                            targetPath: call.getString("targetPath"), mode: call.getString("mode") ?? "copy",
+                            targetPath: call.getString("targetPath"), installPathMode: call.getString("installPathMode"),
+                            mode: call.getString("mode") ?? "copy",
                             includeSecrets: call.getBool("includeSecrets") ?? false, preinstall: call.getObject("preinstall"),
                             scopedSource: scoped)
                         NodeRunner.shared.stop(instance: instance, operation: operation) { _ in
@@ -448,7 +450,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             } catch { call.reject(error.localizedDescription) }
         }
     }
-    @objc func uninstallInstance(_ call: CAPPluginCall) { perform(call) { try self.store.uninstall(self.id(call)) } }
+    @objc func uninstallInstance(_ call: CAPPluginCall) { perform(call) { try self.store.uninstall(self.id(call), installPath: call.getString("installPath")) } }
     @objc func scanInstanceMaintenance(_ call: CAPPluginCall) { perform(call) { try IOSInstanceMaintenance.shared.scan(self.id(call)) } }
     @objc func applyInstanceMaintenance(_ call: CAPPluginCall) {
         perform(call) {
@@ -503,7 +505,12 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             presenter.present(picker, animated: true)
         }
     }
-    @objc func pickDirectory(_ call: CAPPluginCall) { presentPicker(call, action: "dir", types: [.folder]) }
+    @objc func pickDirectory(_ call: CAPPluginCall) {
+        guard call.getString("purpose") == nil || ["installation", "source"].contains(call.getString("purpose") ?? "") else {
+            call.reject("Unsupported directory picker purpose"); return
+        }
+        presentPicker(call, action: call.getString("purpose") == "installation" ? "installDir" : "dir", types: [.folder])
+    }
     @objc func pickZipFile(_ call: CAPPluginCall) { presentPicker(call, action: "zip", types: [.zip]) }
     @objc func pickImage(_ call: CAPPluginCall) {
         do { _ = try id(call); presentPicker(call, action: "image", types: [.image]) }
@@ -544,6 +551,16 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         let instance = pendingInstanceId
         pendingPickerCall = nil
         if action == "save" { call.resolve(["success": true]); return }
+        if action == "installDir" {
+            io.async {
+                do {
+                    let root = try self.store.locations.select(selected)
+                    call.resolve(["name": root.lastPathComponent, "path": root.path, "installPathMode": "root",
+                        "runtimeLocation": "selected", "persistentAuthorization": true])
+                } catch { call.reject(error.localizedDescription) }
+            }
+            return
+        }
         let scoped = selected.startAccessingSecurityScopedResource()
         let source = selected.resolvingSymlinksInPath()
         if action == "dir" {

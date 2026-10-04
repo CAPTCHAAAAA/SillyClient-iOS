@@ -59,8 +59,10 @@ final class IOSInspectionBudget {
 final class IOSManagedFiles {
     let root: URL
     private let fm = FileManager.default
-    init(root: URL) {
+    private let expectedRootIdentity: String?
+    init(root: URL, expectedRootIdentity: String? = nil) {
         self.root = root.standardizedFileURL
+        self.expectedRootIdentity = expectedRootIdentity
     }
 
     func checked(_ url: URL, allowMissing: Bool = false) throws -> URL {
@@ -70,7 +72,10 @@ final class IOSManagedFiles {
         }
         let relative = candidate.path == root.path ? "" : String(candidate.path.dropFirst(root.path.count + 1))
         var current = root
-        _ = try rawGuard(root)
+        let rootGuard = try rawGuard(root)
+        if let identity = expectedRootIdentity, rootGuard.identity != identity {
+            throw IOSFileError.invalid("The authorized directory identity changed")
+        }
         for part in relative.split(separator: "/") {
             current.appendPathComponent(String(part))
             if !exists(current) {
@@ -325,6 +330,17 @@ final class IOSManagedFiles {
     func createDirectory(_ directory: URL) throws {
         let target = try checked(directory, allowMissing: true)
         try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        _ = try checked(target)
+    }
+
+    func createExclusiveDirectory(_ directory: URL) throws {
+        let target = try checked(directory, allowMissing: true)
+        guard try guardValue(target.deletingLastPathComponent()).isDirectory else {
+            throw IOSFileError.invalid("Exclusive directory parent is unavailable")
+        }
+        guard mkdir(target.path, mode_t(0o700)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         _ = try checked(target)
     }
 

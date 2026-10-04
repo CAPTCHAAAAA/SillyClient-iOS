@@ -187,6 +187,24 @@ select:focus-visible {
 }
 }
 
+/* Keep scrollable surfaces stable when their content crosses the viewport. */
+html,
+body,
+.scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  scrollbar-gutter: stable;
+  overscroll-behavior-y: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 /* 玻璃面板 - Liquid Glass */
 .glass-panel {
   background: var(--glass);
@@ -252,6 +270,9 @@ select:focus-visible {
   filter: blur(40px);
   mix-blend-mode: screen;
   will-change: transform;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  transform-style: preserve-3d;
 }
 
 /* 流光 1 - 左上区域大光斑 */
@@ -339,43 +360,43 @@ select:focus-visible {
   animation: screensaver-drift-5 26s ease-in-out infinite;
 }
 
-/* 纯流动动画 - 大幅位移覆盖全屏 */
+/* 纯流动动画 - 大幅位移覆盖全屏 (translate3d 驱动 GPU 合成器) */
 @keyframes screensaver-drift-1 {
-  0%   { transform: translate(0, 0); }
-  25%  { transform: translate(25vw, 18vh); }
-  50%  { transform: translate(10vw, 35vh); }
-  75%  { transform: translate(-15vw, 20vh); }
-  100% { transform: translate(0, 0); }
+  0%   { transform: translate3d(0, 0, 0); }
+  25%  { transform: translate3d(25vw, 18vh, 0); }
+  50%  { transform: translate3d(10vw, 35vh, 0); }
+  75%  { transform: translate3d(-15vw, 20vh, 0); }
+  100% { transform: translate3d(0, 0, 0); }
 }
 
 @keyframes screensaver-drift-2 {
-  0%   { transform: translate(0, 0); }
-  25%  { transform: translate(-22vw, -15vh); }
-  50%  { transform: translate(-35vw, -28vh); }
-  75%  { transform: translate(-15vw, -30vh); }
-  100% { transform: translate(0, 0); }
+  0%   { transform: translate3d(0, 0, 0); }
+  25%  { transform: translate3d(-22vw, -15vh, 0); }
+  50%  { transform: translate3d(-35vw, -28vh, 0); }
+  75%  { transform: translate3d(-15vw, -30vh, 0); }
+  100% { transform: translate3d(0, 0, 0); }
 }
 
 @keyframes screensaver-drift-3 {
-  0%   { transform: translate(0, 0); }
-  33%  { transform: translate(-20vw, 25vh); }
-  66%  { transform: translate(22vw, -12vh); }
-  100% { transform: translate(0, 0); }
+  0%   { transform: translate3d(0, 0, 0); }
+  33%  { transform: translate3d(-20vw, 25vh, 0); }
+  66%  { transform: translate3d(22vw, -12vh, 0); }
+  100% { transform: translate3d(0, 0, 0); }
 }
 
 @keyframes screensaver-drift-4 {
-  0%   { transform: translate(0, 0); }
-  25%  { transform: translate(20vw, -22vh); }
-  50%  { transform: translate(30vw, 10vh); }
-  75%  { transform: translate(10vw, 28vh); }
-  100% { transform: translate(0, 0); }
+  0%   { transform: translate3d(0, 0, 0); }
+  25%  { transform: translate3d(20vw, -22vh, 0); }
+  50%  { transform: translate3d(30vw, 10vh, 0); }
+  75%  { transform: translate3d(10vw, 28vh, 0); }
+  100% { transform: translate3d(0, 0, 0); }
 }
 
 @keyframes screensaver-drift-5 {
-  0%   { transform: translate(0, 0); }
-  33%  { transform: translate(-25vw, 22vh); }
-  66%  { transform: translate(15vw, 30vh); }
-  100% { transform: translate(0, 0); }
+  0%   { transform: translate3d(0, 0, 0); }
+  33%  { transform: translate3d(-25vw, 22vh, 0); }
+  66%  { transform: translate3d(15vw, 30vh, 0); }
+  100% { transform: translate3d(0, 0, 0); }
 }
 
 /* 背景设置面板弹出动画 */
@@ -411,6 +432,8 @@ select:focus-visible {
   inset: 0;
   z-index: 0;
   pointer-events: none;
+  contain: strict;
+  will-change: transform;
 }
 
 .ambient-paused .ambient-glow {
@@ -541,6 +564,71 @@ button:active:not(:disabled) {
   transform: translateY(0) scale(0.985);
 }
 
+.carousel-pagination {
+  color: #fff;
+  transition: color 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.carousel-pagination.is-light {
+  color: #1a1625;
+}
+
+.carousel-pagination button {
+  transition-property: transform, filter, background-color, border-color, box-shadow, opacity;
+}
+
+.carousel-pagination__dot-coverage,
+.carousel-pagination__dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+}
+
+.carousel-pagination__dot-coverage {
+  transition: none;
+}
+
+.carousel-pagination__dot {
+  background-color: currentColor;
+  border-radius: 999px;
+  opacity: 0.2;
+  transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.carousel-pagination__mover {
+  position: absolute;
+  top: calc(50% - 3px);
+  left: 0;
+  width: 18px;
+  height: 6px;
+  pointer-events: none;
+  will-change: transform;
+  transition: none;
+}
+
+.carousel-pagination__capsule {
+  display: block;
+  width: 18px;
+  height: 6px;
+  border-radius: 999px;
+  background-color: currentColor;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  opacity: 0.9;
+  transform-origin: center;
+  will-change: transform;
+  transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.carousel-pagination.is-light .carousel-pagination__capsule {
+  opacity: 0.75;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .carousel-pagination button:hover .carousel-pagination__dot {
+    opacity: 0.4;
+  }
+}
+
 /* 搜索栏 — iOS Search Bar 风格 */
 input[type="text"][placeholder] {
   font-size: 15px;
@@ -627,7 +715,7 @@ header span[class*="truncate"] {
 
 /* 普通切换：仅在模式变化时临时给整棵树加缓动颜色过渡。 */
 .theme-smoothing,
-.theme-smoothing * {
+.theme-smoothing *:not(.motion-panel-stack):not(.motion-panel-face):not(.carousel-pagination):not(.carousel-pagination *) {
   transition-property: color, background-color, border-color, box-shadow, fill, stroke !important;
   transition-duration: 1000ms !important;
   transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1) !important;
@@ -773,7 +861,7 @@ header span[class*="truncate"] {
   pointer-events: none;
 }
 
-/* 实例卡片仅通过材质变化表达状态，避免 transform 改变固定菜单的定位基准。 */
+/* 实例卡片材质与硬件加速合成层 */
 .motion-instance-card {
   isolation: isolate;
   background-clip: padding-box;
@@ -784,10 +872,13 @@ header span[class*="truncate"] {
     inset 0 -1px 0 rgba(0, 0, 0, 0.06),
     0 0 12px rgba(7, 5, 10, 0.08),
     0 2px 5px rgba(7, 5, 10, 0.055);
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  will-change: transform;
   transition:
     border-color var(--motion-fast) ease,
     box-shadow var(--motion-layout) var(--motion-ease-out),
-    filter var(--motion-fast) ease;
+    opacity var(--motion-fast) ease;
 }
 
 .motion-instance-card img {
@@ -802,9 +893,49 @@ header span[class*="truncate"] {
     0 3px 8px rgba(0, 0, 0, 0.07);
 }
 
+@media (hover: hover) and (pointer: fine) {
+  .motion-instance-card:hover {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.06),
+      0 10px 28px rgba(7, 5, 10, 0.16),
+      0 3px 8px rgba(7, 5, 10, 0.08);
+  }
+}
+
 .motion-instance-card:active {
-  filter: brightness(0.97);
+  opacity: 0.95;
   transition-duration: var(--motion-press);
+}
+
+.motion-instance-card:active:not([data-card-motion-managed]):not([data-card-motion-managed] .motion-instance-card) {
+  transform: scale(0.985) translate3d(0, 0, 0);
+}
+
+.motion-panel-stack {
+  position: relative;
+  overflow: hidden;
+  transition: height 500ms var(--motion-ease-out);
+}
+
+.motion-panel-face {
+  opacity: 0;
+  transform: translate3d(0, 6px, 0);
+  filter: blur(3px);
+  visibility: hidden;
+  transition:
+    opacity 500ms var(--motion-ease-out),
+    transform 500ms var(--motion-ease-out),
+    filter 500ms var(--motion-ease-out),
+    visibility 0s linear 500ms;
+}
+
+.motion-panel-face.is-active {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  filter: blur(0);
+  visibility: visible;
+  transition-delay: 0s;
 }
 
 /* 高度未知的内容使用 grid 行连续展开，允许中途反向。 */
@@ -1150,9 +1281,32 @@ header span[class*="truncate"] {
   .companion-preset__knob,
   .companion-preset__details,
   .theme-smoothing,
-  .theme-smoothing *,
+  .theme-smoothing *:not(.motion-panel-stack):not(.motion-panel-face):not(.carousel-pagination):not(.carousel-pagination *),
   .overlay-backdrop {
     transition-duration: 1ms !important;
+  }
+
+  .motion-panel-stack {
+    transition: none;
+  }
+
+  .motion-panel-face,
+  .motion-panel-face.is-active {
+    transform: none;
+    filter: none;
+    transition:
+      opacity 120ms var(--motion-ease-out),
+      visibility 0s linear 120ms;
+  }
+
+  .motion-panel-face.is-active {
+    transition-delay: 0s;
+  }
+
+  .carousel-pagination,
+  .carousel-pagination__dot,
+  .carousel-pagination__capsule {
+    transition-duration: 120ms;
   }
 
   .motion-instance-card,
@@ -1736,6 +1890,12 @@ select option {
   width: 100%;
   cursor: pointer;
   text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+  transition: border-color 0.2s ease;
+}
+
+.ios-task-surface.is-light .app-settings-link-row {
+  border-bottom: 1px solid rgba(26, 22, 37, 0.055);
 }
 
 .app-settings-link-row .app-settings-copy,
@@ -1751,6 +1911,14 @@ select option {
 
   .ios-task-surface.is-light .app-settings-link-row:hover .app-settings-label {
     color: rgba(26, 22, 37, 0.9);
+  }
+
+  .app-settings-link-row:hover {
+    border-bottom-color: rgba(255, 255, 255, 0.12);
+  }
+
+  .ios-task-surface.is-light .app-settings-link-row:hover {
+    border-bottom-color: rgba(26, 22, 37, 0.12);
   }
 
   .app-settings-action:hover {

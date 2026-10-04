@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useLayoutEffect } from "react";
 import { X, ChevronRight } from "lucide-react";
 import { Capacitor } from "@capacitor/core";
 import { TarvenEnv } from "../../capacitor-plugin";
@@ -7,6 +7,9 @@ import { cn } from "../../lib/utils";
 import { LAYERS } from "../../constants/layers";
 import { ToggleSwitch } from "../common/ToggleSwitch";
 import type { TavernInstance } from "../../types";
+import { createInstanceBackup } from "../../lib/instance-persistence";
+import { openExternalUrl } from "../../lib/external-links";
+import { APP_VERSION } from "../../constants/app-version";
 
 export interface AppSettingsDrawerProps {
   isOpen: boolean;
@@ -23,12 +26,14 @@ export interface AppSettingsDrawerProps {
   replayOnboarding: () => void;
   instances: TavernInstance[];
   setInstances: React.Dispatch<React.SetStateAction<TavernInstance[]>>;
+  onImportBackup: (content: string) => void;
   importInputRef: React.RefObject<HTMLInputElement | null>;
   appUpdateState: "idle" | "checking" | "current" | "available" | "error";
   appUpdateInfo: AppUpdateInfo | null;
   checkForAppUpdate: () => Promise<any>;
   openProjectPage: () => void;
   onOpenCleanGarbage: () => void;
+  onOpenWhatsNew?: () => void;
 }
 
 function AppSettingsRow({
@@ -72,7 +77,7 @@ function AppSettingsLinkRow({
     <button
       type="button"
       onClick={onClick}
-      className="app-settings-row is-interactive motion-control"
+      className="app-settings-row app-settings-link-row is-interactive motion-control"
     >
       <div className="app-settings-copy">
         <div className="app-settings-label">{label}</div>
@@ -111,6 +116,7 @@ function AppSettingsAction({
 /**
  * APP 全局设置抽屉面板 (AppSettingsDrawer)
  * 涵盖：通用设置、数据备份导出、应用维护与更新。
+ * 全域接入向导级同位驻留 DOM、微位移升降与高斯模糊虚化交叉溶变动效。
  */
 export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
   isOpen,
@@ -127,16 +133,58 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
   replayOnboarding,
   instances,
   setInstances,
+  onImportBackup,
   importInputRef,
   appUpdateState,
   appUpdateInfo,
   checkForAppUpdate,
   openProjectPage,
   onOpenCleanGarbage,
+  onOpenWhatsNew,
 }) => {
   const [appSettingsTab, setAppSettingsTab] = useState<
     "general" | "data" | "maintenance"
   >("general");
+
+  const generalRef = useRef<HTMLDivElement>(null);
+  const dataRef = useRef<HTMLDivElement>(null);
+  const maintenanceRef = useRef<HTMLDivElement>(null);
+  const [tabContentHeight, setTabContentHeight] = useState<number | null>(null);
+
+  // 动态测量当前激活 Tab 面板高度，实现向导级白天黑夜级平滑伸缩过渡
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    const targetEl =
+      appSettingsTab === "general"
+        ? generalRef.current
+        : appSettingsTab === "data"
+        ? dataRef.current
+        : maintenanceRef.current;
+    if (!targetEl) return;
+
+    const updateHeight = (entry?: ResizeObserverEntry) => {
+      const h = entry?.borderBoxSize?.[0]?.blockSize ?? targetEl.offsetHeight;
+      if (h > 0) setTabContentHeight(Math.ceil(h));
+    };
+
+    updateHeight();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(([entry]) => {
+        updateHeight(entry);
+      });
+      ro.observe(targetEl);
+      return () => ro.disconnect();
+    }
+  }, [
+    appSettingsTab,
+    isOpen,
+    pullToRefresh,
+    contentOpenMode,
+    instances.length,
+    appUpdateState,
+    appUpdateInfo,
+  ]);
 
   if (!isOpen && !isClosing) return null;
 
@@ -188,8 +236,9 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
       </div>
 
       <div className="app-settings-body flex-1 overflow-y-auto p-5 scrollbar-subtle">
+        {/* 顶部胶囊切换栏 */}
         <div
-          className="app-settings-tabs flex gap-2"
+          className="app-settings-tabs flex gap-2 mb-4"
           role="group"
           aria-label="设置分类"
         >
@@ -204,7 +253,7 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
               key={tab.id}
               type="button"
               aria-pressed={appSettingsTab === tab.id}
-              className="app-settings-tab ios-choice-control motion-control flex-1 h-9 rounded-xl text-xs font-medium border"
+              className="app-settings-tab ios-choice-control motion-control flex-1 h-9 rounded-xl text-xs font-medium border transition-colors duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
               onClick={() => setAppSettingsTab(tab.id)}
             >
               {tab.label}
@@ -212,14 +261,26 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
           ))}
         </div>
 
+        {/* 模式切换容器（向导级平滑高度自适应 + 同位驻留高斯模糊交叉溶变） */}
         <div
-          key={appSettingsTab}
-          id={`app-settings-panel-${appSettingsTab}`}
-          className="app-settings-tab-panel motion-tab-content"
-          aria-live="polite"
+          className="motion-panel-stack"
+          style={{
+            height: tabContentHeight ? `${tabContentHeight}px` : undefined,
+          }}
         >
-          {appSettingsTab === "general" && (
-            <div className="app-settings-list">
+          {/* 通用设置面板 */}
+          <div
+            ref={generalRef}
+            className={cn(
+              "motion-panel-face w-full",
+              appSettingsTab === "general"
+                ? "is-active relative pointer-events-auto"
+                : "absolute inset-x-0 top-0 pointer-events-none select-none"
+            )}
+            aria-hidden={appSettingsTab !== "general"}
+            inert={appSettingsTab !== "general"}
+          >
+            <div className="app-settings-list space-y-1">
               <AppSettingsRow
                 label="下拉刷新"
                 desc="在酒馆界面顶部下拉即可刷新"
@@ -261,37 +322,47 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
               />
               <AppSettingsPlaceholder />
             </div>
-          )}
+          </div>
 
-          {appSettingsTab === "data" && (
-            <div className="app-settings-list">
+          {/* 数据设置面板 */}
+          <div
+            ref={dataRef}
+            className={cn(
+              "motion-panel-face w-full",
+              appSettingsTab === "data"
+                ? "is-active relative pointer-events-auto"
+                : "absolute inset-x-0 top-0 pointer-events-none select-none"
+            )}
+            aria-hidden={appSettingsTab !== "data"}
+            inert={appSettingsTab !== "data"}
+          >
+            <div className="app-settings-list space-y-1">
               <AppSettingsRow
                 label="实例备份"
                 desc="迁移实例列表与应用设置"
               >
                 <div className="app-settings-actions">
                   <AppSettingsAction
-                    onClick={() => importInputRef.current?.click()}
+                    onClick={async () => {
+                      if (Capacitor.isNativePlatform()) {
+                        try {
+                          const res = await TarvenEnv.readTextFile({ mimeType: "application/json" });
+                          if (!res?.content) return;
+                          onImportBackup(res.content);
+                          onClose();
+                        } catch {
+                          /* 用户取消或读取失败 */
+                        }
+                      } else {
+                        importInputRef.current?.click();
+                      }
+                    }}
                   >
                     导入
                   </AppSettingsAction>
                   <AppSettingsAction
                     onClick={async () => {
-                      const data = JSON.stringify(
-                        {
-                          version: 2,
-                          instances: instances.map(
-                            ({
-                              icon: _icon,
-                              pendingTavernGestureHint: _pendingHint,
-                              ...rest
-                            }) => rest
-                          ),
-                          exportedAt: new Date().toISOString(),
-                        },
-                        null,
-                        2
-                      );
+                      const data = createInstanceBackup(instances);
                       const fileName = `sillyclient-backup-${new Date()
                         .toISOString()
                         .slice(0, 10)}.json`;
@@ -336,10 +407,21 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
               </AppSettingsRow>
               <AppSettingsPlaceholder />
             </div>
-          )}
+          </div>
 
-          {appSettingsTab === "maintenance" && (
-            <div className="app-settings-list">
+          {/* 维护设置面板 */}
+          <div
+            ref={maintenanceRef}
+            className={cn(
+              "motion-panel-face w-full",
+              appSettingsTab === "maintenance"
+                ? "is-active relative pointer-events-auto"
+                : "absolute inset-x-0 top-0 pointer-events-none select-none"
+            )}
+            aria-hidden={appSettingsTab !== "maintenance"}
+            inert={appSettingsTab !== "maintenance"}
+          >
+            <div className="app-settings-list space-y-1">
               <AppSettingsRow
                 label="检查新版本"
                 desc={
@@ -368,11 +450,7 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                         onClick={() => {
                           const url = appUpdateInfo.releaseUrl!;
                           onClose();
-                          if (isWeb) {
-                            window.open(url, "_blank", "noopener,noreferrer");
-                          } else {
-                            TarvenEnv.enterImmersive({ url }).catch(() => {});
-                          }
+                          void openExternalUrl(url).catch(() => {});
                         }}
                       >
                         查看
@@ -380,6 +458,14 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                     )}
                 </div>
               </AppSettingsRow>
+              <AppSettingsLinkRow
+                label={`${APP_VERSION} 主要更新`}
+                desc="查看本次版本新增功能与核心改进"
+                onClick={() => {
+                  onClose();
+                  onOpenWhatsNew?.();
+                }}
+              />
               <AppSettingsRow
                 label="临时文件"
                 desc="扫描可以安全移除的缓存"
@@ -420,7 +506,7 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
               />
               <AppSettingsPlaceholder />
             </div>
-          )}
+          </div>
         </div>
       </div>
     </div>

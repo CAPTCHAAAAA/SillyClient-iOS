@@ -244,20 +244,20 @@ test('maintenance capacity caches only conservative active guards within the cur
     const apply = maintenance.slice(maintenance.indexOf('func apply('),
         maintenance.indexOf('private func requireRecoveryCapacity'));
     assert.match(apply, /var activeRecoveryRecords: \[String: IOSFileGuard\] = \[:\]/);
-    assert.match(apply, /requireRecoveryCapacity\(plan\.root, activeRecords: &activeRecoveryRecords\)/);
+    assert.match(apply, /requireRecoveryCapacity\(plan\.root, files: files, activeRecords: &activeRecoveryRecords\)/);
     const capacity = maintenance.slice(maintenance.indexOf('private func requireRecoveryCapacity'),
         maintenance.indexOf('private func recoveryRecord'));
     assert.match(capacity, /boundedChildren\(parent, limit: 4096\)/);
     assert.match(capacity, /guard !listing\.truncated/);
     assert.match(capacity, /exists\(child\.appendingPathComponent\("payload"\)\)/);
-    assert.match(capacity, /let current = try\? store\.files\.guardValue\(record\)/);
+    assert.match(capacity, /let current = try\? files\.guardValue\(record\)/);
     assert.match(capacity, /activeRecords\[record\.path\] == current[\s\S]*return true/);
     assert.match(capacity, /guard phase != "restored" else \{ return false \}/);
-    assert.match(capacity, /if \(try\? store\.files\.guardValue\(record\)\) == current \{ observed\[record\.path\] = current \}/);
+    assert.match(capacity, /if \(try\? files\.guardValue\(record\)\) == current \{ observed\[record\.path\] = current \}/);
     assert.match(capacity, /activeRecords = observed/);
     assert.match(capacity, /guard active\.count < 256/);
     assert.doesNotMatch(maintenance.slice(0, maintenance.indexOf('init(')), /var activeRecoveryRecords/);
-    assert.ok(capacity.indexOf('guard phase != "restored"') < capacity.indexOf('if (try? store.files.guardValue(record))'));
+    assert.ok(capacity.indexOf('guard phase != "restored"') < capacity.indexOf('if (try? files.guardValue(record))'));
 });
 
 test('actual native fixtures reject capacity overflow after cached recovery metadata changes', () => {
@@ -284,6 +284,33 @@ test('simulator fixture acceptance matches every declared native group', () => {
     assert.ok(names.length > 0);
     const expected = runner.match(/const nativeFixtureGroups = (\d+);/)?.[1];
     assert.equal(Number(expected), names.length, 'Driver fixture count no longer matches the Swift suite');
+});
+
+test('installation paths keep authorization, ownership recovery, and per-instance maintenance coupled', () => {
+    const locations = read('native-src/IOSInstallationLocations.swift');
+    const store = read('native-src/IOSInstanceStore.swift');
+    const maintenance = read('native-src/IOSInstanceMaintenance.swift');
+    const runner = read('native-src/NodeRunner.swift');
+    const plugin = read('native-src/TarvenEnvPlugin.swift');
+    assert.match(locations, /bookmarkData\(options: \.minimalBookmark/);
+    assert.match(locations, /guard !stale, scopedURL\.isFileURL/);
+    assert.match(locations, /guard startScope\(scopedURL\)/);
+    assert.match(locations, /root\.path == expectedPath/);
+    assert.match(locations, /expectedRootIdentity: identity/);
+    assert.match(locations, /deinit \{ release\(\) \}/);
+    assert.doesNotMatch(locations, /withSecurityScope/);
+    assert.match(store, /mode == "root" \? \$0\.appendingPathComponent\(id\) : \$0/);
+    assert.match(store, /documentsRelativePath/);
+    assert.match(store, /recoverRegistration\(id, location: location\)/);
+    assert.match(store, /"status"\] = "unavailable"/);
+    assert.doesNotMatch(store, /Custom installation paths are unsupported|Custom migration destinations are unsupported/);
+    assert.doesNotMatch(maintenance, /store\.files/);
+    assert.match(maintenance, /withExtendedLifetime\(location\)/);
+    assert.match(runner, /private var activeLocation: IOSInstallationLocation\?/);
+    assert.match(runner, /locations\.json/);
+    assert.match(plugin, /call\.getString\("installPathMode"\)/);
+    assert.match(plugin, /"installPath": directory\.path, "installPathMode": "exact"/);
+    assert.match(plugin, /action == "installDir"[\s\S]*locations\.select\(selected\)/);
 });
 
 test('maintenance rejects terminal line controls before taking a recoverable snapshot', () => {
@@ -418,6 +445,10 @@ async function simulateDriver(scenario = 'success') {
     let migrated;
     let maintenance;
     const respond = request => {
+        if (request.action === 'installationRoot') {
+            assert.ok(request.options.path.startsWith(documents + path.sep));
+            return { success: true, result: { path: request.options.path, installPathMode: 'root', persistentAuthorization: true } };
+        }
         if (request.action === 'console') {
             return { success: true, result: { loggingEnabled: scenario === 'bridge-payload-logging-enabled' } };
         }
@@ -446,21 +477,30 @@ async function simulateDriver(scenario = 'success') {
         switch (request.method) {
         case 'getPlatform': return success({ platform: 'ios' });
         case 'getAppVersion': return success({ version: '1.10.0' });
+        case 'getInstanceInfo': {
+            const record = registry[options.instanceId];
+            return record ? success({ ...record, installPath: record.path }) : reject('Instance directory is unavailable');
+        }
+        case 'scanInstances': return success({ instances: Object.values(registry).map(record => ({ ...record, installPath: record.path })) });
         case 'getStatus': return success({ serverReady: !!active, state, port: active ? 8000 : 0,
             url: active ? 'http://127.0.0.1:8000/' : '', ...active });
-        case 'provisionAndStart':
+        case 'provisionAndStart': {
             if (active) return reject('Stop the current operation before starting an instance');
             if (scenario === 'process-exit') { alive = false; return undefined; }
             active = { instanceId: options.instanceId, operationId: options.operationId };
             state = 'ready';
             listening = true;
-            const server = path.join(documents, 'SillyTavern');
+            const server = options.installPathMode === 'root' ? path.join(options.installPath, options.instanceId)
+                : options.installPath ?? registry[options.instanceId]?.path ?? path.join(documents, 'SillyTavern');
             mkdir(server);
+            mkdir(path.join(server, 'data'));
+            put(path.join(server, 'config.yaml'), `listen: false\ndataRoot: ${path.join(server, 'data')}\n`);
             if (!registry[options.instanceId]) {
                 registry[options.instanceId] = { instanceId: options.instanceId, path: server, isTakeover: false };
                 put(path.join(documents, 'instances-registry.json'), JSON.stringify(registry));
             }
-            return success({ ready: true, ...active });
+            return success({ ready: true, ...active, installPath: server, installPathMode: 'exact' });
+        }
         case 'stop':
             if (options.instanceId !== active?.instanceId || options.operationId !== active?.operationId) {
                 if (scenario === 'stale-stop-success') return success({ success: true });
@@ -486,7 +526,8 @@ async function simulateDriver(scenario = 'success') {
             assert.equal(options.mode, 'copy');
             assert.equal(options.includeSecrets, false);
             assert.ok(options.instanceId && options.instanceId !== 'default' && options.operationId);
-            const target = path.join(documents, 'instances', options.instanceId);
+            const target = options.installPathMode === 'root' ? path.join(options.targetPath, options.instanceId)
+                : options.targetPath ?? path.join(documents, 'instances', options.instanceId);
             const sourceData = path.join(options.sourcePath, 'selected-data');
             for (const [file, value] of [...files]) {
                 if (file.startsWith(key(runtime) + path.sep)) {
@@ -566,6 +607,16 @@ async function simulateDriver(scenario = 'success') {
             moveTree(maintenance.folder, path.join(migrated.target, '.sillyclient-maintenance/history', maintenance.recoveryId));
             maintenance.restored = true;
             return success({ success: true, recoveryId: maintenance.recoveryId, relativePath: maintenance.relative });
+        }
+        case 'uninstallInstance': {
+            const record = registry[options.instanceId];
+            assert.ok(record && record.path === options.installPath);
+            const prefix = key(record.path);
+            for (const file of [...files.keys()]) if (file === prefix || file.startsWith(prefix + path.sep)) files.delete(file);
+            for (const directory of [...directories]) if (directory === prefix || directory.startsWith(prefix + path.sep)) directories.delete(directory);
+            delete registry[options.instanceId];
+            put(path.join(documents, 'instances-registry.json'), JSON.stringify(registry));
+            return success({ success: true });
         }
         default: throw new Error(`Unexpected virtual native method: ${request.method}`);
         }
@@ -686,7 +737,7 @@ async function simulateDriver(scenario = 'success') {
 test('real simulator driver completes all lifecycle stages using isolated protocol fixtures', async () => {
     const actual = await simulateDriver();
     assert.equal(actual.error, undefined, actual.error?.message);
-    assert.equal(actual.report.results.length, 22);
+    assert.equal(actual.report.results.length, 24);
     assert.ok(actual.report.results.every(result => result.passed));
     assert.equal(actual.report.results.find(result => result.name.includes('native filesystem')).actual.groups, nativeFixtureNames().length);
     assert.equal(actual.report.results.find(result => result.name.includes('Real Capacitor')).actual.loggingEnabled, false);
@@ -700,7 +751,7 @@ test('real simulator driver completes all lifecycle stages using isolated protoc
     assert.equal(copy.verifiedSourceFiles, 11);
     assert.equal(copy.portClosedAfterStop, true);
     assert.equal(actual.report.results.at(-1).actual.portClosedAfterStop, true);
-    assert.equal(actual.acceptedStops, 2);
+    assert.equal(actual.acceptedStops, 3);
     assert.equal(actual.listening, false);
     assert.equal(actual.report.physicalDeviceTested, false);
     assert.equal(actual.report.visualReviewPerformed, false);

@@ -93,6 +93,8 @@
         padding: 0;
         width: 100%;
         height: 100%;
+        overscroll-behavior-y: none;
+        -webkit-tap-highlight-color: transparent;
       }
       html.light, html.light body {
         background-color: #ffffff !important;
@@ -125,6 +127,7 @@
   </head>
   <body>
     <div id="root"></div>
+    <script src="./carousel-snap-lock.js"></script>
     <script defer src="./reviewed-material-runtime.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -13,20 +13,26 @@ import {
   ChevronRight,
   Terminal,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, normalizeStoredVersion, formatDisplayVersion } from "@/lib/utils";
 import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG } from "@/capacitor-plugin";
-import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, GithubRelease } from "@/capacitor-plugin";
-import frontendPackage from "../../package.json";
+import { openExternalUrl } from "@/lib/external-links";
+import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId } from "@/capacitor-plugin";
+import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection } from "@/lib/install-location";
+import { normalizeStoredInstances, serializeInstanceRecords, parseInstanceBackup, type StoredInstance } from "@/lib/instance-persistence";
+import { GLOBAL_LOG_KEY, instanceLogs, type LogLine } from "@/lib/log-store";
+import { OperationCoordinator, OperationCancelledError, type OperationContext } from "@/lib/operation-coordinator";
+import { APP_VERSION } from "@/constants/app-version";
+import { fetchAppUpdate } from "@/lib/app-update";
 import OnboardingGuide from "@/components/onboarding/OnboardingGuide";
+import { WhatsNewModal } from "@/components/modals/WhatsNewModal";
 import { LAYERS } from "@/constants/layers";
 import { useLayerStack } from "@/hooks/useLayerStack";
 import { LayerBackdrop } from "@/components/common/LayerBackdrop";
-import { ActivityCapsule } from "@/components/common/ActivityCapsule";
-import { InstanceCard } from "@/components/instance/InstanceCard";
-import { LaunchConsoleModal } from "@/components/modals/LaunchConsoleModal";
+import { InstanceCarousel, type InstanceCarouselRef } from "@/components/instance/InstanceCarousel";
 import { NewInstanceWizardModal } from "@/components/modals/NewInstanceWizardModal";
 import { ManageInstanceModal } from "@/components/modals/ManageInstanceModal";
+import { InstanceMaintenancePanel } from "@/components/modals/InstanceMaintenancePanel";
 import { BackgroundSettingsDrawer } from "@/components/modals/BackgroundSettingsDrawer";
 import { AppSettingsDrawer } from "@/components/modals/AppSettingsDrawer";
 import { TerminalModal } from "@/components/modals/TerminalModal";
@@ -35,6 +41,7 @@ import { DeleteConfirmDialog } from "@/components/modals/DeleteConfirmDialog";
 import { RenameModal } from "@/components/modals/RenameModal";
 import { VersionDropdownMenu } from "@/components/modals/VersionDropdownMenu";
 import { CardActionMenu } from "@/components/modals/CardActionMenu";
+import { LaunchConsoleModal } from "@/components/modals/LaunchConsoleModal";
 import type { TavernInstance, ManageTab, InstanceSnapshot, BgMode, ThemeStyle, OperationPurpose } from "@/types";
 
 export const Route = createFileRoute("/")({
@@ -48,12 +55,31 @@ const INSTANCES_KEY = "sillyclient.instances";
 const INSTANCES_VERSION_KEY = "sillyclient.instances.version";
 const ONBOARDING_KEY = "sillyclient.onboarding.version";
 const ONBOARDING_VERSION = "3";
+const WHATS_NEW_KEY = "sillyclient.whatsnew.version";
+const WHATS_NEW_VERSION = APP_VERSION;
 const CURRENT_VERSION = 2;
 const BACKGROUND_PANEL_EXIT_MS = 300;
 const PANEL_EXIT_MS = 300;
 const POPOVER_EXIT_MS = 200;
 const MANAGE_PANEL_OPEN_GAP_MS = 32;
 const INSTANCE_SNAPSHOTS_KEY = "sillyclient.instanceSnapshots";
+
+function hydrateInstance(t: StoredInstance): TavernInstance {
+  return {
+    ...t,
+    cover: normalizeStoredCover(t.cover),
+    totalUsage: t.type === "local" && /(?:^|\s)\d+(?:\.\d+)?\s*(?:B|KB|MB|GB)$/i.test(t.totalUsage || "")
+      ? "—"
+      : t.totalUsage,
+    icon: t.type === "local" ? <Folder className="w-5 h-5" /> : <Cloud className="w-5 h-5" />,
+  };
+}
+
+function mergeInstanceBackup(existing: TavernInstance[], incoming: StoredInstance[]) {
+  const map = new Map(existing.map(instance => [instance.id, instance]));
+  for (const item of incoming) map.set(item.id, hydrateInstance(item));
+  return Array.from(map.values());
+}
 
 /** 从 localStorage 读取已持久化的实例列表;版本不匹配时清空旧数据。 */
 function loadInstances(): TavernInstance[] {
@@ -67,16 +93,7 @@ function loadInstances(): TavernInstance[] {
   try {
     const raw = localStorage.getItem(INSTANCES_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as TavernInstance[];
-      // icon 在持久化时无法存为 ReactNode,这里按 type 还原为图标节点
-      return parsed.map((t) => ({
-        ...t,
-        cover: normalizeStoredCover(t.cover),
-        totalUsage: t.type === "local" && /(?:^|\s)\d+(?:\.\d+)?\s*(?:B|KB|MB|GB)$/i.test(t.totalUsage || "")
-          ? "—"
-          : t.totalUsage,
-        icon: t.type === "local" ? <Folder className="w-5 h-5" /> : <Cloud className="w-5 h-5" />,
-      }));
+      return normalizeStoredInstances(JSON.parse(raw), { resetStatus: true }).map(hydrateInstance);
     }
   } catch {
     /* ignore */
@@ -104,8 +121,7 @@ function normalizeStoredCover(cover?: string) {
 /** 持久化实例列表(icon 不持久化,加载时还原)。 */
 function saveInstances(list: TavernInstance[]) {
   try {
-    const storable = list.map(({ icon: _icon, ...rest }) => rest);
-    localStorage.setItem(INSTANCES_KEY, JSON.stringify(storable));
+    localStorage.setItem(INSTANCES_KEY, JSON.stringify(serializeInstanceRecords(list)));
   } catch {
     /* ignore */
   }
@@ -146,85 +162,6 @@ function formatOperationStage(stage?: string, percent?: number) {
   return stage || "正在初始化";
 }
 
-function compareFrontendVersions(left: string, right: string): number {
-  const parts = (value: string) => value.replace(/^v/i, "").split("-")[0]
-    .split(".")
-    .map((part) => Number.parseInt(part, 10) || 0);
-  const a = parts(left);
-  const b = parts(right);
-  for (let index = 0; index < 3; index += 1) {
-    const diff = (a[index] || 0) - (b[index] || 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
-
-async function fetchWithTimeout(url: string, timeoutMs = 8000): Promise<Response> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: "application/json" },
-    });
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
-
-async function fetchAppUpdateFromFrontend(): Promise<AppUpdateInfo> {
-  const currentVersion = frontendPackage.version;
-  const apiUrl = "https://api.github.com/repos/CAPTCHAAAAA/SillyClient/releases/latest";
-  let lastError: unknown = null;
-
-  for (const candidate of [apiUrl, `https://gh-proxy.com/${apiUrl}`]) {
-    try {
-      const response = await fetchWithTimeout(candidate);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const raw = await response.json() as { tag_name?: string; html_url?: string; published_at?: string };
-      const latestVersion = String(raw?.tag_name || "").replace(/^v/i, "").trim();
-      if (!latestVersion) throw new Error("Release tag is empty");
-      return {
-        currentVersion,
-        latestVersion,
-        updateAvailable: compareFrontendVersions(currentVersion, latestVersion) < 0,
-        releaseUrl: typeof raw?.html_url === "string" ? raw.html_url : undefined,
-        publishedAt: typeof raw?.published_at === "string" ? raw.published_at : undefined,
-      };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  try {
-    const response = await fetchWithTimeout(
-      "https://data.jsdelivr.com/v1/package/gh/CAPTCHAAAAA/SillyClient",
-    );
-    const raw = await response.json() as { versions?: string[] };
-    const latestVersion = String(raw?.versions?.[0] || "").replace(/^v/i, "").trim();
-    if (!latestVersion) throw new Error("jsDelivr returned no versions");
-    return {
-      currentVersion,
-      latestVersion,
-      updateAvailable: compareFrontendVersions(currentVersion, latestVersion) < 0,
-      releaseUrl: "https://github.com/CAPTCHAAAAA/SillyClient/releases/latest",
-    };
-  } catch (error) {
-    lastError = error;
-  }
-
-  throw new Error(lastError instanceof Error ? lastError.message : String(lastError));
-}
-
-function normalizeInstanceId(value: string, fallback: string) {
-  const normalized = value
-    .trim()
-    .replace(/[^\p{L}\p{N}._-]+/gu, "-")
-    .replace(/^[._-]+|[._-]+$/g, "")
-    .slice(0, 80);
-  return normalized || fallback;
-}
-
 function formatNativeDate(value?: string) {
   if (!value) return "—";
   const timestamp = Date.parse(value);
@@ -252,7 +189,8 @@ function SillyClientLauncher() {
   const isWeb = !Capacitor.isNativePlatform();
   const showcaseParams = new URLSearchParams(window.location.search);
   const isShowcase = showcaseParams.get("showcase") === "1";
-  const isDemoPreview = import.meta.env.DEV && !isShowcase;
+  const isNativePreview = import.meta.env.DEV && showcaseParams.get("nativePreview") === "1";
+  const isDemoPreview = import.meta.env.DEV && isWeb && !isShowcase;
   const showcaseSafeTop = isShowcase
     ? Math.max(0, Number(showcaseParams.get("safeTop")) || 52)
     : 0;
@@ -263,35 +201,19 @@ function SillyClientLauncher() {
     );
   const isAndroid = Capacitor.getPlatform() === "android";
   const isIOS = Capacitor.getPlatform() === "ios";
-  const terminalTitle = isWindows
-    ? "Windows 控制台"
-    : isIOS
-    ? "iOS 控制台"
-    : "Android 终端";
-  const terminalPrompt = isWindows
-    ? "C:\\>"
-    : isIOS
-    ? "ios >"
-    : "~ $";
+  const terminalTitle = isWindows ? "Windows 控制台" : (isIOS ? "iOS 控制台" : "Android 终端");
+  const terminalPrompt = isWindows ? "C:\\>" : (isIOS ? "ios >" : "~ $");
   const terminalBanner = isWindows
-    ? "SillyClient 1.9.2 · Windows · cmd.exe"
-    : isIOS
-    ? "SillyClient 1.9.2 · iOS · NodeMobile"
-    : "SillyClient 1.9.2 · Android shell";
-  const terminalPlaceholder = isWindows
-    ? "输入 Windows 命令"
-    : isIOS
-    ? "iOS 进程内环境（可查看服务运行日志）"
-    : "输入 Android shell 命令";
-  const isAutoTourActive = typeof window !== "undefined" && (
-    (window as any).__E2E_AUTO_TOUR__ === true ||
-    (window as any).__SILKY_AUTO_TOUR__ === true ||
-    (window as any).__SILLEY_AUTO_TOUR__ === true ||
-    new URLSearchParams(window.location.search).get("autotour") === "1"
-  );
+    ? `SillyClient ${APP_VERSION} · Windows · cmd.exe`
+    : (isIOS ? "SillyClient 1.9.2 · iOS · NodeMobile" : `SillyClient ${APP_VERSION} · Android shell`);
+  const terminalPlaceholder = isWindows ? "输入 Windows 命令" : (isIOS ? "iOS 进程内环境（可查看服务运行日志）" : "输入 Android shell 命令");
   const [showOnboarding, setShowOnboarding] = useState(
-    () => !isAutoTourActive && (!isWeb || isWindows) && !isShowcase && localStorage.getItem(ONBOARDING_KEY) !== ONBOARDING_VERSION,
+    () => (!isWeb || isWindows) && !isShowcase && localStorage.getItem(ONBOARDING_KEY) !== ONBOARDING_VERSION,
   );
+  const [showWhatsNew, setShowWhatsNew] = useState(
+    () => (!isWeb || isWindows) && !isShowcase && localStorage.getItem(ONBOARDING_KEY) === ONBOARDING_VERSION && localStorage.getItem(WHATS_NEW_KEY) !== WHATS_NEW_VERSION,
+  );
+  const [isWhatsNewClosing, setIsWhatsNewClosing] = useState(false);
   const [instances, setInstances] = useState<TavernInstance[]>(() => {
     if (isShowcase) return [];
     const loaded = loadInstances();
@@ -310,16 +232,20 @@ function SillyClientLauncher() {
   const [isTerminalClosing, setIsTerminalClosing] = useState(false);
   const [terminalSize, setTerminalSize] = useState({ w: 640, h: 340 });
   const [terminalFontSize, setTerminalFontSize] = useState(12);
-  const [terminalLogs, setTerminalLogs] = useState<{ msg: string; level?: string }[]>([
-    { msg: "就绪，选择实例启动", level: "info" },
-  ]);
+  const operations = useMemo(() => new OperationCoordinator(), []);
+  const [launchLogKey, setLaunchLogKey] = useState<string | null>(null);
+  const lastMigration = useRef<Parameters<typeof TarvenEnv.migrateInstance>[0] | null>(null);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchProgress, setLaunchProgress] = useState<{ pct: number; text: string } | null>(null);
   const [showLaunchPanel, setShowLaunchPanel] = useState(false);
   const [isLaunchPanelClosing, setIsLaunchPanelClosing] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
-  const [launchLogs, setLaunchLogs] = useState<{ msg: string; level?: string }[]>([]);
-  const [lastLaunchParams, setLastLaunchParams] = useState<any>(null);
+  const setLaunchLogs = useCallback((value: LogLine[] | ((previous: LogLine[]) => LogLine[])) => {
+    const key = operations.current?.logKey || GLOBAL_LOG_KEY;
+    instanceLogs.update(key, value);
+    setLaunchLogKey(current => current === key ? current : key);
+  }, [operations]);
+  const [lastLaunchParams, setLastLaunchParams] = useState<TavernInstance | null>(null);
   const [operationPurpose, setOperationPurpose] = useState<OperationPurpose>("launch");
 
   // Logo 字体切换
@@ -340,6 +266,8 @@ function SillyClientLauncher() {
   const [activeCardMenu, setActiveCardMenu] = useState<string | null>(null);
   const [isCardMenuClosing, setIsCardMenuClosing] = useState(false);
   const [showManagePanel, setShowManagePanel] = useState<TavernInstance | null>(null);
+  const [maintenanceInstance, setMaintenanceInstance] = useState<TavernInstance | null>(null);
+  const closeMaintenance = useCallback(() => setMaintenanceInstance(null), []);
   const [isManagePanelClosing, setIsManagePanelClosing] = useState(false);
   const [manageTab, setManageTab] = useState<ManageTab>("launch");
   const [manageSearchQuery, setManageSearchQuery] = useState("");
@@ -352,15 +280,24 @@ function SillyClientLauncher() {
   const [activeSlide, setActiveSlide] = useState(0);
   const [showNewInstancePanel, setShowNewInstancePanel] = useState(false);
   const [isNewInstancePanelClosing, setIsNewInstancePanelClosing] = useState(false);
-  const [newInstanceMode, setNewInstanceMode] = useState<"local" | "remote">("local");
+  const [newInstanceMode, setNewInstanceMode] = useState<"local" | "remote" | "import">("local");
   const [newInstanceName, setNewInstanceName] = useState("");
   const [newInstanceDir, setNewInstanceDir] = useState("");
+  const [newInstancePathMode, setNewInstancePathMode] = useState<InstallPathMode>("exact");
+  const directoryPickerGeneration = useRef(0);
   const [newInstanceUrl, setNewInstanceUrl] = useState("http://");
   const [newRemoteAuthEnabled, setNewRemoteAuthEnabled] = useState(false);
   const [newRemoteAuthUsername, setNewRemoteAuthUsername] = useState("");
   const [newRemoteAuthPassword, setNewRemoteAuthPassword] = useState("");
+  // Windows 数据迁移状态
+  const [migrationAccessMode, setMigrationAccessMode] = useState<"copy" | "takeover">("copy");
+  const [migrationSourcePath, setMigrationSourcePath] = useState("");
+  const [migrationIncludeSecrets, setMigrationIncludeSecrets] = useState(false);
+  const [migrationCustomDest, setMigrationCustomDest] = useState("");
+  const [migrationTargetPathMode, setMigrationTargetPathMode] = useState<InstallPathMode>("exact");
   const [newInstanceVersion, setNewInstanceVersion] = useState("stable");
   const [newInstanceCompanionPresetEnabled, setNewInstanceCompanionPresetEnabled] = useState(false);
+  const [newInstanceExtensionIds, setNewInstanceExtensionIds] = useState<PreinstalledExtensionId[]>([]);
   const [newInstanceLocalZip, setNewInstanceLocalZip] = useState<string | null>(null);
   const [newInstanceError, setNewInstanceError] = useState<string | null>(null);
   const [isCreatingInstance, setIsCreatingInstance] = useState(false);
@@ -372,17 +309,41 @@ function SillyClientLauncher() {
   // 终端输入
   const [terminalInput, setTerminalInput] = useState("");
   const [terminalInstanceId, setTerminalInstanceId] = useState<string | null>(null);
+  const terminalLogTarget = useRef(GLOBAL_LOG_KEY);
+  terminalLogTarget.current = instances.find(instance => instance.id === terminalInstanceId)?.installDir
+    || terminalInstanceId || GLOBAL_LOG_KEY;
+  const setTerminalLogs = useCallback((value: LogLine[] | ((previous: LogLine[]) => LogLine[])) => {
+    instanceLogs.update(terminalLogTarget.current, value);
+  }, []);
   const [instanceSnapshots, setInstanceSnapshots] = useState<Record<string, InstanceSnapshot[]>>({});
   // 关于页真实数据
   const [aboutInfo, setAboutInfo] = useState<{ version: string; path: string; sizeBytes: number; createdAt: string; status: string } | null>(null);
   // 安全 insets(挖孔避让)
   const [safeInsetTop, setSafeInsetTop] = useState(showcaseSafeTop);
   // APP 设置:下拉刷新
-  const [pullToRefresh, setPullToRefresh] = useState(false);
+  const [pullToRefresh, setPullToRefreshState] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("sc_pull_to_refresh") === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  const setPullToRefresh = useCallback((enabled: boolean) => {
+    setPullToRefreshState(enabled);
+    try {
+      localStorage.setItem("sc_pull_to_refresh", enabled ? "true" : "false");
+    } catch {}
+    TarvenEnv.setPullToRefresh({ enabled }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    TarvenEnv.setPullToRefresh({ enabled: pullToRefresh }).catch(() => {});
+  }, [pullToRefresh]);
   const [contentOpenMode, setContentOpenMode] = useState<ContentOpenMode>("webview");
   const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(() => import.meta.env.DEV
     ? {
-        currentVersion: frontendPackage.version,
+        currentVersion: APP_VERSION,
         latestVersion: "1.8.3",
         updateAvailable: true,
         releaseUrl: "https://github.com/CAPTCHAAAAA/SillyClient/releases/latest",
@@ -396,8 +357,8 @@ function SillyClientLauncher() {
   const [verDropdownOpen, setVerDropdownOpen] = useState(false);
   const [isVerDropdownClosing, setIsVerDropdownClosing] = useState(false);
   const [verDropdownPos, setVerDropdownPos] = useState({ bottom: 0, left: 0, width: 0, maxHeight: 360 });
-  const carouselRef = useRef<HTMLDivElement>(null);
   const versionDropdownRef = useRef<HTMLDivElement>(null);
+  const carouselRef = useRef<InstanceCarouselRef>(null);
   const terminalBtnRef = useRef<HTMLButtonElement>(null);
   const settingsBtnRef = useRef<HTMLButtonElement>(null);
   const cardMenuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -445,7 +406,8 @@ function SillyClientLauncher() {
   // 清理垃圾
   const [showCleanPanel, setShowCleanPanel] = useState(false);
   const [isCleanPanelClosing, setIsCleanPanelClosing] = useState(false);
-  const [garbageItems, setGarbageItems] = useState<any[]>([]);
+  const [garbageItems, setGarbageItems] = useState<GarbageItem[]>([]);
+  const [garbageError, setGarbageError] = useState<string | null>(null);
   const [cleaningGarbage, setCleaningGarbage] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<TavernInstance | null>(null);
   const [isDeletingInstance, setIsDeletingInstance] = useState(false);
@@ -474,7 +436,7 @@ function SillyClientLauncher() {
     ? `${terminalInstance.subtitle || terminalInstance.name} · 实例终端`
     : terminalTitle;
   const terminalDisplayPrompt = terminalInstance
-    ? (isWindows ? `${terminalInstance.installDir || terminalInstance.id}>` : isIOS ? "ios >" : "~ $")
+    ? (isWindows ? `${terminalInstance.installDir || terminalInstance.id}>` : "~ $")
     : terminalPrompt;
   const terminalDisplayBanner = terminalInstance
     ? `${terminalInstance.subtitle || terminalInstance.name} · ${terminalInstance.type === "local" ? "本地实例" : "远程实例"}`
@@ -502,7 +464,7 @@ function SillyClientLauncher() {
   const checkForAppUpdate = useCallback(async () => {
     setAppUpdateState("checking");
     try {
-      const result = await fetchAppUpdateFromFrontend();
+      const result = await fetchAppUpdate(APP_VERSION, isWindows ? "windows" : Capacitor.getPlatform() === "ios" ? "ios" : isWeb ? "web" : "android");
       setAppUpdateInfo(result);
       setAppUpdateState(result.updateAvailable ? "available" : "current");
       if (result.updateAvailable) setUpdatePromptDismissed(false);
@@ -512,7 +474,7 @@ function SillyClientLauncher() {
       setAppUpdateState("error");
       return null;
     }
-  }, []);
+  }, [isWindows, isWeb]);
 
   useEffect(() => {
     if (isShowcase || import.meta.env.DEV) return;
@@ -542,6 +504,32 @@ function SillyClientLauncher() {
     }
   }, []);
 
+  // 支持通过 URL 参数直接唤起向导指定面板 (例如 ?wizard=import 方便本地走查)
+  useEffect(() => {
+    try {
+      if (typeof window !== "undefined" && window.location.search) {
+        const params = new URLSearchParams(window.location.search);
+        const wizardParam = params.get("wizard") || params.get("mode") || params.get("tab");
+        if (wizardParam === "import" || wizardParam === "migration") {
+          setNewInstanceMode("import");
+          setShowNewInstancePanel(true);
+        } else if (wizardParam === "1" || wizardParam === "local") {
+          setNewInstanceMode("local");
+          setShowNewInstancePanel(true);
+        } else if (wizardParam === "remote") {
+          setNewInstanceMode("remote");
+          setShowNewInstancePanel(true);
+        }
+        if (import.meta.env.DEV && params.get("nativePreview") === "1" && params.get("maintenance") === "1") {
+          const local = instances.find(instance => instance.type === "local");
+          if (local) setMaintenanceInstance(local);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   useEffect(() => {
     if (isShowcase) return;
     try {
@@ -558,168 +546,63 @@ function SillyClientLauncher() {
       ? "bg-[#1c1420]/70 border-white/10 shadow-[0_16px_60px_rgba(0,0,0,0.30)]"
       : "bg-[#1a1625]/70 border-white/10 shadow-[0_16px_60px_rgba(0,0,0,0.35)]";
 
-  // 轮播滚动到指定卡片（居中）
-  const scrollToSlide = useCallback((index: number) => {
-    const el = carouselRef.current;
-    if (!el) return;
-    const cards = el.querySelectorAll('[data-card-index]');
-    const target = cards[index] as HTMLElement | undefined;
-    if (!target) return;
-    const cardWidth = 240;
-    const containerWidth = el.clientWidth;
-    const scrollLeft = target.offsetLeft - (containerWidth - cardWidth) / 2;
-    el.scrollTo({ left: scrollLeft, behavior: 'smooth' });
-    setActiveSlide(index);
-  }, []);
 
-  // 轮播拖拽 + 滚动指示器联动
-  const dragState = useRef<{ isDown: boolean; startX: number; scrollLeft: number }>({ isDown: false, startX: 0, scrollLeft: 0 });
-
-  useEffect(() => {
-    const el = carouselRef.current;
-    if (!el) return;
-
-    const onDown = (e: MouseEvent | TouchEvent) => {
-      const x = 'touches' in e ? e.touches[0].pageX : e.pageX;
-      dragState.current = { isDown: true, startX: x - el.offsetLeft, scrollLeft: el.scrollLeft };
-      el.style.cursor = 'grabbing';
-      el.style.scrollSnapType = 'none';
-    };
-    const onMove = (e: MouseEvent | TouchEvent) => {
-      if (!dragState.current.isDown) return;
-      // 仅鼠标桌面端手动跟随(1:1);触屏交给原生滚动以保证跟手流畅
-      if ('touches' in e) return;
-      e.preventDefault();
-      const x = e.pageX;
-      const walk = (x - el.offsetLeft - dragState.current.startX);
-      el.scrollLeft = dragState.current.scrollLeft - walk;
-    };
-    const onUp = () => {
-      dragState.current.isDown = false;
-      el.style.cursor = 'grab';
-      el.style.scrollSnapType = 'x mandatory';
-    };
-    const onLeave = () => {
-      if (dragState.current.isDown) onUp();
-    };
-
-    // 滚动时更新指示器
-    const updateIndicator = () => {
-      const containerWidth = el.clientWidth;
-      const containerCenter = el.scrollLeft + containerWidth / 2;
-      const cards = el.querySelectorAll('[data-card-index]');
-      let closestIdx = 0;
-      let closestDist = Infinity;
-      cards.forEach((card) => {
-        const center = (card as HTMLElement).offsetLeft + 120;
-        const dist = Math.abs(center - containerCenter);
-        if (dist < closestDist) {
-          closestDist = dist;
-          closestIdx = parseInt((card as HTMLElement).dataset.cardIndex || '0');
-        }
-      });
-      setActiveSlide(closestIdx);
-    };
-
-    let scrollTimer: ReturnType<typeof setTimeout>;
-    const onScroll = () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(updateIndicator, 80); };
-
-    el.style.cursor = 'grab';
-    el.addEventListener('mousedown', onDown);
-    el.addEventListener('mousemove', onMove);
-    el.addEventListener('mouseup', onUp);
-    el.addEventListener('mouseleave', onLeave);
-    el.addEventListener('touchstart', onDown, { passive: true });
-    el.addEventListener('touchmove', onMove, { passive: true });
-    el.addEventListener('touchend', onUp, { passive: true });
-    el.addEventListener('scroll', onScroll);
-
-    return () => {
-      clearTimeout(scrollTimer);
-      el.removeEventListener('mousedown', onDown);
-      el.removeEventListener('mousemove', onMove);
-      el.removeEventListener('mouseup', onUp);
-      el.removeEventListener('mouseleave', onLeave);
-      el.removeEventListener('touchstart', onDown);
-      el.removeEventListener('touchmove', onMove);
-      el.removeEventListener('touchend', onUp);
-      el.removeEventListener('scroll', onScroll);
-    };
-  }, []);
 
   // 自检:启动时扫描本地已存在的酒馆实例,自动添加卡片
-  useEffect(() => {
+  const syncExistingInstances = useCallback(async () => {
     if (isShowcase) return;
-    (async () => {
-      try {
-        const { instances: scannedInstances } = await TarvenEnv.scanInstances();
-        setInstances(prev => {
-          if (!isWindows) {
-            const existingIds = new Set(prev.map(instance => instance.installDir || instance.id));
-            const scanned = scannedInstances
-              .filter(instance => !existingIds.has(instance.instanceId))
-              .map<TavernInstance>(instance => ({
-                id: `scan-${instance.instanceId}`,
-                name: "SillyTavern",
-                subtitle: instance.instanceId,
-                version: instance.version === "unknown" ? "—" : `v${instance.version}`,
-                status: instance.hasServer ? "stopped" : "error",
-                type: "local",
-                lastUsed: "—",
-                createdAt: "—",
-                totalUsage: instance.sizeBytes > 0 ? `${(instance.sizeBytes / 1024 / 1024).toFixed(0)}MB` : "—",
-                icon: <Folder className="w-5 h-5" />,
-                color: "#9ca3af",
-                port: 8000,
-                installDir: instance.instanceId,
-                config: { ...DEFAULT_CONFIG },
-              }));
-            return [...scanned, ...prev];
-          }
-
-          const scannedById = new Map(scannedInstances.map(instance => [instance.instanceId, instance]));
-          const retained = prev.filter(instance => instance.type !== "local" || scannedById.has(instance.installDir || instance.id));
-          const updated = retained.map(instance => {
-            if (instance.type !== "local") return instance;
-            const scannedInstance = scannedById.get(instance.installDir || instance.id);
-            if (!scannedInstance) return instance;
-            return {
-              ...instance,
-              version: scannedInstance.version === "unknown" ? instance.version : `v${scannedInstance.version}`,
-              installPath: scannedInstance.path || instance.installPath,
-              createdAt: scannedInstance.createdAt ? formatNativeDate(scannedInstance.createdAt) : instance.createdAt,
-              lastUsed: scannedInstance.lastUsedAt ? formatNativeDate(scannedInstance.lastUsedAt) : instance.lastUsed,
-              totalUsage: scannedInstance.totalUsageMs !== undefined
-                ? formatUsageDuration(scannedInstance.totalUsageMs)
-                : instance.totalUsage,
-            };
-          });
-          // 合并:已存在的不重复添加
-          const existingIds = new Set(updated.map(t => t.installDir || t.id));
-          const scanned = scannedInstances
-            .filter(s => !existingIds.has(s.instanceId))
-            .map<TavernInstance>(s => ({
-              id: `scan-${s.instanceId}`,
-              name: "SillyTavern",
-              subtitle: s.instanceId,
-              version: s.version === "unknown" ? "—" : `v${s.version}`,
-              status: s.hasServer ? "stopped" : "error",
-              type: "local",
-              lastUsed: formatNativeDate(s.lastUsedAt),
-              createdAt: formatNativeDate(s.createdAt),
-              totalUsage: formatUsageDuration(s.totalUsageMs),
-              icon: <Folder className="w-5 h-5" />,
-              color: "#9ca3af",
-              port: 8000,
-              installDir: s.instanceId,
-              installPath: s.path,
-              config: { ...DEFAULT_CONFIG },
-            }));
-          return [...scanned, ...updated];
+    try {
+      const { instances: scannedInstances } = await TarvenEnv.scanInstances();
+      setInstances(prev => {
+        const scannedById = new Map(scannedInstances.map(instance => [instance.instanceId, instance]));
+        const updated = prev.map(instance => {
+          if (instance.type !== "local") return instance;
+          const scannedInstance = scannedById.get(instance.installDir || instance.id);
+          if (!scannedInstance) return instance;
+          return {
+            ...instance,
+            version: scannedInstance.version === "unknown" ? instance.version : normalizeStoredVersion(scannedInstance.version),
+            installPath: scannedInstance.path || instance.installPath,
+            installPathMode: scannedInstance.path ? "exact" as const : instance.installPathMode,
+            status: scannedInstance.hasServer ? instance.status : "error" as const,
+            createdAt: scannedInstance.createdAt ? formatNativeDate(scannedInstance.createdAt) : instance.createdAt,
+            lastUsed: scannedInstance.lastUsedAt ? formatNativeDate(scannedInstance.lastUsedAt) : instance.lastUsed,
+            totalUsage: scannedInstance.totalUsageMs !== undefined
+              ? formatUsageDuration(scannedInstance.totalUsageMs)
+              : instance.totalUsage,
+          };
         });
-      } catch { /* 非 Capacitor 环境 */ }
-    })();
-  }, [isShowcase, isWindows]);
+        // 合并:已存在的不重复添加
+        const existingIds = new Set(updated.map(t => t.installDir || t.id));
+        const scanned = scannedInstances
+          .filter(s => !existingIds.has(s.instanceId))
+          .map<TavernInstance>(s => ({
+            id: `scan-${s.instanceId}`,
+            name: "SillyTavern",
+            subtitle: s.instanceId,
+            version: normalizeStoredVersion(s.version),
+            status: s.hasServer ? "stopped" : "error",
+            type: "local",
+            lastUsed: formatNativeDate(s.lastUsedAt),
+            createdAt: formatNativeDate(s.createdAt),
+            totalUsage: s.totalUsageMs !== undefined ? formatUsageDuration(s.totalUsageMs)
+              : s.sizeBytes > 0 ? `${(s.sizeBytes / 1024 / 1024).toFixed(0)}MB` : "—",
+            icon: <Folder className="w-5 h-5" />,
+            color: "#9ca3af",
+            port: 8000,
+            installDir: s.instanceId,
+            installPath: s.path,
+            installPathMode: s.path ? "exact" : undefined,
+            config: { ...DEFAULT_CONFIG },
+          }));
+        return [...scanned, ...updated];
+      });
+    } catch { /* 非 Capacitor 环境 */ }
+  }, [isShowcase]);
+
+  useEffect(() => {
+    syncExistingInstances();
+  }, [syncExistingInstances]);
 
   // 原生进程被系统结束后，持久化的 running 状态可能已经失效。
   useEffect(() => {
@@ -727,12 +610,11 @@ function SillyClientLauncher() {
     (async () => {
       try {
         const status = await TarvenEnv.getStatus();
-        const activePort = status.url ? Number(new URL(status.url).port || 80) : null;
         setInstances(prev => prev.map(instance => {
           if (instance.type !== "local" || instance.status === "error") return instance;
           const isActive = status.serverReady
-            && activePort !== null
-            && (instance.port ?? 8000) === activePort;
+            && !!status.instanceId
+            && (instance.installDir || instance.id) === status.instanceId;
           return { ...instance, status: isActive ? "running" : "stopped" };
         }));
       } catch {
@@ -785,6 +667,7 @@ function SillyClientLauncher() {
             ? {
                 ...instance,
                 installPath: info.path || instance.installPath,
+                installPathMode: info.path ? "exact" : instance.installPathMode,
                 createdAt: info.createdAt ? formatNativeDate(info.createdAt) : instance.createdAt,
                 lastUsed: info.lastUsedAt ? formatNativeDate(info.lastUsedAt) : instance.lastUsed,
                 totalUsage: info.totalUsageMs !== undefined
@@ -824,13 +707,125 @@ function SillyClientLauncher() {
     themeSmoothingTimer.current = window.setTimeout(() => setThemeSmoothing(false), 1200);
   }, []);
 
-  const switchInstanceMode = useCallback((mode: "local" | "remote") => {
+  const switchInstanceMode = useCallback((mode: "local" | "remote" | "import") => {
     if (newInstanceMode === mode) return;
-    setThemeSmoothing(true);
     setNewInstanceMode(mode);
-    if (themeSmoothingTimer.current !== null) window.clearTimeout(themeSmoothingTimer.current);
-    themeSmoothingTimer.current = window.setTimeout(() => setThemeSmoothing(false), 800);
   }, [newInstanceMode]);
+
+  useEffect(() => {
+    directoryPickerGeneration.current += 1;
+    return () => { directoryPickerGeneration.current += 1; };
+  }, [showNewInstancePanel, newInstanceMode, migrationAccessMode]);
+
+  const handleSetNewInstanceDir = useCallback((value: string) => {
+    const clean = value.replace(/^["']|["']$/g, "").trim();
+    setNewInstanceDir(clean);
+    setNewInstancePathMode("exact");
+    setNewInstanceError(null);
+    directoryPickerGeneration.current += 1;
+  }, []);
+
+  const handlePickInstallFolder = useCallback(async () => {
+    const generation = ++directoryPickerGeneration.current;
+    try {
+      const selection = installationSelection(await TarvenEnv.pickDirectory({ purpose: "installation" }));
+      if (generation !== directoryPickerGeneration.current) return;
+      setNewInstanceDir(selection.path);
+      setNewInstancePathMode(selection.mode);
+      setNewInstanceError(null);
+    } catch (error) {
+      if (generation !== directoryPickerGeneration.current) return;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/cancel/i.test(message)) setNewInstanceError(message);
+    }
+  }, []);
+
+  const handlePickTargetFolder = useCallback(async () => {
+    const generation = ++directoryPickerGeneration.current;
+    try {
+      if (typeof (window as any).migrationDebug?.choose === "function") {
+        const selected = await (window as any).migrationDebug.choose("target");
+        if (selected && generation === directoryPickerGeneration.current) {
+          const clean = String(selected).trim().replace(/^["']|["']$/g, "").trim();
+          setMigrationCustomDest(clean);
+          setMigrationTargetPathMode("exact");
+          setNewInstanceError(null);
+          return;
+        }
+      }
+      const selection = installationSelection(await TarvenEnv.pickDirectory({ purpose: "installation" }));
+      if (generation !== directoryPickerGeneration.current) return;
+      setMigrationCustomDest(selection.path);
+      setMigrationTargetPathMode(selection.mode);
+      setNewInstanceError(null);
+    } catch (error) {
+      if (generation !== directoryPickerGeneration.current) return;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/cancel/i.test(message)) setNewInstanceError(message);
+    }
+  }, []);
+
+  const handlePickSourceFolder = useCallback(async () => {
+    const generation = ++directoryPickerGeneration.current;
+    try {
+      if (typeof (window as any).migrationDebug?.choose === "function") {
+        const selected = await (window as any).migrationDebug.choose("source");
+        if (selected && generation === directoryPickerGeneration.current) {
+          const clean = String(selected).trim().replace(/^["']|["']$/g, "").trim();
+          setMigrationSourcePath(clean);
+          setNewInstanceError(null);
+          return;
+        }
+      }
+      const { path } = await TarvenEnv.pickDirectory({ purpose: "source" });
+      if (generation !== directoryPickerGeneration.current) return;
+      if (path) {
+        const clean = String(path).trim().replace(/^["']|["']$/g, "").trim();
+        setMigrationSourcePath(clean);
+        setNewInstanceError(null);
+      }
+    } catch {
+      /* 用户取消 */
+    }
+  }, []);
+
+  const handlePickSourceZip = useCallback(async () => {
+    try {
+      if (typeof (window as any).migrationDebug?.choose === "function") {
+        const selected = await (window as any).migrationDebug.choose("zip");
+        if (selected) {
+          const clean = String(selected).trim().replace(/^["']|["']$/g, "").trim();
+          setMigrationSourcePath(clean);
+          setNewInstanceError(null);
+          return;
+        }
+      }
+      if (typeof (TarvenEnv as any).pickZipFile === "function") {
+        const { path } = await (TarvenEnv as any).pickZipFile();
+        if (path) {
+          const clean = String(path).trim().replace(/^["']|["']$/g, "").trim();
+          setMigrationSourcePath(clean);
+          setNewInstanceError(null);
+          return;
+        }
+      }
+    } catch {
+      /* 用户取消 */
+    }
+  }, []);
+
+  const handleSetMigrationSourcePath = useCallback((val: string) => {
+    setMigrationSourcePath(val);
+    setNewInstanceError(null);
+    directoryPickerGeneration.current += 1;
+  }, []);
+
+  const handleSetMigrationCustomDest = useCallback((val: string) => {
+    setMigrationCustomDest(val);
+    setMigrationTargetPathMode("exact");
+    setNewInstanceError(null);
+    directoryPickerGeneration.current += 1;
+  }, []);
 
   // 向导容器自适应平滑高度测量
   useEffect(() => {
@@ -906,19 +901,22 @@ function SillyClientLauncher() {
     return () => clearInterval(interval);
   }, [checkRemoteStatus]);
 
-  // 下拉刷新:触发远程状态检测
+  // 下拉刷新:触发远程状态检测与本地实例同步
   const handlePullRefresh = useCallback(async () => {
     setIsRefreshing(true);
     setPullDistance(60);
     try {
-      await checkRemoteStatus();
+      await Promise.allSettled([
+        checkRemoteStatus(),
+        syncExistingInstances(),
+      ]);
     } catch { /* ignore */ }
     setTimeout(() => { setIsRefreshing(false); setPullDistance(0); }, 600);
-  }, [checkRemoteStatus]);
+  }, [checkRemoteStatus, syncExistingInstances]);
 
-  // touch 事件处理:仅当滚动到顶部且无弹窗时触发下拉,整个内容跟随拖拽(iOS 原生风格)
+  // touch 事件处理:仅当滚动到顶部且开启下拉刷新且无弹窗时触发下拉,整个内容跟随拖拽(iOS 原生风格)
   const onTouchStart = useCallback((e: React.TouchEvent) => {
-    if (isRefreshing) return;
+    if (!pullToRefresh || isRefreshing) return;
     // 有弹窗/面板打开时不触发下拉刷新
     if (renamingId || showNewInstancePanel || showManagePanel || activeCardMenu) return;
     // 输入框/文本域/内容可编辑元素不触发下拉刷新
@@ -929,10 +927,10 @@ function SillyClientLauncher() {
     touchStartY.current = e.touches[0].clientY;
     touchStartX.current = e.touches[0].clientX;
     isPulling.current = true;
-  }, [isRefreshing, renamingId, showNewInstancePanel, showManagePanel, activeCardMenu]);
+  }, [pullToRefresh, isRefreshing, renamingId, showNewInstancePanel, showManagePanel, activeCardMenu]);
 
   const onTouchMove = useCallback((e: React.TouchEvent) => {
-    if (!isPulling.current || isRefreshing) return;
+    if (!pullToRefresh || !isPulling.current || isRefreshing) return;
     const deltaY = e.touches[0].clientY - touchStartY.current;
     const deltaX = Math.abs(e.touches[0].clientX - touchStartX.current);
     // 垂直手势检测:水平偏移不能超过垂直的 0.6 倍
@@ -943,53 +941,81 @@ function SillyClientLauncher() {
       const damped = Math.pow(deltaY, 0.7) * 1.2;
       setPullDistance(Math.min(damped, 120));
     }
-  }, [isRefreshing]);
+  }, [pullToRefresh, isRefreshing]);
 
   const onTouchEnd = useCallback(() => {
+    if (!pullToRefresh) {
+      isPulling.current = false;
+      setPullDistance(0);
+      return;
+    }
+    if (!isPulling.current) return;
     isPulling.current = false;
     if (pullDistance > 55) {
       handlePullRefresh();
     } else {
       setPullDistance(0);
     }
-  }, [pullDistance, handlePullRefresh]);
+  }, [pullToRefresh, pullDistance, handlePullRefresh]);
 
   // 监听原生插件事件:日志 / 就绪 / 模式变化
   useEffect(() => {
     if (isShowcase) return;
-    let logHandle: any, readyHandle: any, modeHandle: any, progressHandle: any;
+    let disposed = false;
+    const handles: { remove: () => Promise<void> }[] = [];
+    const register = async (event: "log" | "progress" | "ready" | "mode", listener: (d: TarvenEvent) => void) => {
+      const handle = await TarvenEnv.addListener(event, d => {
+        if (!disposed) listener(d);
+      });
+      if (disposed) await handle.remove();
+      else handles.push(handle);
+    };
+    const append = (d: TarvenEvent, line: LogLine, progress = false) => {
+      if (!operations.acceptsGlobal(d)) return;
+      const current = operations.current;
+      const key = d.instanceId || current?.instanceId || GLOBAL_LOG_KEY;
+      instanceLogs.append(key, line, progress);
+      if (current?.busy && current.accepts(d)) {
+        instanceLogs.append(current.logKey, line, progress);
+      }
+    };
     (async () => {
       try {
-        logHandle = await TarvenEnv.addListener("log", (d: { message: string; level?: string }) => {
-          setTerminalLogs(prev => [...prev, { msg: d.message, level: d.level }]);
-        });
-        progressHandle = await TarvenEnv.addListener("progress", (d: { percent: number; stage?: string }) => {
-          const msg = d.stage ? `${d.stage} ${d.percent}%` : `${d.percent}%`;
-          setTerminalLogs(prev => {
-            // 合并连续进度行,避免刷屏
-            const last = prev[prev.length - 1];
-            if (last && last.level === "info" && /\d+%$/.test(last.msg)) {
-              return [...prev.slice(0, -1), { msg, level: "info" }];
+        await register("log", d => {
+          const message = d.message || d.line || d.text;
+          if (d.source === "command") {
+            if (d.instanceId && message) {
+              instanceLogs.append(d.instanceId, { msg: message, level: d.level || "info" });
             }
-            return [...prev, { msg, level: "info" }];
-          });
+            return;
+          }
+          if (message) append(d, { msg: message, level: d.level || "info" });
         });
-        readyHandle = await TarvenEnv.addListener("ready", (d: { url?: string; port?: number }) => {
-          setTerminalLogs(prev => [...prev, { msg: `✓ 就绪${d.url ? " " + d.url : ""}`, level: "success" }]);
+        await register("progress", d => {
+          if (d.source === "command") return;
+          const percent = d.percent ?? 0;
+          const msg = d.stage ? `${d.stage} ${percent}%` : `${percent}%`;
+          append(d, { msg, level: "info" }, true);
         });
-        modeHandle = await TarvenEnv.addListener("mode", (d: { mode: string; tavernRunning?: boolean; instanceId?: string; lastUsedAt?: string; totalUsageMs?: number }) => {
+        await register("ready", d => {
+          if (d.source === "command") return;
+          if (d.ready !== false) append(d, { msg: `✓ 就绪${d.url ? " " + d.url : ""}`, level: "success" });
+        });
+        await register("mode", d => {
+          if (d.source === "command") return;
+          if (!d.instanceId || !operations.acceptsGlobal(d)) return;
           if (d.mode === "launcher" && d.tavernRunning === true && d.instanceId) {
-            setInstances(prev => prev.map(instance => instance.id === d.instanceId
-              ? { ...instance, pendingTavernGestureHint: undefined }
+            setInstances(prev => prev.map(instance => (instance.type === "local" && (instance.installDir || instance.id) === d.instanceId)
+              ? { ...instance, status: "running", pendingTavernGestureHint: undefined }
               : instance));
           }
           // 只有 tavernRunning=false（实例真正关闭）时才置 stopped
           // tavernRunning=true（手势退出）时实例还在跑，不改变状态
-          if (d.mode === "launcher" && !d.tavernRunning) {
+          if (d.mode === "launcher" && d.tavernRunning === false) {
             setInstances(prev => prev.map(t => {
               if (t.type !== "local") return t;
-              const isStoppedInstance = !d.instanceId || (t.installDir || t.id) === d.instanceId;
-              if (!isStoppedInstance && t.status !== "running") return t;
+              const isStoppedInstance = (t.installDir || t.id) === d.instanceId;
+              if (!isStoppedInstance) return t;
               return {
                 ...t,
                 status: t.status === "running" ? "stopped" : t.status,
@@ -1004,15 +1030,16 @@ function SillyClientLauncher() {
       } catch { /* 非 Capacitor 原生环境,忽略 */ }
     })();
     return () => {
-      logHandle?.remove?.();
-      progressHandle?.remove?.();
-      readyHandle?.remove?.();
-      modeHandle?.remove?.();
+      disposed = true;
+      for (const handle of handles) void handle.remove();
     };
-  }, [isShowcase]);
+  }, [isShowcase, operations]);
+
+  useEffect(() => () => { operations.cancel(); }, [operations]);
 
   // 配置并启动本地实例。创建流程只在确认服务可访问后写入卡片。
-  const doLaunch = useCallback(async (instance: TavernInstance, enterWhenReady = true) => {
+  const doLaunch = useCallback(async (instance: TavernInstance, operation: OperationContext, enterWhenReady = true) => {
+    operation.assertCurrent();
     const port = instance.port ?? 8000;
     const instanceId = instance.installDir || instance.id;
     const version = instance.version || "stable";
@@ -1021,6 +1048,7 @@ function SillyClientLauncher() {
     const localZipPath = instance.localZipPath;
     const installPath = instance.installPath;
     const companionPreset = instance.companionPreset;
+    const preinstall = instance.preinstall;
 
     setLaunchProgress({ pct: 0, text: "初始化" });
     setLaunchError(null);
@@ -1029,89 +1057,70 @@ function SillyClientLauncher() {
 
     if (isWeb) {
       for (let p = 25; p <= 75; p += 25) {
-        await new Promise(r => setTimeout(r, 200));
+        await operation.delay(200);
         setLaunchProgress({ pct: p, text: `准备启动服务 (${p}%)` });
         setLaunchLogs(prev => [...prev, { msg: `服务就绪进度 ${p}%`, level: "info" }]);
       }
-      await new Promise(r => setTimeout(r, 200));
+      await operation.delay(200);
       setLaunchProgress({ pct: 100, text: "实例已就绪" });
       setLaunchLogs(prev => [...prev, { msg: "服务已就绪 (浏览器演示)", level: "success" }]);
       return { url: "http://127.0.0.1:8000/", port: 8000 };
     }
 
     // 注册事件监听
-    let readyHandle: any;
-    let progressHandle: any;
-    let logHandle: any;
-    let errorHandle: any;
     let readyReceived = false;
     let errorMsg: string | null = null;
     let resolvedPort = port;
     let resolvedUrl = `http://127.0.0.1:${port}/`;
-    let statusInterval: ReturnType<typeof setInterval> | null = null;
-    let readyCheck: ReturnType<typeof setInterval> | null = null;
-    let readyTimeout: ReturnType<typeof setTimeout> | null = null;
-
-    try {
-      progressHandle = await TarvenEnv.addListener("progress", (d: { percent: number; stage?: string }) => {
-        setLaunchProgress({ pct: d.percent ?? 0, text: formatOperationStage(d.stage, d.percent) });
-        const msg = d.stage ? `${d.stage} ${d.percent}%` : `${d.percent}%`;
-        setLaunchLogs(prev => {
-          const last = prev[prev.length - 1];
-          if (last && last.level === "info" && /\d+%$/.test(last.msg)) {
-            return [...prev.slice(0, -1), { msg, level: "info" }];
-          }
-          return [...prev, { msg, level: "info" }];
+      await operation.listen(TarvenEnv.addListener("progress", d => {
+        if (d.source === "command" || !operation.accepts(d)) return;
+        const pct = d.percent ?? 0;
+        const text = formatOperationStage(d.stage, pct);
+        setLaunchProgress(previous => {
+          if (previous?.pct === pct && previous.text === text) return previous;
+          return { pct, text };
         });
-      });
+      }));
 
-      logHandle = await TarvenEnv.addListener("log", (d: { message?: string; line?: string; text?: string; level?: string }) => {
-        const line = d.message || d.line || d.text || "";
-        if (!line) return;
-        setLaunchLogs(prev => [...prev.slice(-80), { msg: line, level: d.level || "info" }]);
-      });
-
-      errorHandle = await TarvenEnv.addListener("error", (d: { message?: string }) => {
+      await operation.listen(TarvenEnv.addListener("error", d => {
+        if (d.source === "command" || !operation.accepts(d)) return;
         errorMsg = d.message || "未知错误";
-      });
+      }));
 
-      readyHandle = await TarvenEnv.addListener("ready", (d: { ready?: boolean; url?: string; port?: number }) => {
-        if (readyReceived) return;
+      await operation.listen(TarvenEnv.addListener("ready", d => {
+        if (d.source === "command" || !operation.accepts(d) || readyReceived) return;
         if (d.ready !== false) {
           readyReceived = true;
           if (d.port) resolvedPort = d.port;
           if (d.url) resolvedUrl = d.url.endsWith("/") ? d.url : `${d.url}/`;
         }
-      });
+      }));
 
       // 调用原生 provision
-      const provisionResult = await TarvenEnv.provisionAndStart({ port, instanceId, version, zipballUrl, localZipPath, installPath, companionPreset, config });
-      if (provisionResult?.ready === false && !readyReceived) {
+      const provisionResult = await operation.wait(TarvenEnv.provisionAndStart({
+        port, instanceId, operationId: operation.id, version, zipballUrl, localZipPath,
+        installPath, installPathMode: instance.installPathMode, companionPreset, preinstall, config,
+      }));
+      if (provisionResult?.ready === false) {
         throw new Error(errorMsg || "实例未能启动，请检查安装日志");
       }
+      if (provisionResult?.ready === true) readyReceived = true;
 
-      // 等待 ready 或 error，同时轮询
-      statusInterval = setInterval(async () => {
+      const deadline = Date.now() + 600000;
+      while (!readyReceived && !errorMsg && Date.now() < deadline) {
+        await operation.delay(500);
+        if (readyReceived || errorMsg) break;
         try {
-          const s = await TarvenEnv.getStatus();
-          if (s.serverReady && !readyReceived) {
+          const status = await operation.wait(TarvenEnv.getStatus());
+          if (status.serverReady && operation.accepts(status)) {
             readyReceived = true;
-            if (s.url) resolvedUrl = s.url.endsWith("/") ? s.url : `${s.url}/`;
+            if (status.url) resolvedUrl = status.url.endsWith("/") ? status.url : `${status.url}/`;
           }
-        } catch {}
-      }, 2000);
-
-      // 超时兜底 600s
-      await new Promise<void>((resolve) => {
-        readyTimeout = setTimeout(() => resolve(), 600000);
-        readyCheck = setInterval(() => {
-          if (readyReceived || errorMsg) {
-            if (readyTimeout) clearTimeout(readyTimeout);
-            if (readyCheck) clearInterval(readyCheck);
-            resolve();
-          }
-        }, 500);
-      });
+        } catch (error) {
+          if (error instanceof OperationCancelledError) throw error;
+        }
+      }
+      operation.assertCurrent();
 
       if (errorMsg) {
         throw new Error(errorMsg);
@@ -1127,29 +1136,20 @@ function SillyClientLauncher() {
         level: "success",
       }]);
       if (enterWhenReady) {
-        await TarvenEnv.enterImmersive({
+        await operation.wait(TarvenEnv.enterImmersive({
           url: resolvedUrl,
-          instanceId: instance.id,
+          instanceId,
           showGestureHint: instance.pendingTavernGestureHint === true,
-        });
+        }));
       }
       return { url: resolvedUrl, port: resolvedPort };
-    } finally {
-      if (statusInterval) clearInterval(statusInterval);
-      if (readyCheck) clearInterval(readyCheck);
-      if (readyTimeout) clearTimeout(readyTimeout);
-      readyHandle?.remove?.();
-      progressHandle?.remove?.();
-      logHandle?.remove?.();
-      errorHandle?.remove?.();
-    }
-  }, []);
+  }, [isWeb, setLaunchLogs]);
 
-  const openRemoteInstance = useCallback(async (instance: TavernInstance) => {
+  const openRemoteInstance = useCallback(async (instance: TavernInstance, operation: OperationContext) => {
     const url = instance.url || "http://127.0.0.1:8000";
     setLaunchLogs([{ msg: `检查 ${url}`, level: "info" }]);
     setLaunchProgress({ pct: 25, text: "正在验证远程连接" });
-    const result = await TarvenEnv.pingUrl({ url, instanceId: instance.id });
+    const result = await operation.wait(TarvenEnv.pingUrl({ url, instanceId: instance.id }));
     if (!result.online) {
       throw new Error(result.error || "远程实例当前不可访问");
     }
@@ -1162,17 +1162,20 @@ function SillyClientLauncher() {
       setLaunchLogs(prev => [...prev, { msg: "系统浏览器可能会再次请求账号和密码", level: "info" }]);
     }
     setLaunchProgress({ pct: 75, text: "正在打开远程实例" });
-    await TarvenEnv.enterImmersive({
+    await operation.wait(TarvenEnv.enterImmersive({
       url,
       instanceId: instance.id,
       showGestureHint: instance.pendingTavernGestureHint === true,
-    });
+    }));
     setLaunchProgress({ pct: 100, text: "远程实例已打开" });
-  }, [contentOpenMode]);
+  }, [contentOpenMode, setLaunchLogs]);
 
   // 启动实例入口
   const launchTavern = useCallback(async (instance: TavernInstance) => {
-    if (launchingId) return;
+    if (operations.busy) return;
+    const operation = operations.begin(instance.installDir || instance.id, "launch");
+    lastMigration.current = null;
+    setLaunchLogKey(operation.logKey);
     setLaunchingId(instance.id);
     if (instance.type === "local") {
       setInstances(prev => prev.map(t => t.id === instance.id ? { ...t, status: "running" } : t));
@@ -1182,35 +1185,37 @@ function SillyClientLauncher() {
     setLastLaunchParams(instance);
     try {
       if (instance.type === "local") {
-        const result = await doLaunch(instance);
-        const info = await TarvenEnv.getInstanceInfo({
+        const result = await doLaunch(instance, operation);
+        const info = await operation.wait(TarvenEnv.getInstanceInfo({
           instanceId: instance.installDir || instance.id,
-          installPath: instance.installPath,
+          installPath: instance.installPathMode === "root" ? undefined : instance.installPath,
           port: result.port,
-        });
+        }));
         setInstances(prev => prev.map(t => t.id === instance.id ? {
           ...t,
           status: "running",
           port: result.port,
+          version: info.version && info.version !== "unknown" ? normalizeStoredVersion(info.version) : t.version,
           installPath: info.path || t.installPath,
+          installPathMode: info.path ? "exact" : t.installPathMode,
           createdAt: info.createdAt ? formatNativeDate(info.createdAt) : t.createdAt,
           lastUsed: info.lastUsedAt ? formatNativeDate(info.lastUsedAt) : t.lastUsed,
           totalUsage: info.totalUsageMs !== undefined ? formatUsageDuration(info.totalUsageMs) : t.totalUsage,
         } : t));
-        setTimeout(() => {
+        operation.schedule(() => {
           setIsLaunchPanelClosing(true);
-          setTimeout(() => {
+          operation.schedule(() => {
             setShowLaunchPanel(false);
             setIsLaunchPanelClosing(false);
             setLaunchProgress(null);
           }, PANEL_EXIT_MS);
         }, 800);
       } else {
-        await openRemoteInstance(instance);
+        await openRemoteInstance(instance, operation);
         setInstances(prev => prev.map(t => t.id === instance.id ? { ...t, status: "online" } : t));
-        setTimeout(() => {
+        operation.schedule(() => {
           setIsLaunchPanelClosing(true);
-          setTimeout(() => {
+          operation.schedule(() => {
             setShowLaunchPanel(false);
             setIsLaunchPanelClosing(false);
             setLaunchProgress(null);
@@ -1218,25 +1223,63 @@ function SillyClientLauncher() {
         }, 500);
       }
     } catch (err: any) {
+      if (!operation.isCurrent || err instanceof OperationCancelledError) return;
       const msg = err?.message || String(err);
       setLaunchError(msg);
       setLaunchProgress(null);
       setLaunchLogs(prev => [...prev, { msg: `失败: ${msg}`, level: "error" }]);
       setInstances(prev => prev.map(t => t.id === instance.id ? { ...t, status: "error" } : t));
-      try { await TarvenEnv.exitImmersive(); } catch {}
+      try { await operation.wait(TarvenEnv.exitImmersive()); } catch {}
     } finally {
-      setLaunchingId(null);
+      if (operation.isCurrent) {
+        operation.finish();
+        setLaunchingId(null);
+      }
     }
-  }, [launchingId, doLaunch, openRemoteInstance]);
+  }, [operations, doLaunch, openRemoteInstance, setLaunchLogs]);
 
-  const provisionCreatedInstance = useCallback(async (instance: TavernInstance) => {
+  // 返回酒馆会话（无缝唤醒后台保活的酒馆 WebView）
+  const handleReturnToTavern = useCallback(async (instance: TavernInstance) => {
+    const expected = operations.current;
+    try {
+      if (expected) await expected.wait(TarvenEnv.returnToTavern());
+      else await TarvenEnv.returnToTavern();
+    } catch (error) {
+      if (error instanceof OperationCancelledError || operations.current !== expected) return;
+      // 容错或浏览器环境 fallback
+      await launchTavern(instance);
+    }
+  }, [launchTavern, operations]);
+
+  // 直接停止/关闭实例（就地停止进程并解除运行态）
+  const handleStopInstance = useCallback(async (instance: TavernInstance) => {
+    const instanceId = instance.installDir || instance.id;
+    const cancelled = operations.cancel(instanceId);
+    const remainingOperation = operations.current;
+    if (cancelled) {
+      setLaunchingId(null);
+      setIsCreatingInstance(false);
+      setLaunchProgress(null);
+    }
+    try {
+      await TarvenEnv.closeTavern({ instanceId, operationId: cancelled?.id });
+    } catch (error) {
+      instanceLogs.append(instanceId, { msg: `停止失败: ${error instanceof Error ? error.message : String(error)}`, level: "error" });
+      return;
+    }
+    if (operations.current !== remainingOperation) return;
+    setInstances(prev => prev.map(t => t.id === instance.id ? { ...t, status: "stopped" } : t));
+    setIsLaunchMinimized(false);
+  }, [operations]);
+
+  const provisionCreatedInstance = useCallback(async (instance: TavernInstance, operation: OperationContext) => {
     if (isWeb) {
       for (let p = 20; p <= 80; p += 20) {
-        await new Promise(r => setTimeout(r, 200));
+        await operation.delay(200);
         setLaunchProgress({ pct: p, text: `正在安装组件... (${p}%)` });
         setLaunchLogs(prev => [...prev, { msg: `安装进度 ${p}%`, level: "info" }]);
       }
-      await new Promise(r => setTimeout(r, 250));
+      await operation.delay(250);
       setLaunchProgress({ pct: 100, text: "创建完成，可以运行" });
       setLaunchLogs(prev => [...prev, { msg: "服务可访问，实例创建完成", level: "success" }]);
       setInstances(prev => prev.some(t => t.id === instance.id) ? prev : [...prev, { ...instance, status: "running" }]);
@@ -1247,7 +1290,7 @@ function SillyClientLauncher() {
       const url = instance.url || "";
       setLaunchProgress({ pct: 20, text: "正在检查远程连接" });
       setLaunchLogs([{ msg: `检查 ${url}`, level: "info" }]);
-      const result = await TarvenEnv.pingUrl({ url, instanceId: instance.id });
+      const result = await operation.wait(TarvenEnv.pingUrl({ url, instanceId: instance.id }));
       if (!result.online) throw new Error(result.error || "远程实例当前不可访问");
       setLaunchProgress({ pct: 100, text: "连接可用，创建完成" });
       setLaunchLogs(prev => [...prev, {
@@ -1258,27 +1301,96 @@ function SillyClientLauncher() {
       return;
     }
 
-    const result = await doLaunch(instance, false);
-    const info = await TarvenEnv.getInstanceInfo({
+    const result = await doLaunch(instance, operation, false);
+    const info = await operation.wait(TarvenEnv.getInstanceInfo({
       instanceId: instance.installDir || instance.id,
-      installPath: instance.installPath,
+      installPath: instance.installPathMode === "root" ? undefined : instance.installPath,
       port: result.port,
-    });
+    }));
+    if (!info.path) throw new Error("原生未确认实例的实际安装目录，创建未完成");
+    setLastLaunchParams({ ...instance, installPath: info.path, installPathMode: "exact", port: result.port });
     setInstances(prev => prev.some(t => t.id === instance.id)
       ? prev
       : [...prev, {
           ...instance,
           status: "running",
           port: result.port,
+          version: info.version && info.version !== "unknown" ? normalizeStoredVersion(info.version) : instance.version,
           installPath: info.path || instance.installPath,
+          installPathMode: "exact",
           createdAt: info.createdAt ? formatNativeDate(info.createdAt) : instance.createdAt,
           lastUsed: info.lastUsedAt ? formatNativeDate(info.lastUsedAt) : instance.lastUsed,
           totalUsage: info.totalUsageMs !== undefined ? formatUsageDuration(info.totalUsageMs) : instance.totalUsage,
         }]);
-  }, [doLaunch]);
+  }, [doLaunch, isWeb, setLaunchLogs]);
+
+  const migrateCreatedInstance = useCallback(async (
+    instance: TavernInstance,
+    options: Parameters<typeof TarvenEnv.migrateInstance>[0],
+    operation: OperationContext,
+  ) => {
+    operation.assertCurrent();
+    setLaunchProgress({ pct: 20, text: "正在预检旧酒馆目录结构与数据完整性..." });
+    setLaunchLogs([{ msg: `【数据迁移】开始${options.mode === "takeover" ? "原地接管" : "复制迁移"}: ${options.sourcePath}`, level: "info" }]);
+    const result = await operation.wait(TarvenEnv.migrateInstance({ ...options, operationId: operation.id }));
+    if (result?.success !== true) throw new Error("数据迁移未成功，请检查来源文件是否完整");
+    const finalInstance = {
+      ...instance,
+      installPath: result.targetPath || options.targetPath || (options.mode === "takeover" ? options.sourcePath : instance.installPath),
+      installPathMode: "exact" as const,
+    };
+    setLastLaunchParams(finalInstance);
+    setLaunchProgress({ pct: 100, text: "数据迁移完成，实例已注册" });
+    setLaunchLogs(prev => [...prev, {
+      msg: options.mode === "takeover" ? "【成功】已原地接管目录，可随时启动运行。" : "【成功】旧酒馆数据复制迁移完成，可随时启动运行。",
+      level: "success",
+    }]);
+    setInstances(prev => prev.some(item => item.id === finalInstance.id) ? prev : [finalInstance, ...prev]);
+  }, [setLaunchLogs]);
 
   const createInstance = useCallback(async () => {
-    if (isCreatingInstance || launchingId) return;
+    if (operations.busy) return;
+    const now = Date.now();
+    const rawGivenName = newInstanceName.trim();
+    let instanceDisplayName: string;
+    let safeCandidateId: string;
+
+    if (rawGivenName) {
+      // 严格检查重名：不允许创建同名实例
+      const isDuplicate = instances.some(i =>
+        (i.subtitle || i.name).trim().toLowerCase() === rawGivenName.toLowerCase() ||
+        i.id.toLowerCase() === rawGivenName.toLowerCase()
+      );
+      if (isDuplicate) {
+        setNewInstanceError(`已存在名为「${rawGivenName}」的实例，请使用其他名称`);
+        return;
+      }
+      instanceDisplayName = rawGivenName;
+      safeCandidateId = rawGivenName.replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^[._-]+|[._-]+$/g, "") || "instance";
+    } else {
+      // 未输入名称时自动编号：新实例、新实例 (2)、新实例 (3)...
+      const baseName = "新实例";
+      let chosenName = baseName;
+      let counter = 2;
+      const existingNames = new Set(
+        instances.map(i => (i.subtitle || i.name).trim().toLowerCase())
+      );
+      while (existingNames.has(chosenName.toLowerCase())) {
+        chosenName = `${baseName} (${counter++})`;
+      }
+      instanceDisplayName = chosenName;
+      safeCandidateId = chosenName.replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^[._-]+|[._-]+$/g, "") || "instance";
+    }
+
+    let candidateId = safeCandidateId;
+    let counter = 2;
+    const existingIds = new Set(instances.map(i => (i.installDir || i.id).toLowerCase()));
+    while (existingIds.has(candidateId.toLowerCase())) {
+      candidateId = `${safeCandidateId}-${counter++}`;
+    }
+    const instanceId = candidateId;
+    const operation = operations.begin(instanceId, "create");
+    lastMigration.current = null;
     setNewInstanceError(null);
     setIsCreatingInstance(true);
     let operationStarted = false;
@@ -1286,14 +1398,14 @@ function SillyClientLauncher() {
     let pendingInstanceId: string | null = null;
 
     try {
-      const now = Date.now();
-      const instanceId = `new-${now}`;
+      const installDir = instanceId;
       pendingInstanceId = instanceId;
-      const subtitle = newInstanceName.trim() || "新实例";
-      const installDir = isWindows
-        ? `local-${now}`
-        : normalizeInstanceId(newInstanceDir, `local-${now}`);
-      const installPath = isWindows && newInstanceDir.trim() ? newInstanceDir.trim() : undefined;
+      const customParentDir = cleanInstallPath(newInstanceDir);
+      let resolvedCustomPath: string | undefined = undefined;
+      if (customParentDir) {
+        // 统一在指定父目录下生成以实例名命名的子文件夹
+        resolvedCustomPath = buildInstanceSubfolder(customParentDir, instanceDisplayName);
+      }
       let selectedVersion = newInstanceVersion;
       let selectedZipballUrl: string | undefined;
 
@@ -1301,10 +1413,11 @@ function SillyClientLauncher() {
         let availableReleases = releases;
         if (availableReleases.length === 0) {
           try {
-            const response = await TarvenEnv.fetchReleases();
+            const response = await operation.wait(TarvenEnv.fetchReleases());
             availableReleases = response.releases || [];
             setReleases(availableReleases);
-          } catch {
+          } catch (error) {
+            if (error instanceof OperationCancelledError) throw error;
             availableReleases = [{ tag: "1.12.0", prerelease: false, zipballUrl: "" }];
             setReleases(availableReleases);
           }
@@ -1333,52 +1446,101 @@ function SillyClientLauncher() {
           if (!newRemoteAuthUsername.trim()) throw new Error("请输入 Basic Auth 用户名");
           if (!newRemoteAuthPassword) throw new Error("请输入 Basic Auth 密码");
         }
-        const preflight = await TarvenEnv.pingUrl({
+        const preflight = await operation.wait(TarvenEnv.pingUrl({
           url: remoteUrl,
           ...(newRemoteAuthEnabled
             ? { username: newRemoteAuthUsername.trim(), password: newRemoteAuthPassword }
             : {}),
-        });
+        }));
         if (!preflight.online) throw new Error(preflight.error || "远程实例当前不可访问");
       }
+
+      const cleanSourcePath = migrationSourcePath.trim().replace(/^["']|["']$/g, "").trim();
+      let cleanCustomDest: string | undefined = undefined;
+      if (newInstanceMode === "import") {
+        if (!cleanSourcePath) {
+          throw new Error("请选择或输入旧酒馆文件夹或 ZIP 备份包路径");
+        }
+        if (migrationAccessMode === "takeover") {
+          cleanCustomDest = cleanSourcePath;
+        } else {
+          const rawDest = cleanInstallPath(migrationCustomDest);
+          if (rawDest) {
+            cleanCustomDest = buildInstanceSubfolder(rawDest, instanceDisplayName);
+          }
+        }
+      }
+
+      const effectiveInstallPath = newInstanceMode === "import"
+        ? cleanCustomDest
+        : (resolvedCustomPath || undefined);
+
+      // 物理防覆盖预检：非原地接管模式下，目标目录不能与已有本地实例冲突
+      if (effectiveInstallPath && (newInstanceMode !== "import" || migrationAccessMode !== "takeover")) {
+        const normTarget = effectiveInstallPath.toLowerCase().replace(/[\\/]+$/, "");
+        const conflictingInstance = instances.find(inst => {
+          if (inst.type !== "local" || !inst.installPath) return false;
+          return inst.installPath.toLowerCase().replace(/[\\/]+$/, "") === normTarget;
+        });
+        if (conflictingInstance) {
+          throw new Error(`目标路径「${effectiveInstallPath}」已被实例「${conflictingInstance.subtitle || conflictingInstance.name}」使用，无法重复创建`);
+        }
+      }
+
+      const allowPreinstall = newInstanceMode === "local"
+        || (newInstanceMode === "import" && migrationAccessMode === "copy");
 
       const instance: TavernInstance = {
         id: instanceId,
         name: "SillyTavern",
-        subtitle,
-        version: newInstanceLocalZip ? "local" : selectedVersion,
-        type: newInstanceMode,
-        status: newInstanceMode === "local" ? "stopped" : "offline",
-        icon: newInstanceMode === "local" ? <Folder className="w-5 h-5" /> : <Cloud className="w-5 h-5" />,
-        color: "#6366f1",
+        subtitle: newInstanceMode === "import"
+          ? (migrationAccessMode === "takeover" ? (rawGivenName || "原地接管酒馆") : (rawGivenName || "已迁移酒馆"))
+          : instanceDisplayName,
+        version: newInstanceMode === "import"
+          ? "local"
+          : (newInstanceLocalZip ? "local" : normalizeStoredVersion(selectedVersion)),
+        type: newInstanceMode === "remote" ? "remote" : "local",
+        status: newInstanceMode === "remote" ? "offline" : "stopped",
+        icon: newInstanceMode === "remote" ? <Cloud className="w-5 h-5" /> : <Folder className="w-5 h-5" />,
+        color: newInstanceMode === "import" ? "#e11d48" : "#6366f1",
         createdAt: new Date().toISOString().slice(0, 10),
         lastUsed: "—",
         totalUsage: "0s",
-        pendingTavernGestureHint: (isAndroid || isIOS) || undefined,
-        ...(newInstanceMode === "local"
+        pendingTavernGestureHint: isAndroid || undefined,
+        ...(newInstanceMode === "remote"
           ? {
-              port,
-              installDir,
-              installPath,
-              zipballUrl: selectedZipballUrl,
-              localZipPath: newInstanceLocalZip || undefined,
-              companionPreset: newInstanceCompanionPresetEnabled ? SC_BORDEAUX_PRESET : undefined,
-              config: { ...DEFAULT_CONFIG },
-            }
-          : {
               url: remoteUrl,
               basicAuth: newRemoteAuthEnabled
                 ? { username: newRemoteAuthUsername.trim() }
                 : undefined,
+            }
+          : {
+              port,
+              installDir,
+              installPath: effectiveInstallPath,
+              installPathMode: "exact" as const,
+              zipballUrl: selectedZipballUrl,
+              localZipPath: newInstanceLocalZip || undefined,
+              companionPreset: allowPreinstall && newInstanceCompanionPresetEnabled ? SC_BORDEAUX_PRESET : undefined,
+              preinstall: allowPreinstall && newInstanceExtensionIds.length > 0
+                ? { revision: 1, extensionIds: [...newInstanceExtensionIds] }
+                : undefined,
+              config: { ...DEFAULT_CONFIG },
             }),
       };
 
       if (newInstanceMode === "remote" && newRemoteAuthEnabled) {
-        await TarvenEnv.setRemoteBasicAuth({
+        const credentialWrite = TarvenEnv.setRemoteBasicAuth({
           instanceId,
           username: newRemoteAuthUsername.trim(),
           password: newRemoteAuthPassword,
+        }).then(result => {
+          if (!operation.isCurrent) {
+            void TarvenEnv.clearRemoteBasicAuth({ instanceId }).catch(() => {});
+          }
+          return result;
         });
+        await operation.wait(credentialWrite);
         remoteCredentialsSaved = true;
       }
 
@@ -1387,27 +1549,58 @@ function SillyClientLauncher() {
       setVerDropdownOpen(false);
       setOperationPurpose("create");
       setLastLaunchParams(instance);
+      setLaunchLogKey(operation.logKey);
       setShowLaunchPanel(true);
       setLaunchError(null);
-      setLaunchProgress({ pct: 0, text: newInstanceMode === "local" ? "准备下载当前版本" : "准备检查连接" });
+      setLaunchProgress({
+        pct: 0,
+        text: newInstanceMode === "import"
+          ? (migrationAccessMode === "takeover" ? "准备原地接管旧酒馆..." : "准备执行数据迁移...")
+          : newInstanceMode === "local"
+          ? "准备下载当前版本"
+          : "准备检查连接"
+      });
       setLaunchingId(instance.id);
       operationStarted = true;
 
-      await provisionCreatedInstance(instance);
+      if (newInstanceMode === "import") {
+        lastMigration.current = {
+          sourcePath: cleanSourcePath,
+          targetPath: migrationAccessMode === "copy" ? (effectiveInstallPath || undefined) : undefined,
+          instanceId: instance.installDir || instance.id,
+          mode: migrationAccessMode,
+          includeSecrets: migrationIncludeSecrets,
+          preinstall: instance.preinstall,
+        };
+        await migrateCreatedInstance(instance, lastMigration.current, operation);
+        setNewInstanceName("");
+        setMigrationSourcePath("");
+        setMigrationCustomDest("");
+        setMigrationTargetPathMode("exact");
+        setNewInstanceExtensionIds([]);
+        setNewInstanceCompanionPresetEnabled(false);
+        return;
+      }
+
+      await provisionCreatedInstance(instance, operation);
       setNewInstanceName("");
       setNewInstanceDir("");
+      setNewInstancePathMode("exact");
       setNewInstanceUrl("http://");
       setNewRemoteAuthEnabled(false);
       setNewRemoteAuthUsername("");
       setNewRemoteAuthPassword("");
       setNewInstanceVersion("stable");
       setNewInstanceCompanionPresetEnabled(false);
+      setNewInstanceExtensionIds([]);
       setNewInstanceLocalZip(null);
     } catch (err: any) {
+      if (!operation.isCurrent || err instanceof OperationCancelledError) return;
       const message = err?.message || String(err);
       if (!operationStarted) {
         if (remoteCredentialsSaved && pendingInstanceId) {
-          try { await TarvenEnv.clearRemoteBasicAuth({ instanceId: pendingInstanceId }); } catch {}
+          try { await operation.wait(TarvenEnv.clearRemoteBasicAuth({ instanceId: pendingInstanceId })); } catch {}
+          if (!operation.isCurrent) return;
         }
         setNewInstanceError(message);
       } else {
@@ -1416,17 +1609,21 @@ function SillyClientLauncher() {
         setLaunchLogs(prev => [...prev, { msg: `创建失败: ${message}`, level: "error" }]);
       }
     } finally {
-      setLaunchingId(null);
-      setIsCreatingInstance(false);
+      if (operation.isCurrent) {
+        operation.finish();
+        setLaunchingId(null);
+        setIsCreatingInstance(false);
+      }
     }
   }, [
     instances,
     isAndroid,
-    isIOS,
-    isCreatingInstance,
-    launchingId,
+    isWeb,
+    operations,
     newInstanceDir,
+    newInstancePathMode,
     newInstanceCompanionPresetEnabled,
+    newInstanceExtensionIds,
     newInstanceLocalZip,
     newInstanceMode,
     newInstanceName,
@@ -1435,13 +1632,22 @@ function SillyClientLauncher() {
     newRemoteAuthEnabled,
     newRemoteAuthPassword,
     newRemoteAuthUsername,
+    migrationAccessMode,
+    migrationSourcePath,
+    migrationCustomDest,
+    migrationTargetPathMode,
+    migrationIncludeSecrets,
     provisionCreatedInstance,
+    migrateCreatedInstance,
+    setLaunchLogs,
     releases,
   ]);
 
   // 重试当前操作
   const retryLaunch = useCallback(async () => {
-    if (!lastLaunchParams) return;
+    if (!lastLaunchParams || operations.busy) return;
+    const operation = operations.begin(lastLaunchParams.installDir || lastLaunchParams.id, operationPurpose);
+    setLaunchLogKey(operation.logKey);
     setLaunchError(null);
     setLaunchProgress({ pct: 0, text: operationPurpose === "create" ? "重新创建" : "重新启动" });
     if (operationPurpose === "launch" && lastLaunchParams.type === "local") {
@@ -1450,18 +1656,22 @@ function SillyClientLauncher() {
     setLaunchingId(lastLaunchParams.id);
     try {
       if (operationPurpose === "create") {
-        await provisionCreatedInstance(lastLaunchParams);
-        setTimeout(() => { setShowLaunchPanel(false); setLaunchProgress(null); }, 1100);
+        if (lastMigration.current) {
+          await migrateCreatedInstance(lastLaunchParams, lastMigration.current, operation);
+        } else {
+          await provisionCreatedInstance(lastLaunchParams, operation);
+        }
       } else if (lastLaunchParams.type === "remote") {
-        await openRemoteInstance(lastLaunchParams);
+        await openRemoteInstance(lastLaunchParams, operation);
         setInstances(prev => prev.map(t => t.id === lastLaunchParams.id ? { ...t, status: "online" } : t));
-        setTimeout(() => { setShowLaunchPanel(false); setLaunchProgress(null); }, 500);
+        operation.schedule(() => { setShowLaunchPanel(false); setLaunchProgress(null); }, 500);
       } else {
-        const result = await doLaunch(lastLaunchParams);
+        const result = await doLaunch(lastLaunchParams, operation);
         setInstances(prev => prev.map(t => t.id === lastLaunchParams.id ? { ...t, status: "running", port: result.port } : t));
-        setTimeout(() => { setShowLaunchPanel(false); setLaunchProgress(null); }, 800);
+        operation.schedule(() => { setShowLaunchPanel(false); setLaunchProgress(null); }, 800);
       }
     } catch (err: any) {
+      if (!operation.isCurrent || err instanceof OperationCancelledError) return;
       const msg = err?.message || String(err);
       setLaunchError(msg);
       setLaunchProgress(null);
@@ -1470,192 +1680,12 @@ function SillyClientLauncher() {
         setInstances(prev => prev.map(t => t.id === lastLaunchParams.id ? { ...t, status: "error" } : t));
       }
     } finally {
-      setLaunchingId(null);
-    }
-  }, [lastLaunchParams, operationPurpose, doLaunch, openRemoteInstance, provisionCreatedInstance]);
-
-  // 自动化测试演练调度器 (iOS CI E2E Auto Tour)
-  const [autoTourStage, setAutoTourStage] = useState<string | null>(null);
-  useEffect(() => {
-    const testInstance: TavernInstance = {
-      id: "ios-autotour-instance",
-      name: "SillyTavern 自动化演练",
-      subtitle: "端到端真机验证 · 状态栏与沉浸流",
-      version: "1.12.0",
-      status: "stopped",
-      type: "local",
-      createdAt: "2026-09-22",
-      lastUsed: "刚刚",
-      totalUsage: "2 小时",
-      color: "#38bdf8",
-      port: 8000,
-      icon: <Folder className="w-5 h-5" />,
-    };
-
-    const resetAllModals = () => {
-      setShowManagePanel(null);
-      setIsManagePanelClosing(false);
-      setShowLaunchPanel(false);
-      setIsLaunchPanelClosing(false);
-      setIsLaunchMinimized(false);
-      setShowAppMenu(false);
-      setIsAppMenuClosing(false);
-      setShowBgPanel(false);
-      setIsPanelClosing(false);
-      setShowNewInstancePanel(false);
-      setIsNewInstancePanelClosing(false);
-      setShowCleanPanel(false);
-      setIsCleanPanelClosing(false);
-      setPendingDelete(null);
-      setShowTerminal(false);
-      setIsTerminalClosing(false);
-      setActiveCardMenu(null);
-      setIsCardMenuClosing(false);
-      setExternallyRenamingId(null);
-      setRenamingId(null);
-      setVerDropdownOpen(false);
-      setIsVerDropdownClosing(false);
-      setSearchQuery("");
-    };
-
-    const handleStage = async (stage: string) => {
-      console.log("[AutoTour] Stage triggered:", stage);
-      setShowOnboarding(false);
-      try { localStorage.setItem(ONBOARDING_KEY, ONBOARDING_VERSION); } catch {}
-      setInstances(prev => prev.length === 0 ? [testInstance] : prev);
-
-      if (stage === "stage1") {
-        resetAllModals();
-        setAutoTourStage("01: 控制台初始化与灵动岛避让 [状态栏正常可见]");
-      } else if (stage === "stage_search" || stage === "stage1b") {
-        resetAllModals();
-        setSearchQuery("Silly");
-        setAutoTourStage("01b: 实例全局搜索 [实时过滤与高亮]");
-      } else if (stage === "stage_card_menu") {
-        resetAllModals();
-        setActiveCardMenu(testInstance.id);
-        setMenuPos({ top: 220, left: 180 });
-        setAutoTourStage("02: 卡片操作浮动菜单 [CardActionMenu 启动/编辑/导出/清理/删除]");
-      } else if (stage === "stage_inline_rename") {
-        resetAllModals();
-        setExternallyRenamingId(testInstance.id);
-        setAutoTourStage("02b: 双击标题原地内联重命名 [Inline Title Rename]");
-      } else if (stage === "stage2") {
-        resetAllModals();
-        setShowManagePanel(testInstance);
-        setAutoTourStage("02c: 实例管理与属性配置抽屉 [Manage Drawer]");
-      } else if (stage === "stage2b") {
-        resetAllModals();
-        setShowManagePanel(testInstance);
-        setAutoTourStage("02d: 调用系统文件选择器 [UIDocumentPickerViewController]");
-        TarvenEnv.pickZipFile().then((res) => {
-          console.log("[AutoTour] pickZipFile returned:", res);
-        }).catch((err) => {
-          console.log("[AutoTour] pickZipFile error:", err);
-        });
-      } else if (stage === "stage2c") {
-        resetAllModals();
-        setShowManagePanel(testInstance);
-        setAutoTourStage("02e: 数据包解析导入成功 [SillyTavern-Backup.zip]");
-        setLaunchLogs([
-          { msg: "已选取备份文件: SillyTavern-Backup.zip (1.47 MB)", level: "success" },
-          { msg: "校验 ZIP 哈希值及 manifest.json 完整性通过", level: "info" }
-        ]);
-      } else if (stage === "stage_app_settings") {
-        resetAllModals();
-        setShowAppMenu(true);
-        setAppSettingsTab("general");
-        setAutoTourStage("03a: 应用系统设置抽屉 [AppSettingsDrawer 通用/数据/维护]");
-      } else if (stage === "stage_bg_settings") {
-        resetAllModals();
-        setShowBgPanel(true);
-        setAutoTourStage("03b: 背景与视觉主题设置抽屉 [BackgroundSettingsDrawer]");
-      } else if (stage === "stage_wizard") {
-        resetAllModals();
-        setShowNewInstancePanel(true);
-        setNewInstanceName("新酒馆实例");
-        setAutoTourStage("03c: 新建实例向导弹窗 [NewInstanceWizardModal 本地/远程]");
-      } else if (stage === "stage_ver_dropdown") {
-        resetAllModals();
-        setShowNewInstancePanel(true);
-        setNewInstanceName("新酒馆实例");
-        setVerDropdownPos({
-          bottom: 240,
-          left: 24,
-          width: Math.min(window.innerWidth - 48, 380),
-          maxHeight: 280,
-        });
-        setVerDropdownOpen(true);
-        setAutoTourStage("03d: 版本选择下拉菜单 [VersionDropdown]");
-      } else if (stage === "stage_clean_modal") {
-        resetAllModals();
-        setShowCleanPanel(true);
-        setGarbageItems([
-          { id: "cache-1", label: "沙盒运行日志缓存 (server.log)", size: "2.4 MB", checked: true },
-          { id: "cache-2", label: "历史备份未解压分卷", size: "14.8 MB", checked: true },
-          { id: "cache-3", label: "WebKit 临时离线渲染缓存", size: "8.1 MB", checked: true }
-        ]);
-        setAutoTourStage("03e: 存储与垃圾清理模态框 [CleanGarbageModal]");
-      } else if (stage === "stage_delete_dialog") {
-        resetAllModals();
-        setPendingDelete(testInstance);
-        setAutoTourStage("03f: 实例销毁与删除确认对话框 [DeleteConfirmDialog]");
-      } else if (stage === "stage3") {
-        resetAllModals();
-        setShowLaunchPanel(true);
-        setIsLaunchMinimized(false);
-        setOperationPurpose("launch");
-        setLaunchProgress({ pct: 65, text: "正在调度 Node 运行环境并启动 SillyTavern..." });
-        setLaunchLogs([
-          { msg: "TarvenEnv.provisionAndStart 调度成功", level: "info" },
-          { msg: "加载沙盒环境 Documents/SillyTavern", level: "info" },
-          { msg: "Node 运行时状态检查: 正常 (Port: 8000)", level: "success" },
-          { msg: "DeepSeek 官方 API 渠道验证: 就绪", level: "info" },
-          { msg: "准备加载主界面 WebView 视图", level: "info" },
-        ]);
-        setAutoTourStage("04a: 启动控制台模态窗 [LaunchConsoleModal live stream]");
-      } else if (stage === "stage_capsule") {
-        resetAllModals();
-        setShowLaunchPanel(true);
-        setIsLaunchMinimized(true);
-        setAutoTourStage("04b: 启动控制台最小化为后台活动胶囊 [ActivityCapsule]");
-      } else if (stage === "stage_terminal") {
-        resetAllModals();
-        setShowTerminal(true);
-        setTerminalLogs([
-          { msg: "=== SillyClient iOS 沙盒控制台 ===", level: "info" },
-          { msg: "沙盒路径: /var/mobile/Containers/Data/Application/.../Documents", level: "info" },
-          { msg: "NodeMobile: v18.20.4 (arm64-apple-ios-simulator, jitless)", level: "info" },
-          { msg: "SillyTavern 运行环境端口: 8000 (HTTP 200 OK)", level: "success" },
-          { msg: "DeepSeek API: sk-4a9edb...eef2 (deepseek-chat · 官方 Key)", level: "info" },
-          { msg: "输入 'status' 或 'gc' 获取运行态诊断", level: "info" },
-        ]);
-        setAutoTourStage("04c: iOS 沙盒与 NodeMobile 终端交互控制台 [TerminalModal]");
-      } else if (stage === "stage4") {
-        resetAllModals();
-        setAutoTourStage("05a: 酒馆全沉浸态 [状态栏平滑隐藏 prefersStatusBarHidden=true]");
-        await TarvenEnv.enterImmersive({ url: "http://127.0.0.1:8000/", showGestureHint: true });
-      } else if (stage === "stage5") {
-        resetAllModals();
-        setAutoTourStage("08: 退出沉浸返回控制台 [状态栏恢复可见]");
-        await TarvenEnv.exitImmersive();
+      if (operation.isCurrent) {
+        operation.finish();
+        setLaunchingId(null);
       }
-    };
-
-    (window as any).__onAutoTourStage = handleStage;
-
-    if (new URLSearchParams(window.location.search).get("autotour") === "1") {
-      handleStage("stage1");
-      setTimeout(() => handleStage("stage2"), 3000);
-      setTimeout(() => handleStage("stage3"), 6000);
-      setTimeout(() => handleStage("stage4"), 9000);
-      setTimeout(() => handleStage("stage5"), 13000);
     }
-
-    return () => {
-      delete (window as any).__onAutoTourStage;
-    };
-  }, []);
+  }, [lastLaunchParams, operationPurpose, doLaunch, openRemoteInstance, provisionCreatedInstance, migrateCreatedInstance, operations, setLaunchLogs]);
 
   /** 终端拖拽调整大小(同时支持鼠标与触屏)。 */
   const startResize = (clientX: number, clientY: number) => {
@@ -1767,10 +1797,10 @@ function SillyClientLauncher() {
 
   const openInstanceTerminal = useCallback((instance: TavernInstance) => {
     setTerminalInstanceId(instance.id);
-    setTerminalLogs([{
+    instanceLogs.append(instance.installDir || instance.id, {
       msg: `${instance.subtitle || instance.name} · 实例终端${instance.type === "remote" ? "（远程实例不支持本地命令）" : ""}`,
       level: "info",
-    }]);
+    });
     setTerminalInput("");
     setIsTerminalClosing(false);
     setShowTerminal(true);
@@ -1836,7 +1866,8 @@ function SillyClientLauncher() {
       let freedBytes = 0;
       if (pendingDelete.type === "local") {
         if (pendingDelete.status === "running") {
-          await TarvenEnv.closeTavern();
+          operations.cancel(pendingDelete.installDir || pendingDelete.id);
+          await TarvenEnv.closeTavern({ instanceId: pendingDelete.installDir || pendingDelete.id });
         }
         const result = await TarvenEnv.uninstallInstance({
           instanceId: pendingDelete.installDir || pendingDelete.id,
@@ -1870,7 +1901,7 @@ function SillyClientLauncher() {
     } finally {
       setIsDeletingInstance(false);
     }
-  }, [instances.length, isDeletingInstance, pendingDelete]);
+  }, [instances.length, isDeletingInstance, pendingDelete, operations, setTerminalLogs]);
 
   /** 更新当前管理面板实例的 config 字段。 */
   const updateManagedConfig = (patch: Partial<InstanceConfig>) => {
@@ -1898,22 +1929,40 @@ function SillyClientLauncher() {
 
   const dismissLaunchPanel = useCallback(async () => {
     if (isLaunchPanelClosing) return;
+    const original = operations.current;
+    const cancelled = original?.busy ? operations.cancel() : null;
+    const expected = operations.current;
+    if (cancelled) {
+      setLaunchingId(null);
+      setIsCreatingInstance(false);
+      try {
+        await TarvenEnv.closeTavern({ instanceId: cancelled.instanceId, operationId: cancelled.id });
+      } catch (error) {
+        instanceLogs.append(cancelled.instanceId, {
+          msg: `取消失败: ${error instanceof Error ? error.message : String(error)}`,
+          level: "error",
+        });
+      }
+      if (operations.current !== expected) return;
+    }
     if (
       operationPurpose === "create" &&
       lastLaunchParams?.type === "remote" &&
       !instances.some(instance => instance.id === lastLaunchParams.id)
     ) {
       try { await TarvenEnv.clearRemoteBasicAuth({ instanceId: lastLaunchParams.id }); } catch {}
+      if (operations.current !== expected) return;
       setShowNewInstancePanel(true);
     }
     setIsLaunchPanelClosing(true);
     setTimeout(() => {
+      if (operations.current !== expected) return;
       setShowLaunchPanel(false);
       setIsLaunchPanelClosing(false);
       setLaunchError(null);
       setLaunchProgress(null);
     }, PANEL_EXIT_MS);
-  }, [instances, isLaunchPanelClosing, lastLaunchParams, operationPurpose]);
+  }, [instances, isLaunchPanelClosing, lastLaunchParams, operationPurpose, operations]);
 
   const closeCleanPanel = useCallback(() => {
     if (cleaningGarbage || isCleanPanelClosing) return;
@@ -2000,14 +2049,8 @@ function SillyClientLauncher() {
   const openProjectPage = useCallback(() => {
     const url = "https://captchaaaaa.github.io/SillyClient/";
     closeAppMenu();
-    if (isWeb) {
-      window.open(url, "_blank", "noopener,noreferrer");
-      return;
-    }
-    setTimeout(() => {
-      TarvenEnv.enterImmersive({ url }).catch(() => {});
-    }, PANEL_EXIT_MS);
-  }, [closeAppMenu, isWeb]);
+    void openExternalUrl(url).catch(() => {});
+  }, [closeAppMenu]);
 
   const replayOnboarding = useCallback(() => {
     closeAppMenu();
@@ -2017,7 +2060,27 @@ function SillyClientLauncher() {
   const dismissOnboarding = useCallback(() => {
     localStorage.setItem(ONBOARDING_KEY, ONBOARDING_VERSION);
     setShowOnboarding(false);
+    if (localStorage.getItem(WHATS_NEW_KEY) !== WHATS_NEW_VERSION) {
+      setTimeout(() => setShowWhatsNew(true), 150);
+    }
   }, []);
+
+  const dismissWhatsNew = useCallback(() => {
+    localStorage.setItem(WHATS_NEW_KEY, WHATS_NEW_VERSION);
+    setIsWhatsNewClosing(true);
+    setTimeout(() => {
+      setShowWhatsNew(false);
+      setIsWhatsNewClosing(false);
+    }, PANEL_EXIT_MS);
+  }, []);
+
+  const openWhatsNew = useCallback(() => {
+    closeAppMenu();
+    setTimeout(() => {
+      setShowWhatsNew(true);
+      setIsWhatsNewClosing(false);
+    }, PANEL_EXIT_MS + 20);
+  }, [closeAppMenu]);
 
   // 管理面板打开时初始化本地配置或远程认证状态。
   useEffect(() => {
@@ -2125,7 +2188,7 @@ function SillyClientLauncher() {
       onTouchMove={onTouchMove}
       onTouchEnd={onTouchEnd}
       className={cn(
-        "min-h-screen overflow-y-auto overscroll-none transition-colors duration-900",
+        "min-h-screen overflow-y-auto scrollbar-hidden overscroll-none transition-colors duration-900",
         themeSmoothing && "theme-smoothing",
         isLight ? "bg-[#f0ece8] text-[#1a1625]" : "bg-[#1a1625] text-white"
       )}
@@ -2172,22 +2235,14 @@ function SillyClientLauncher() {
       )}
 
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
-      <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={(e) => {
+      <input ref={importInputRef} type="file" accept=".json,application/json,text/plain" className="hidden" onChange={(e) => {
         const file = e.target.files?.[0];
         if (!file) return;
         const reader = new FileReader();
         reader.onload = () => {
           try {
-            const parsed = JSON.parse(String(reader.result));
-            const incoming = (parsed.instances || []) as TavernInstance[];
-            setInstances(prev => {
-              const map = new Map(prev.map(t => [t.id, t]));
-              for (const item of incoming) {
-                const icon = item.type === "local" ? <Folder className="w-5 h-5" /> : <Cloud className="w-5 h-5" />;
-                map.set(item.id, { ...item, pendingTavernGestureHint: undefined, icon });
-              }
-              return Array.from(map.values());
-            });
+            const incoming = parseInstanceBackup(String(reader.result));
+            setInstances(prev => mergeInstanceBackup(prev, incoming));
           } catch (err) { console.error('[import]', err); }
         };
         reader.readAsText(file);
@@ -2195,7 +2250,7 @@ function SillyClientLauncher() {
       }} />
 
       {/* 顶部导航 */}
-      <header className="fixed left-0 right-0 z-40 px-4" style={{ top: `max(env(safe-area-inset-top), ${safeInsetTop + 4}px)` }}>
+      <header className="fixed left-0 right-0 z-50 px-4" style={{ top: `max(env(safe-area-inset-top), ${safeInsetTop + 4}px)` }}>
         <div className={cn("h-12 flex items-center px-3 rounded-[var(--radius-3xl)] border backdrop-blur-[40px] saturate-180 transition-colors", isLight ? "bg-white/60 border-black/5 shadow-[0_4px_16px_rgba(0,0,0,0.06)]" : "glass-panel")}>
           <div className="flex items-center gap-3 flex-shrink-0">
             <button
@@ -2251,6 +2306,7 @@ function SillyClientLauncher() {
               if (showAppMenu) {
                 closeAppMenu();
               } else {
+                setUpdatePromptDismissed(true);
                 setAppSettingsTab("general");
                 setShowAppMenu(true);
               }
@@ -2283,11 +2339,7 @@ function SillyClientLauncher() {
           <button
             onClick={() => {
               const url = appUpdateInfo.releaseUrl || "https://github.com/CAPTCHAAAAA/SillyClient/releases/latest";
-              if (isWeb) {
-                window.open(url, "_blank", "noopener,noreferrer");
-              } else {
-                TarvenEnv.enterImmersive({ url }).catch(() => {});
-              }
+              void openExternalUrl(url).catch(() => {});
               setUpdatePromptDismissed(true);
             }}
             className={cn(
@@ -2317,8 +2369,10 @@ function SillyClientLauncher() {
         className="pb-12 px-6 min-h-screen flex flex-col items-center"
         style={{
           paddingTop: `calc(max(env(safe-area-inset-top), ${safeInsetTop}px) + 68px)`,
-          transform: pullDistance > 0 ? `translateY(${pullDistance}px)` : undefined,
+          transform: pullDistance > 0 ? `translate3d(0, ${pullDistance}px, 0)` : undefined,
           transition: isPulling.current || isRefreshing ? 'none' : 'transform 0.4s cubic-bezier(0.22, 1, 0.36, 1)',
+          willChange: pullDistance > 0 ? 'transform' : 'auto',
+          contain: 'layout style',
         }}
       >
         {/* Logo */}
@@ -2351,7 +2405,7 @@ function SillyClientLauncher() {
                 const match = instances.find(t => (t.subtitle || t.name).toLowerCase().includes(searchQuery.toLowerCase()));
                 if (match) {
                   const idx = instances.indexOf(match) + 1;
-                  scrollToSlide(idx);
+                  carouselRef.current?.goToSlide(idx);
                 }
               }
             }}
@@ -2368,7 +2422,7 @@ function SillyClientLauncher() {
                   key={t.id}
                   onClick={() => {
                     const idx = instances.indexOf(t) + 1;
-                    scrollToSlide(idx);
+                    carouselRef.current?.goToSlide(idx);
                     setSearchQuery("");
                   }}
                   className={cn(
@@ -2388,129 +2442,60 @@ function SillyClientLauncher() {
           )}
         </div>
 
-        {/* 实例卡片轮播 */}
-        <div className="w-full max-w-6xl mx-auto px-6 md:px-8">
-          <div className="relative">
-            <div
-              ref={carouselRef}
-              className="carousel-scrollbar-hidden flex gap-5 overflow-x-auto snap-x snap-mandatory px-3 py-4 -mx-2"
-              style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', scrollPaddingInline: '1px' }}
-            >
-              <div className="flex-shrink-0 w-[calc(50%-120px)]" aria-hidden />
-
-              {/* 新建实例卡片 */}
-              <button
-                onClick={() => {
-                  if (isWeb && !isShowcase) { window.open('https://github.com/CAPTCHAAAAA/SillyClient/releases/latest', '_blank'); return; }
-                  setNewInstanceMode("local");
-                  setNewInstanceName("");
-                  setNewInstanceDir("");
-                  setNewInstanceUrl("http://");
-                  setNewRemoteAuthEnabled(false);
-                  setNewRemoteAuthUsername("");
-                  setNewRemoteAuthPassword("");
-                  setNewInstanceVersion("stable");
-                  setNewInstanceCompanionPresetEnabled(false);
-                  setNewInstanceLocalZip(null);
-                  setNewInstanceError(null);
-                  setShowNewInstancePanel(true);
-                }}
-                className={cn(
-                  "motion-instance-card flex-shrink-0 w-60 h-[320px] rounded-[18px] overflow-hidden snap-center group relative",
-                  isLight ? "bg-black/[0.03] border border-black/[0.08] hover:border-black/15" : "bg-white/[0.04] border border-white/[0.06] hover:border-white/15"
-                )}
-                data-card-index="0"
-              >
-                <div className="relative h-full flex flex-col justify-between p-3.5">
-                  <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center transition-[background-color,box-shadow,filter] duration-200", isLight ? "bg-black/[0.06]" : "bg-white/[0.08]")}>
-                    <Play className={cn("w-3.5 h-3.5", isLight ? "text-[#1a1625]/40" : "text-white/40")} />
-                  </div>
-                  <div>
-                    <div className={cn("text-base font-semibold mb-0.5", isLight ? "text-[#1a1625]" : "text-white")}>{isWeb && !isShowcase ? "下载 APK" : "新建实例"}</div>
-                    <div className={cn("text-xs", isLight ? "text-[#1a1625]/40" : "text-white/40")}>{isWeb && !isShowcase ? "获取最新版本" : "设置新的酒馆环境"}</div>
-                  </div>
-                </div>
-              </button>
-
-              {/* 解耦后的实例卡片列表 (支持双击原地内联重命名) */}
-              {instances.map((instance, index) => (
-                <InstanceCard
-                  key={instance.id}
-                  instance={instance}
-                  index={index}
-                  isLight={isLight}
-                  hoveredCard={hoveredCard}
-                  setHoveredCard={setHoveredCard}
-                  activeCardMenu={activeCardMenu}
-                  launchingId={launchingId}
-                  onLaunch={launchTavern}
-                  onOpenMenu={(inst, rect) => {
-                    setMenuPos({
-                      top: Math.min(rect.bottom + 6, window.innerHeight - 200),
-                      left: Math.max(12, Math.min(rect.left - 60, window.innerWidth - 160)),
-                    });
-                    setActiveCardMenu(inst.id);
-                    setIsCardMenuClosing(false);
-                  }}
-                  onRenameSave={(instanceId, newName) => {
-                    setInstances(prev => prev.map(inst => inst.id === instanceId ? { ...inst, name: newName, subtitle: newName } : inst));
-                    setExternallyRenamingId(null);
-                  }}
-                  isExternallyRenaming={externallyRenamingId === instance.id}
-                  onClearExternalRenaming={() => setExternallyRenamingId(null)}
-                />
-              ))}
-
-              <div className="flex-shrink-0 w-[calc(50%-120px)]" aria-hidden />
-            </div>
-
-            {/* 指示器 + 方向键 */}
-            <div className="flex items-center justify-center gap-3 mt-4">
-              <button
-                onClick={() => scrollToSlide(Math.max(0, activeSlide - 1))}
-                disabled={activeSlide === 0}
-                className={cn(
-                  "motion-control w-7 h-7 rounded-full flex items-center justify-center",
-                  activeSlide === 0
-                    ? isLight ? "text-[#1a1625]/15 cursor-default" : "text-white/15 cursor-default"
-                    : isLight ? "text-[#1a1625]/40 hover:text-[#1a1625]/70 hover:bg-[#1a1625]/8" : "text-white/40 hover:text-white/70 hover:bg-white/10"
-                )}
-              >
-                <ChevronLeft className="w-3.5 h-3.5" />
-              </button>
-
-              {Array.from({ length: instances.length + 1 }).map((_, i) => (
-                <button
-                  key={i}
-                  onClick={() => scrollToSlide(i)}
-                  aria-label={`切换到第 ${i + 1} 张卡片`}
-                  aria-current={i === activeSlide ? "true" : undefined}
-                  className="motion-control group flex h-4 w-4 items-center justify-center rounded-full"
-                >
-                  <span className={cn(
-                    "block h-1.5 w-4 rounded-full transition-[transform,background-color,opacity] duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
-                    i === activeSlide
-                      ? isLight ? "scale-x-100 bg-[#1a1625]/45" : "scale-x-100 bg-white/50"
-                      : isLight ? "scale-x-[0.375] bg-[#1a1625]/12 group-hover:bg-[#1a1625]/20" : "scale-x-[0.375] bg-white/15 group-hover:bg-white/25"
-                  )} />
-                </button>
-              ))}
-
-              <button
-                onClick={() => scrollToSlide(Math.min(instances.length, activeSlide + 1))}
-                disabled={activeSlide === instances.length}
-                className={cn(
-                  "motion-control w-7 h-7 rounded-full flex items-center justify-center",
-                  activeSlide === instances.length
-                    ? isLight ? "text-[#1a1625]/15 cursor-default" : "text-white/15 cursor-default"
-                    : isLight ? "text-[#1a1625]/40 hover:text-[#1a1625]/70 hover:bg-[#1a1625]/8" : "text-white/40 hover:text-white/70 hover:bg-white/10"
-                )}
-              >
-                <ChevronRight className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-        </div>
+        {/* 实例卡片轮播 (高内聚低耦合组件调度) */}
+        <InstanceCarousel
+          ref={carouselRef}
+          instances={instances}
+          isLight={isLight}
+          glassBg={glassBg}
+          hoveredCard={hoveredCard}
+          setHoveredCard={setHoveredCard}
+          activeCardMenu={activeCardMenu}
+          launchingId={launchingId}
+          onLaunch={launchTavern}
+          onReturnToTavern={handleReturnToTavern}
+          onStopInstance={handleStopInstance}
+          onOpenMenu={(inst, rect) => {
+            setMenuPos({
+              top: Math.min(rect.bottom + 6, window.innerHeight - 200),
+              left: Math.max(12, Math.min(rect.left - 60, window.innerWidth - 160)),
+            });
+            setActiveCardMenu(inst.id);
+            setIsCardMenuClosing(false);
+          }}
+          onRenameSave={(instanceId, newName) => {
+            setInstances(prev => prev.map(inst => inst.id === instanceId ? { ...inst, name: newName, subtitle: newName } : inst));
+            setExternallyRenamingId(null);
+          }}
+          externallyRenamingId={externallyRenamingId}
+          onClearExternalRenaming={() => setExternallyRenamingId(null)}
+          isWindows={isWindows}
+          isWeb={isWeb}
+          isShowcase={isShowcase}
+          onNewInstance={() => {
+            if (isWeb && !isShowcase && !import.meta.env.DEV) {
+              void openExternalUrl("https://github.com/CAPTCHAAAAA/SillyClient/releases/latest").catch(() => {});
+              return;
+            }
+            setNewInstanceMode("local");
+            setNewInstanceName("");
+            setNewInstanceDir("");
+            setNewInstancePathMode("exact");
+            setMigrationTargetPathMode("exact");
+            setNewInstanceUrl("http://");
+            setNewRemoteAuthEnabled(false);
+            setNewRemoteAuthUsername("");
+            setNewRemoteAuthPassword("");
+            setNewInstanceVersion("stable");
+            setNewInstanceCompanionPresetEnabled(false);
+            setNewInstanceExtensionIds([]);
+            setNewInstanceLocalZip(null);
+            setNewInstanceError(null);
+            setShowNewInstancePanel(true);
+          }}
+          activeSlide={activeSlide}
+          onActiveSlideChange={setActiveSlide}
+        />
       </main>
 
       {/* 解耦业务组件: 卡片操作菜单 */}
@@ -2590,8 +2575,6 @@ function SillyClientLauncher() {
         terminalDisplayBanner={terminalDisplayBanner}
         terminalDisplayPrompt={terminalDisplayPrompt}
         terminalDisplayPlaceholder={terminalDisplayPlaceholder}
-        terminalLogs={terminalLogs}
-        setTerminalLogs={setTerminalLogs}
         terminalInstance={terminalInstance}
       />
 
@@ -2617,21 +2600,31 @@ function SillyClientLauncher() {
         replayOnboarding={replayOnboarding}
         instances={instances}
         setInstances={setInstances}
+        onImportBackup={content => {
+          const incoming = parseInstanceBackup(content);
+          setInstances(previous => mergeInstanceBackup(previous, incoming));
+        }}
         importInputRef={importInputRef}
         appUpdateState={appUpdateState}
         appUpdateInfo={appUpdateInfo}
         checkForAppUpdate={checkForAppUpdate}
         openProjectPage={openProjectPage}
+        onOpenWhatsNew={openWhatsNew}
         onOpenCleanGarbage={async () => {
           closeAppMenu();
           setCleaningGarbage(true);
           setShowCleanPanel(true);
           setGarbageItems([]);
+          setGarbageError(null);
           try {
-            const { items } = await TarvenEnv.cleanGarbage({ dryRun: true });
+            const { items } = await TarvenEnv.cleanGarbage({
+              dryRun: true,
+              activeInstanceIds: Array.from(new Set(instances.flatMap(instance => [instance.id, instance.installDir].filter((id): id is string => !!id)))),
+              activeCoverPaths: instances.map(instance => instance.cover).filter((cover): cover is string => !!cover),
+            });
             setGarbageItems(items);
           } catch (e) {
-            console.error(e);
+            setGarbageError(e instanceof Error ? e.message : String(e));
           }
           setCleaningGarbage(false);
         }}
@@ -2709,40 +2702,25 @@ function SillyClientLauncher() {
         launchError={launchError}
         launchProgress={launchProgress}
         lastLaunchParams={lastLaunchParams}
-        launchLogs={launchLogs}
+        logKey={launchLogKey}
         launchingId={launchingId}
         onRetry={retryLaunch}
         onClose={dismissLaunchPanel}
         onMinimize={() => {
+          const expected = operations.current;
           setIsLaunchPanelClosing(true);
           setTimeout(() => {
+            if (operations.current !== expected) return;
             setShowLaunchPanel(false);
             setIsLaunchPanelClosing(false);
             setIsLaunchMinimized(true);
           }, PANEL_EXIT_MS);
         }}
-        onEnterTavern={async (params) => {
-          await launchTavern(params || lastLaunchParams);
+        onEnterTavern={async (params: any) => {
+          const instance = params || lastLaunchParams;
+          if (instance) await launchTavern(instance);
         }}
       />
-
-      {/* 操作内联化: 底部常驻活动胶囊 (Activity Capsule) */}
-      {isLaunchMinimized && (launchingId || launchProgress) && (
-        <ActivityCapsule
-          instanceName={lastLaunchParams?.name || (launchingId ? instances.find(i => i.id === launchingId)?.name : "") || "实例"}
-          statusText={launchError ? "启动失败" : (launchProgress?.text || "正在启动...")}
-          pct={launchProgress?.pct || 0}
-          hasError={!!launchError}
-          isComplete={launchProgress?.pct === 100}
-          onExpand={() => {
-            setIsLaunchMinimized(false);
-            setShowLaunchPanel(true);
-            setIsLaunchPanelClosing(false);
-          }}
-          isLight={isLight}
-          glassBg={glassBg}
-        />
-      )}
 
       {/* 解耦业务组件: 清理垃圾弹窗 */}
       <CleanGarbageModal
@@ -2761,6 +2739,8 @@ function SillyClientLauncher() {
         setCleaningGarbage={setCleaningGarbage}
         garbageItems={garbageItems}
         setGarbageItems={setGarbageItems}
+        error={garbageError}
+        setError={setGarbageError}
       />
 
       {/* 解耦业务组件: 新建实例向导 (同位驻留 DOM、昼夜平滑高度自适应、无自发光输入框) */}
@@ -2785,13 +2765,16 @@ function SillyClientLauncher() {
         newInstanceMode={newInstanceMode}
         switchInstanceMode={switchInstanceMode}
         newInstanceDir={newInstanceDir}
-        setNewInstanceDir={setNewInstanceDir}
+        setNewInstanceDir={handleSetNewInstanceDir}
+        onPickInstallFolder={handlePickInstallFolder}
         newInstanceVersion={newInstanceVersion}
         setNewInstanceVersion={setNewInstanceVersion}
         newInstanceLocalZip={newInstanceLocalZip}
         setNewInstanceLocalZip={setNewInstanceLocalZip}
         newInstanceCompanionPresetEnabled={newInstanceCompanionPresetEnabled}
         setNewInstanceCompanionPresetEnabled={setNewInstanceCompanionPresetEnabled}
+        newInstanceExtensionIds={newInstanceExtensionIds}
+        setNewInstanceExtensionIds={setNewInstanceExtensionIds}
         newInstanceUrl={newInstanceUrl}
         setNewInstanceUrl={setNewInstanceUrl}
         newRemoteAuthEnabled={newRemoteAuthEnabled}
@@ -2800,6 +2783,25 @@ function SillyClientLauncher() {
         setNewRemoteAuthUsername={setNewRemoteAuthUsername}
         newRemoteAuthPassword={newRemoteAuthPassword}
         setNewRemoteAuthPassword={setNewRemoteAuthPassword}
+        migrationAccessMode={migrationAccessMode}
+        setMigrationAccessMode={setMigrationAccessMode}
+        migrationSourcePath={migrationSourcePath}
+        setMigrationSourcePath={handleSetMigrationSourcePath}
+        migrationIncludeSecrets={migrationIncludeSecrets}
+        setMigrationIncludeSecrets={setMigrationIncludeSecrets}
+        migrationCustomDest={migrationCustomDest}
+        setMigrationCustomDest={handleSetMigrationCustomDest}
+        onPickSourceFolder={handlePickSourceFolder}
+        onPickSourceZip={handlePickSourceZip}
+        onPickTargetFolder={handlePickTargetFolder}
+        migrationPreflight={
+          migrationSourcePath
+            ? {
+                version: "1.12.8",
+                nativePlugins: ["better-sqlite3", "sharp"],
+              }
+            : null
+        }
         newInstanceError={newInstanceError}
         isCreatingInstance={isCreatingInstance}
         createInstance={createInstance}
@@ -2845,9 +2847,15 @@ function SillyClientLauncher() {
         onSelectInstance={(inst) => {
           setShowManagePanel(inst);
           setTerminalInstanceId(inst.id);
+          if (maintenanceInstance) setMaintenanceInstance(inst.type === "local" ? inst : null);
+        }}
+        onOpenMaintenance={(inst) => {
+          if (inst.type === "local") setMaintenanceInstance(inst);
         }}
         onOpenNewInstanceWizard={() => {
           closeManagePanel();
+          setNewInstanceCompanionPresetEnabled(false);
+          setNewInstanceExtensionIds([]);
           setTimeout(() => {
             setShowNewInstancePanel(true);
             setIsNewInstancePanelClosing(false);
@@ -2894,11 +2902,12 @@ function SillyClientLauncher() {
         isSavingManagePanel={isSavingManagePanel}
         manageSaveError={manageSaveError}
         onSaveManagedInstance={saveManagedInstance}
-        terminalLogs={terminalLogs}
-        setTerminalLogs={setTerminalLogs}
         terminalDisplayPrompt={terminalDisplayPrompt}
         terminalPlaceholder={terminalPlaceholder}
       />
+
+      <InstanceMaintenancePanel instance={maintenanceInstance} isOpen={!!maintenanceInstance}
+        onClose={closeMaintenance} isLight={isLight} glassBg={glassBg} registerLayer={registerLayer} />
 
       {/* 首次引导 */}
       {showOnboarding && (
@@ -2909,8 +2918,17 @@ function SillyClientLauncher() {
         />
       )}
 
-      {/* 【视觉与动效测试专用】底部悬浮调试板：仅在开发或 Web 走查环境可见，用于设计验收与过渡动效测试（打开向导/模拟过渡/模拟完成态），不属于生产业务逻辑，在 Windows/Android 原生正式运行时完全不渲染 */}
-      {(import.meta.env.DEV || isWeb) && (
+      {/* 版本主要更新画布 (全屏虚化) */}
+      <WhatsNewModal
+        isOpen={showWhatsNew}
+        isClosing={isWhatsNewClosing}
+        onClose={dismissWhatsNew}
+        isLight={isLight}
+        glassBg={glassBg}
+      />
+
+      {/* 【视觉与动效测试专用】底部悬浮调试板：仅在本地开发走查环境可见，用于设计验收与过渡动效测试，在任何正式生产构建（Windows/Android/Pages）中自动剔除 */}
+      {import.meta.env.DEV && !isNativePreview && (
         <div
           title="【视觉测试专用】仅用于本地开发、设计走查与过渡动效测试，正式生产原生端不包含"
           className="fixed bottom-4 right-4 z-[99] flex flex-wrap items-center gap-1.5 p-1.5 rounded-full border backdrop-blur-[32px] saturate-180 shadow-[0_8px_32px_rgba(0,0,0,0.4)] select-none text-[11px] transition-all bg-[#14101e]/85 border-white/10"
@@ -2919,6 +2937,15 @@ function SillyClientLauncher() {
             <span className="w-1.5 h-1.5 rounded-full bg-white/40" />
             <span>调试板 (视觉测试专用)</span>
           </div>
+          <button
+            onClick={() => {
+              setShowWhatsNew(true);
+              setIsWhatsNewClosing(false);
+            }}
+            className="motion-control h-7 px-3 rounded-full border border-white/10 bg-white/10 text-white/90 hover:bg-white/20 active:bg-white/25 font-medium transition-all"
+          >
+            更新画布
+          </button>
           <button
             onClick={() => {
               setShowLaunchPanel(false);
@@ -2935,7 +2962,7 @@ function SillyClientLauncher() {
               setShowNewInstancePanel(false);
               setIsNewInstancePanelClosing(false);
               setOperationPurpose("create");
-              setLastLaunchParams({ id: "demo-test", name: "体验新实例", type: "local" });
+              setLastLaunchParams({ ...DEMO_INSTANCE, id: "demo-test", name: "体验新实例", type: "local" });
               setShowLaunchPanel(true);
               setIsLaunchPanelClosing(false);
               setLaunchError(null);
@@ -2954,7 +2981,7 @@ function SillyClientLauncher() {
               setShowNewInstancePanel(false);
               setIsNewInstancePanelClosing(false);
               setOperationPurpose("create");
-              setLastLaunchParams({ id: "demo-test", name: "体验新实例", type: "local" });
+              setLastLaunchParams({ ...DEMO_INSTANCE, id: "demo-test", name: "体验新实例", type: "local" });
               setShowLaunchPanel(true);
               setIsLaunchPanelClosing(false);
               setLaunchError(null);
@@ -2978,13 +3005,6 @@ function SillyClientLauncher() {
           >
             <X className="w-3 h-3" />
           </button>
-        </div>
-      )}
-
-      {autoTourStage && (
-        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[9999] pointer-events-none px-4 py-2 rounded-full bg-black/85 backdrop-blur-md border border-white/20 text-white font-mono text-[11px] font-medium shadow-2xl flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span>{autoTourStage}</span>
         </div>
       )}
     </div>

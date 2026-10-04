@@ -16,7 +16,7 @@ enum IOSSafeArchive {
     }
 
     static func extract(_ source: URL, to target: URL, stripSingleRoot: Bool = false,
-                        maximumBytes: UInt64 = 512 * 1024 * 1024, maximumEntries: Int = 30000,
+                        maximumBytes: UInt64 = 4 * 1024 * 1024 * 1024, maximumEntries: Int = 100000,
                         include: (String) -> Bool = { _ in true }, cancelled: () throws -> Void = {}) throws {
         let files = IOSManagedFiles(root: target)
         guard FileManager.default.fileExists(atPath: target.path) else {
@@ -51,7 +51,13 @@ enum IOSSafeArchive {
                 relative = segments.dropFirst().joined(separator: "/")
             }
             let nameKey = relative.precomposedStringWithCanonicalMapping.lowercased()
-            guard names.insert(nameKey).inserted else { throw IOSFileError.invalid("Archive contains duplicate paths") }
+            if entry.type == .directory {
+                if !names.insert(nameKey).inserted {
+                    continue
+                }
+            } else {
+                guard names.insert(nameKey).inserted else { throw IOSFileError.invalid("Archive contains duplicate paths") }
+            }
             if !include(relative) { continue }
             let destination = target.appendingPathComponent(relative)
             _ = try files.checked(destination, allowMissing: true)

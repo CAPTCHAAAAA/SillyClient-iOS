@@ -44,6 +44,7 @@ public final class NodeRunner {
     private var state = "idle"
     private var instanceId: String?
     private var operationId: String?
+    private var activeLocation: IOSInstallationLocation?
     private var currentPort = 0
     private var currentURL = ""
     private var startedAt: Date?
@@ -153,13 +154,29 @@ public final class NodeRunner {
     }
 
     func startPrepared(instance: String, operation: String, server: URL, data: URL,
-                       config: URL, port: Int, ipv4: Bool, completion: @escaping (Result<[String: Any], Error>) -> Void) {
+                       config: URL, location: IOSInstallationLocation, port: Int, ipv4: Bool,
+                       completion: @escaping (Result<[String: Any], Error>) -> Void) {
         queue.async {
             do {
                 guard self.instanceId == instance, self.operationId == operation, self.state == "provisioning" else {
                     throw IOSFileError.invalid("Operation cancelled or superseded")
                 }
                 try self.ensureHost()
+                guard server.path == location.directory.path, data.path == server.appendingPathComponent("data").path,
+                      config.path == server.appendingPathComponent("config.yaml").path else {
+                    throw IOSFileError.invalid("Runtime paths do not match the authorized instance location")
+                }
+                let rootGuard = try location.files.guardValue(location.root)
+                let serverGuard = try location.files.guardValue(server)
+                _ = try location.files.checked(data)
+                _ = try location.files.checked(config)
+                try IOSManagedFiles(root: self.control).writeJSON([
+                    "revision": 1, "instanceId": instance, "operationId": operation,
+                    "root": location.root.path, "rootDevice": String(rootGuard.device), "rootInode": String(rootGuard.inode),
+                    "serverDirectory": server.path, "serverDevice": String(serverGuard.device), "serverInode": String(serverGuard.inode),
+                    "dataDirectory": data.path, "configPath": config.path,
+                ], to: self.control.appendingPathComponent("locations.json"))
+                self.activeLocation = location
                 self.currentPort = port
                 self.currentURL = ipv4 ? "http://127.0.0.1:\(port)/" : "http://[::1]:\(port)/"
                 self.state = "starting"
@@ -178,6 +195,7 @@ public final class NodeRunner {
                         } else if self.instanceId == instance, self.operationId == operation, self.state != "stopping" {
                             self.instanceId = nil
                             self.operationId = nil
+                            self.activeLocation = nil
                             self.state = "failed"
                             self.currentURL = ""
                             self.startedAt = nil
@@ -199,6 +217,7 @@ public final class NodeRunner {
                 if self.instanceId == instance, self.operationId == operation {
                     self.instanceId = nil
                     self.operationId = nil
+                    self.activeLocation = nil
                     self.state = "failed"
                 }
                 completion(.failure(error))
@@ -217,6 +236,7 @@ public final class NodeRunner {
             if self.state == "provisioning" {
                 self.instanceId = nil
                 self.operationId = nil
+                self.activeLocation = nil
                 self.state = "stopped"
                 self.stateEvent?(self.statusLocked())
                 completion?(.success(()))
@@ -236,6 +256,7 @@ public final class NodeRunner {
                 }
                 self.instanceId = nil
                 self.operationId = nil
+                self.activeLocation = nil
                 self.state = "stopped"
                 self.currentURL = ""
                 self.currentPort = 0
@@ -290,6 +311,7 @@ public final class NodeRunner {
             self.queue.async {
                 self.hostExited = true
                 self.state = "failed"
+                self.activeLocation = nil
                 self.appendLog("Embedded host exited (\(code)); application restart is required")
                 for (_, value) in self.pending {
                     value.1.cancel()
@@ -346,6 +368,7 @@ public final class NodeRunner {
             currentURL = ""
             instanceId = nil
             operationId = nil
+            activeLocation = nil
             startedAt = nil
             stateEvent?(statusLocked())
         }

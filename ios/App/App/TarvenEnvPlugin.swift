@@ -1,733 +1,618 @@
 import Foundation
 import Capacitor
-import Security
 import UIKit
 import WebKit
 import UniformTypeIdentifiers
 
-/**
- * TarvenEnv 跨平台契约 iOS 原生实现 (TarvenEnvPlugin)
- *
- * 1. 严格 100% 对齐 Android TarvenEnvPlugin.kt 与 Windows plugin.ts；
- * 2. identifier 与 jsName 均为 "TarvenEnv"，确保 Capacitor 桥接精确匹配；
- * 3. 桥接 NodeRunner 进程内调度与 TavernViewController 全屏沉浸；
- * 4. 采用 iOS Keychain (Security.framework) 硬件级加密存储远程酒馆 Basic Auth 密码；
- * 5. 支持一键唤起 iOS 原生“文件”App 直接打开沙盒 Documents/SillyTavern 目录；
- * 6. 支持 UIDocumentPickerViewController 原生文件与 ZIP 导入体系。
- */
 @objc(TarvenEnvPlugin)
-public class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPickerDelegate {
-
+public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPickerDelegate {
     public let identifier = "TarvenEnv"
     public let jsName = "TarvenEnv"
-
-    // 挂起的文件选择器上下文
+    private let io = DispatchQueue(label: "com.sillyclient.instance-io", qos: .userInitiated)
+    private let store = IOSInstanceStore.shared
     private var pendingPickerCall: CAPPluginCall?
-    private var pendingPickerAction: String? // "zip", "dir", "image", "save"
-    private var pendingInstanceId: String = "default"
+    private var pendingPickerAction = ""
+    private var pendingInstanceId = ""
+    private var scopedDirectories: [String: URL] = [:]
+    private var viewSession: (String, URL, Bool)?
+    private var pendingViewSession: (String, URL, Bool)?
+    private var viewGeneration: UInt64 = 0
+    deinit { for directory in scopedDirectories.values { directory.stopAccessingSecurityScopedResource() } }
 
-    public let pluginMethods: [CAPPluginMethod] = [
-        CAPPluginMethod(name: "getPlatform", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getAppVersion", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getStatus", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getSafeInsets", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "scanInstances", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "provisionAndStart", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "enterImmersive", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "exitImmersive", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "returnToTavern", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "closeTavern", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getLogs", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "fetchReleases", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getInstanceInfo", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "pingUrl", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getContentOpenMode", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setContentOpenMode", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setRemoteBasicAuth", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getRemoteBasicAuthStatus", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "clearRemoteBasicAuth", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "pickDirectory", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "pickImage", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "pickZipFile", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "saveTextFile", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "sendCommand", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "reloadTavern", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "clearWebViewData", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setPullToRefresh", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "uninstallInstance", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "cleanGarbage", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "deleteGarbageItem", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "openFilesApp", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setSecret", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getSecret", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "deleteSecret", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "checkUpdate", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "dismissPickerForTesting", returnType: CAPPluginReturnPromise)
-    ]
+    public var pluginMethods: [CAPPluginMethod] {
+        var names = [
+            "getPlatform", "getAppVersion", "getStatus", "getSafeInsets", "scanInstances",
+            "provisionAndStart", "enterImmersive", "openExternalUrl", "exitImmersive", "returnToTavern",
+            "closeTavern", "stop", "getLogs", "fetchReleases", "getInstanceInfo", "pingUrl",
+            "getContentOpenMode", "setContentOpenMode", "setRemoteBasicAuth", "getRemoteBasicAuthStatus",
+            "clearRemoteBasicAuth", "pickDirectory", "pickImage", "pickZipFile", "saveTextFile",
+            "readTextFile", "migrateInstance", "sendCommand", "reloadTavern", "clearWebViewData",
+            "setPullToRefresh", "uninstallInstance", "cleanGarbage", "deleteGarbageItem", "openFilesApp",
+            "setSecret", "getSecret", "deleteSecret", "checkUpdate", "scanInstanceMaintenance",
+            "applyInstanceMaintenance", "listInstanceMaintenanceRecovery", "restoreInstanceMaintenance"
+        ]
+        #if DEBUG
+        names.append("dismissPickerForTesting")
+        #endif
+        return names.map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    }
 
     public override func load() {
         super.load()
-        NSLog("[TarvenEnvPlugin] Loaded into Capacitor Bridge successfully")
+        NodeRunner.shared.setEventHandlers(log: { [weak self] id, operation, line in
+            self?.notifyListeners("log", data: IOSRuntimeEvents.log(instance: id, operation: operation, line: line))
+        }, status: { [weak self] state in
+            DispatchQueue.main.async {
+                guard let self = self, let value = IOSRuntimeEvents.mode(state, current: NodeRunner.shared.status,
+                    remoteActive: self.viewSession?.2 == true || self.pendingViewSession?.2 == true) else { return }
+                self.notifyListeners("mode", data: value)
+            }
+        })
     }
-
+    private func perform(_ call: CAPPluginCall, _ body: @escaping () throws -> [String: Any]) {
+        io.async {
+            do { call.resolve(try body()) }
+            catch { call.reject(error.localizedDescription) }
+        }
+    }
+    private func id(_ call: CAPPluginCall) throws -> String { try IOSInstanceStore.identity(call.getString("instanceId")) }
+    private var version: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.10.0" }
     @objc func getPlatform(_ call: CAPPluginCall) {
-        call.resolve(["platform": "ios"])
+        call.resolve(["platform": "ios", "externalTakeoverSupported": false, "arbitraryRuntimeVersionsSupported": false])
     }
-
-    @objc func getAppVersion(_ call: CAPPluginCall) {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.9.2"
-        call.resolve(["version": version])
-    }
-
+    @objc func getAppVersion(_ call: CAPPluginCall) { call.resolve(["version": version]) }
     @objc func getStatus(_ call: CAPPluginCall) {
-        let isRunning = NodeRunner.shared.isRunning
-        call.resolve([
-            "serverReady": isRunning,
-            "mode": "local",
-            "url": isRunning ? "http://127.0.0.1:8000" : ""
-        ])
+        DispatchQueue.main.async {
+            let local = NodeRunner.shared.status
+            if local["instanceId"] != nil { call.resolve(local) }
+            else if let session = self.viewSession, session.2 {
+                call.resolve(["serverReady": false, "mode": "remote", "url": session.1.absoluteString,
+                    "instanceId": session.0, "tavernRunning": true])
+            } else { call.resolve(local) }
+        }
     }
-
     @objc func getSafeInsets(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
-            let scale = UIScreen.main.scale
-            let window = UIApplication.shared.windows.first { $0.isKeyWindow } ?? UIApplication.shared.windows.first
+            let window = UIApplication.shared.windows.first { $0.isKeyWindow }
             let insets = window?.safeAreaInsets ?? .zero
-            call.resolve([
-                "top": insets.top * scale,
-                "bottom": insets.bottom * scale,
-                "left": insets.left * scale,
-                "right": insets.right * scale
-            ])
+            let scale = window?.screen.scale ?? UIScreen.main.scale
+            call.resolve(["top": insets.top * scale, "bottom": insets.bottom * scale,
+                "left": insets.left * scale, "right": insets.right * scale])
+        }
+    }
+    @objc func scanInstances(_ call: CAPPluginCall) { perform(call) { ["instances": try self.store.records()] } }
+    @objc func getInstanceInfo(_ call: CAPPluginCall) { perform(call) { try self.store.info(self.id(call)) } }
+
+    private func reserveLocal(instance: String, operation: String) throws {
+        guard viewSession?.2 != true, pendingViewSession?.2 != true else {
+            throw IOSFileError.invalid("Close the current remote Tavern before preparing a local instance")
+        }
+        try NodeRunner.shared.reserve(instance: instance, operation: operation)
+        viewGeneration += 1
+        pendingViewSession = nil
+        viewSession = nil
+    }
+    @objc func provisionAndStart(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            do {
+                let instance = try self.id(call)
+                let operation = try IOSInstanceStore.identity(call.getString("operationId") ?? UUID().uuidString)
+                let port = call.getInt("port") ?? 8000
+                try self.reserveLocal(instance: instance, operation: operation)
+                self.io.async {
+                    do {
+                        self.notifyListeners("progress", data: ["instanceId": instance, "operationId": operation,
+                            "percent": 10, "stage": "Preparing the pinned iOS runtime"])
+                        let directory = try self.store.prepare(instance: instance, operation: operation,
+                            version: call.getString("version"), localZip: call.getString("localZipPath"),
+                            installPath: call.getString("installPath"), port: port, config: call.getObject("config"),
+                            preinstall: call.getObject("preinstall"), companion: call.getObject("companionPreset"))
+                        NodeRunner.shared.startPrepared(instance: instance, operation: operation, server: directory,
+                            data: directory.appendingPathComponent("data"), config: directory.appendingPathComponent("config.yaml"),
+                            port: port, ipv4: try self.store.ipv4(directory)) { result in
+                                DispatchQueue.main.async {
+                                    switch result {
+                                    case .success(let status):
+                                        let current = NodeRunner.shared.status
+                                        guard current["serverReady"] as? Bool == true,
+                                              current["instanceId"] as? String == instance,
+                                              current["operationId"] as? String == operation else {
+                                            call.reject("The ready response belongs to an obsolete local session")
+                                            return
+                                        }
+                                        if (call.getObject("config")?["keepAlive"] as? Bool) == true { KeepAliveService.shared.start() }
+                                        else { KeepAliveService.shared.stop() }
+                                        self.notifyListeners("ready", data: ["ready": true, "instanceId": instance,
+                                            "operationId": operation, "port": port, "url": status["url"] ?? ""])
+                                        call.resolve(["ready": true, "instanceId": instance, "operationId": operation,
+                                            "installPath": directory.path, "installPathMode": "exact"])
+                                    case .failure(let error): call.reject(error.localizedDescription)
+                                    }
+                                }
+                            }
+                    } catch {
+                        NodeRunner.shared.failProvision(instance: instance, operation: operation, error: error)
+                        call.reject(error.localizedDescription)
+                    }
+                }
+            } catch { call.reject(error.localizedDescription) }
         }
     }
 
-    // MARK: - Multi-Instance Path Helpers
-    private func normalizeInstanceId(_ raw: String?) -> String {
-        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
-            return "default"
-        }
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
-        let cleaned = raw.components(separatedBy: allowed.inverted).joined()
-        return cleaned.isEmpty ? "default" : cleaned
-    }
-
-    private func resolveInstanceDataPath(instanceId: String) -> String {
-        let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let safeId = normalizeInstanceId(instanceId)
-        let fm = FileManager.default
-        if safeId == "default" {
-            let defaultDir = docsUrl.appendingPathComponent("SillyTavern").path
-            let instDefaultDir = docsUrl.appendingPathComponent("instances").appendingPathComponent("default").path
-            if !fm.fileExists(atPath: defaultDir) && fm.fileExists(atPath: instDefaultDir) {
-                return instDefaultDir
-            }
-            return defaultDir
-        } else {
-            return docsUrl.appendingPathComponent("instances").appendingPathComponent(safeId).path
-        }
-    }
-
-    private func calculateDirectorySize(at path: String) -> Int64 {
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(atPath: path) else { return 0 }
-        var total: Int64 = 0
-        while let file = enumerator.nextObject() as? String {
-            let fullPath = (path as NSString).appendingPathComponent(file)
-            if let attrs = try? fm.attributesOfItem(atPath: fullPath) {
-                total += (attrs[.size] as? Int64) ?? 0
-            }
-        }
-        return total
-    }
-
-    @objc func scanInstances(_ call: CAPPluginCall) {
-        let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let fm = FileManager.default
-        var instances: [[String: Any]] = []
-
-        // 1. 扫描默认实例 Documents/SillyTavern
-        let defaultDir = docsUrl.appendingPathComponent("SillyTavern").path
-        let serverDir = NodeRunner.shared.resolveServerDirectory(dataPath: defaultDir)
-        let hasServerDefault = fm.fileExists(atPath: (serverDir as NSString).appendingPathComponent("server.js"))
-        if hasServerDefault || fm.fileExists(atPath: defaultDir) {
-            let size = calculateDirectorySize(at: defaultDir)
-            let attrs = try? fm.attributesOfItem(atPath: defaultDir)
-            let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
-            let ctime = (attrs?[.creationDate] as? Date)?.timeIntervalSince1970 ?? mtime
-            instances.append([
-                "instanceId": "default",
-                "version": "1.12.0",
-                "hasServer": hasServerDefault,
-                "path": serverDir,
-                "dataPath": (defaultDir as NSString).appendingPathComponent("data"),
-                "sizeBytes": size,
-                "lastUsedAt": mtime * 1000,
-                "createdAt": ctime * 1000,
-                "totalUsageMs": 0
-            ])
-        }
-
-        // 2. 扫描 Documents/instances/ 下的独立多实例文件夹
-        let instancesDir = docsUrl.appendingPathComponent("instances")
-        if let subdirs = try? fm.contentsOfDirectory(atPath: instancesDir.path) {
-            for sub in subdirs {
-                let safeId = normalizeInstanceId(sub)
-                if safeId == "default" && !instances.isEmpty { continue }
-                let subPath = instancesDir.appendingPathComponent(sub).path
-                var isDir: ObjCBool = false
-                if fm.fileExists(atPath: subPath, isDirectory: &isDir), isDir.boolValue {
-                    let subServerDir = NodeRunner.shared.resolveServerDirectory(dataPath: subPath)
-                    let hasServer = fm.fileExists(atPath: (subServerDir as NSString).appendingPathComponent("server.js"))
-                    let size = calculateDirectorySize(at: subPath)
-                    let attrs = try? fm.attributesOfItem(atPath: subPath)
-                    let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
-                    let ctime = (attrs?[.creationDate] as? Date)?.timeIntervalSince1970 ?? mtime
-                    instances.append([
-                        "instanceId": safeId,
-                        "version": "1.12.0",
-                        "hasServer": hasServer,
-                        "path": subServerDir,
-                        "dataPath": (subPath as NSString).appendingPathComponent("data"),
-                        "sizeBytes": size,
-                        "lastUsedAt": mtime * 1000,
-                        "createdAt": ctime * 1000,
-                        "totalUsageMs": 0
-                    ])
+    private func show(instance: String, url: URL, remote: Bool, hint: Bool = true,
+                      completion: @escaping (Result<Void, Error>) -> Void) {
+        do {
+            guard pendingViewSession == nil else { throw IOSFileError.invalid("A Tavern view is already opening") }
+            if remote {
+                guard NodeRunner.shared.status["instanceId"] == nil else {
+                    throw IOSFileError.invalid("Stop the current local operation before opening a remote Tavern")
                 }
             }
-        }
-
-        // 若未发现任何实例，提供兜底的 default 实例元数据
-        if instances.isEmpty {
-            instances.append([
-                "instanceId": "default",
-                "version": "1.12.0",
-                "hasServer": true,
-                "path": serverDir,
-                "dataPath": (defaultDir as NSString).appendingPathComponent("data"),
-                "sizeBytes": 0,
-                "lastUsedAt": Date().timeIntervalSince1970 * 1000,
-                "createdAt": Date().timeIntervalSince1970 * 1000,
-                "totalUsageMs": 0
-            ])
-        }
-
-        call.resolve(["instances": instances])
-    }
-
-    @objc func provisionAndStart(_ call: CAPPluginCall) {
-        let port = call.getInt("port") ?? 8000
-        let rawId = call.getString("instanceId") ?? "default"
-        let safeId = normalizeInstanceId(rawId)
-        let dataPath = resolveInstanceDataPath(instanceId: safeId)
-
-        if let config = call.getObject("config"), let keepAlive = config["keepAlive"] as? Bool, keepAlive {
-            KeepAliveService.shared.start()
-        }
-
-        NodeRunner.shared.start(dataPath: dataPath, port: port) { [weak self] success in
-            if success {
-                self?.notifyListeners("ready", data: ["ready": true, "url": "http://127.0.0.1:\(port)", "port": port, "instanceId": safeId])
-                call.resolve(["ready": true])
-            } else {
-                self?.notifyListeners("error", data: ["message": "启动本地 Node 实例失败"])
-                call.reject("启动本地 Node 实例失败")
-            }
-        }
-    }
-
-    @objc func enterImmersive(_ call: CAPPluginCall) {
-        guard let urlString = call.getString("url"), let url = URL(string: urlString) else {
-            call.reject("无效的目标 URL")
-            return
-        }
-        let showGestureHint = call.getBool("showGestureHint") ?? true
-
-        DispatchQueue.main.async {
-            TavernViewController.shared.enterImmersive(url: url, showGestureHint: showGestureHint)
-            call.resolve(["success": true])
-        }
-    }
-
-    @objc func exitImmersive(_ call: CAPPluginCall) {
-        DispatchQueue.main.async {
-            TavernViewController.shared.exitImmersive()
-            call.resolve(["success": true])
-        }
-    }
-
-    @objc func returnToTavern(_ call: CAPPluginCall) {
-        DispatchQueue.main.async {
-            TavernViewController.shared.exitImmersive()
-            call.resolve(["success": true])
-        }
-    }
-
-    @objc func closeTavern(_ call: CAPPluginCall) {
-        NodeRunner.shared.stop()
-        KeepAliveService.shared.stop()
-        call.resolve(["success": true])
-    }
-
-    @objc func stop(_ call: CAPPluginCall) {
-        NodeRunner.shared.stop()
-        KeepAliveService.shared.stop()
-        call.resolve(["success": true])
-    }
-
-    @objc func getLogs(_ call: CAPPluginCall) {
-        let limit = call.getInt("limit") ?? 200
-        let logs = NodeRunner.shared.getLogs(limit: limit)
-        call.resolve(["logs": logs])
-    }
-
-    @objc func fetchReleases(_ call: CAPPluginCall) {
-        guard let url = URL(string: "https://api.github.com/repos/SillyTavern/SillyTavern/releases") else {
-            call.resolve(["releases": []])
-            return
-        }
-        var request = URLRequest(url: url)
-        request.setValue("SillyClient-iOS/1.9.2", forHTTPHeaderField: "User-Agent")
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            guard let data = data, error == nil,
-                  let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                call.resolve(["releases": []])
+            viewGeneration += 1
+            let generation = viewGeneration
+            if UserDefaults.standard.string(forKey: "contentOpenMode") == "browser" {
+                pendingViewSession = (instance, url, remote)
+                UIApplication.shared.open(url, options: [:]) { opened in
+                    guard self.viewGeneration == generation else {
+                        completion(.failure(IOSFileError.invalid("The browser response belongs to an obsolete Tavern session")))
+                        return
+                    }
+                    self.pendingViewSession = nil
+                    guard opened else {
+                        completion(.failure(IOSFileError.invalid("System browser could not open this Tavern")))
+                        return
+                    }
+                    if !remote {
+                        let current = NodeRunner.shared.status
+                        guard current["serverReady"] as? Bool == true, current["instanceId"] as? String == instance,
+                              let currentURL = URL(string: current["url"] as? String ?? ""),
+                              IOSNavigationPolicy.sameOrigin(currentURL, url) else {
+                            completion(.failure(IOSFileError.invalid("The local Tavern stopped while its browser was opening")))
+                            return
+                        }
+                    }
+                    TavernViewController.shared.clearTavernSession()
+                    self.viewSession = (instance, url, remote)
+                    completion(.success(()))
+                }
                 return
             }
-            let formatted = list.prefix(15).map { rel -> [String: Any] in
-                return [
-                    "tag_name": rel["tag_name"] as? String ?? "",
-                    "name": rel["name"] as? String ?? "",
-                    "zipball_url": rel["zipball_url"] as? String ?? "",
-                    "body": rel["body"] as? String ?? "",
-                    "published_at": rel["published_at"] as? String ?? ""
-                ]
-            }
-            call.resolve(["releases": formatted])
-        }.resume()
+            let auth = remote ? try IOSRemoteCredentials.read(instance, for: url) : nil
+            guard TavernViewController.shared.enterImmersive(url: url, showGestureHint: hint,
+                username: auth?.0, password: auth?.1) else { throw IOSFileError.invalid("Tavern WebView is not available") }
+            viewSession = (instance, url, remote)
+            completion(.success(()))
+        } catch { completion(.failure(error)) }
     }
-
-    @objc func getInstanceInfo(_ call: CAPPluginCall) {
-        let rawId = call.getString("instanceId") ?? "default"
-        let port = call.getInt("port") ?? 8000
-        let safeId = normalizeInstanceId(rawId)
-        let dataPath = resolveInstanceDataPath(instanceId: safeId)
-        let fm = FileManager.default
-        let serverDir = NodeRunner.shared.resolveServerDirectory(dataPath: dataPath)
-        let hasServer = fm.fileExists(atPath: (serverDir as NSString).appendingPathComponent("server.js"))
-        let size = calculateDirectorySize(at: dataPath)
-        let attrs = try? fm.attributesOfItem(atPath: dataPath)
-        let ctime = (attrs?[.creationDate] as? Date) ?? Date()
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd"
-        let createdAtStr = fmt.string(from: ctime)
-
-        call.resolve([
-            "instanceId": safeId,
-            "version": "1.12.0",
-            "path": serverDir,
-            "installPath": dataPath,
-            "sizeBytes": size,
-            "createdAt": createdAtStr,
-            "port": port,
-            "status": hasServer ? "已就绪" : "未完成",
-            "uptimeSeconds": NodeRunner.shared.isRunning ? 60 : 0
-        ])
-    }
-
-    @objc func pingUrl(_ call: CAPPluginCall) {
-        guard let urlString = call.getString("url"), let url = URL(string: urlString) else {
-            call.resolve(["online": false, "statusCode": 0])
-            return
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 3.0
-
-        if let username = call.getString("username"), let password = call.getString("password") {
-            let authString = "\(username):\(password)"
-            if let authData = authString.data(using: .utf8) {
-                request.setValue("Basic \(authData.base64EncodedString())", forHTTPHeaderField: "Authorization")
-            }
-        }
-
-        URLSession.shared.dataTask(with: request) { _, response, error in
-            let httpResponse = response as? HTTPURLResponse
-            let statusCode = httpResponse?.statusCode ?? 0
-            let online = error == nil && statusCode >= 200 && statusCode < 400
-            let authRequired = statusCode == 401
-            call.resolve([
-                "online": online,
-                "statusCode": statusCode,
-                "authRequired": authRequired,
-                "error": error?.localizedDescription ?? ""
-            ])
-        }.resume()
-    }
-
-    @objc func getContentOpenMode(_ call: CAPPluginCall) {
-        call.resolve(["mode": "webview"])
-    }
-
-    @objc func setContentOpenMode(_ call: CAPPluginCall) {
-        call.resolve(["mode": "webview"])
-    }
-
-    @objc func setRemoteBasicAuth(_ call: CAPPluginCall) {
-        guard let instanceId = call.getString("instanceId"),
-              let username = call.getString("username") else {
-            call.reject("缺少 instanceId 或 username 参数")
-            return
-        }
-        let password = call.getString("password") ?? ""
-        _ = saveSecret(key: "auth_\(instanceId)_user", value: username)
-        _ = saveSecret(key: "auth_\(instanceId)_pass", value: password)
-        call.resolve(["configured": true, "username": username])
-    }
-
-    @objc func getRemoteBasicAuthStatus(_ call: CAPPluginCall) {
-        guard let instanceId = call.getString("instanceId") else {
-            call.reject("缺少 instanceId 参数")
-            return
-        }
-        let user = loadSecret(key: "auth_\(instanceId)_user")
-        let configured = user != nil && !(user!.isEmpty)
-        call.resolve(["configured": configured, "username": user ?? ""])
-    }
-
-    @objc func clearRemoteBasicAuth(_ call: CAPPluginCall) {
-        guard let instanceId = call.getString("instanceId") else {
-            call.reject("缺少 instanceId 参数")
-            return
-        }
-        _ = deleteSecretKey(key: "auth_\(instanceId)_user")
-        _ = deleteSecretKey(key: "auth_\(instanceId)_pass")
-        call.resolve(["success": true])
-    }
-
-    @objc func pickDirectory(_ call: CAPPluginCall) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.pendingPickerCall = call
-            self.pendingPickerAction = "dir"
-
-            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
-            picker.delegate = self
-            picker.allowsMultipleSelection = false
-            picker.modalPresentationStyle = .formSheet
-
-            let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let marker = docsUrl.appendingPathComponent("native-picker-presented.txt")
-            try? "dir_picker".write(to: marker, atomically: true, encoding: .utf8)
-
-            let presenter = self.bridge?.viewController ?? UIApplication.shared.windows.first?.rootViewController
-            presenter?.present(picker, animated: true)
+    private func completeView(_ call: CAPPluginCall, _ result: Result<Void, Error>) {
+        switch result {
+        case .success: call.resolve(["success": true])
+        case .failure(let error): call.reject(error.localizedDescription)
         }
     }
-
-    @objc func pickImage(_ call: CAPPluginCall) {
-        let instanceId = call.getString("instanceId") ?? "default"
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.pendingPickerCall = call
-            self.pendingPickerAction = "image"
-            self.pendingInstanceId = instanceId
-
-            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.image, .jpeg, .png], asCopy: true)
-            picker.delegate = self
-            picker.allowsMultipleSelection = false
-            picker.modalPresentationStyle = .formSheet
-
-            let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let marker = docsUrl.appendingPathComponent("native-picker-presented.txt")
-            try? "image_picker".write(to: marker, atomically: true, encoding: .utf8)
-
-            let presenter = self.bridge?.viewController ?? UIApplication.shared.windows.first?.rootViewController
-            presenter?.present(picker, animated: true)
-        }
-    }
-
-    @objc func pickZipFile(_ call: CAPPluginCall) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.pendingPickerCall = call
-            self.pendingPickerAction = "zip"
-
-            var contentTypes: [UTType] = [.zip]
-            if let customZip = UTType(filenameExtension: "zip") {
-                contentTypes.append(customZip)
-            }
-            let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: true)
-            picker.delegate = self
-            picker.allowsMultipleSelection = false
-            picker.modalPresentationStyle = .formSheet
-
-            let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let marker = docsUrl.appendingPathComponent("native-picker-presented.txt")
-            try? "zip_picker".write(to: marker, atomically: true, encoding: .utf8)
-
-            let presenter = self.bridge?.viewController ?? UIApplication.shared.windows.first?.rootViewController
-            presenter?.present(picker, animated: true)
-        }
-    }
-
-    @objc func saveTextFile(_ call: CAPPluginCall) {
-        guard let content = call.getString("content") else {
-            call.reject("缺少文件内容")
-            return
-        }
-        let fileName = call.getString("fileName") ?? "sillyclient-export.txt"
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            let tempUrl = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-            try? FileManager.default.removeItem(at: tempUrl)
+    @objc func enterImmersive(_ call: CAPPluginCall) {
+        guard call.getString("instanceId") != nil else { openExternalUrl(call); return }
+        DispatchQueue.main.async {
             do {
-                try content.write(to: tempUrl, atomically: true, encoding: .utf8)
-                let picker = UIDocumentPickerViewController(forExporting: [tempUrl], asCopy: true)
-                picker.delegate = self
-                self.pendingPickerCall = call
-                self.pendingPickerAction = "save"
-
-                let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-                let marker = docsUrl.appendingPathComponent("native-picker-presented.txt")
-                try? "save_picker".write(to: marker, atomically: true, encoding: .utf8)
-
-                let presenter = self.bridge?.viewController ?? UIApplication.shared.windows.first?.rootViewController
-                presenter?.present(picker, animated: true)
-            } catch {
-                call.reject("生成临时导出文件失败: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    @objc func dismissPickerForTesting(_ call: CAPPluginCall) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            let presenter = self.bridge?.viewController ?? UIApplication.shared.windows.first?.rootViewController
-            presenter?.dismiss(animated: true) {
-                if let mockPath = call.getString("mockPath") {
-                    let size = call.getInt("sizeBytes") ?? 2048
-                    if self.pendingPickerAction == "zip" {
-                        self.pendingPickerCall?.resolve(["path": mockPath, "sizeBytes": size])
-                    } else if self.pendingPickerAction == "dir" {
-                        self.pendingPickerCall?.resolve(["name": (mockPath as NSString).lastPathComponent, "path": mockPath])
-                    } else if self.pendingPickerAction == "image" {
-                        self.pendingPickerCall?.resolve(["path": mockPath, "url": "file://\(mockPath)"])
-                    } else {
-                        self.pendingPickerCall?.resolve(["success": true])
+                let instance = try self.id(call)
+                let url = try IOSNavigationPolicy.validatedURL(call.getString("url") ?? "")
+                let local = (try? self.store.directory(instance)) != nil
+                if local {
+                    let status = NodeRunner.shared.status
+                    guard status["serverReady"] as? Bool == true, status["instanceId"] as? String == instance,
+                          let current = URL(string: status["url"] as? String ?? ""),
+                          IOSNavigationPolicy.sameOrigin(current, url) else {
+                        throw IOSFileError.invalid("The requested local Tavern session is not ready")
                     }
-                } else {
-                    self.pendingPickerCall?.resolve(["success": true, "cancelled": true])
                 }
-                self.pendingPickerCall = nil
-                call.resolve(["dismissed": true])
+                self.show(instance: instance, url: url, remote: !local, hint: call.getBool("showGestureHint") ?? true) {
+                    self.completeView(call, $0)
+                }
+            } catch { call.reject(error.localizedDescription) }
+        }
+    }
+    @objc func openExternalUrl(_ call: CAPPluginCall) {
+        do {
+            let url = try IOSNavigationPolicy.validatedURL(call.getString("url") ?? "")
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:]) { opened in
+                    if opened { call.resolve(["success": true]) } else { call.reject("System browser could not open this URL") }
+                }
+            }
+        } catch { call.reject(error.localizedDescription) }
+    }
+    @objc func exitImmersive(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { TavernViewController.shared.exitImmersive(); call.resolve(["success": true]) }
+    }
+    @objc func returnToTavern(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            do {
+                let status = NodeRunner.shared.status
+                if status["serverReady"] as? Bool == true, let instance = status["instanceId"] as? String,
+                   let url = URL(string: status["url"] as? String ?? "") {
+                    self.show(instance: instance, url: url, remote: false) { self.completeView(call, $0) }
+                } else if let session = self.viewSession, session.2 {
+                    self.show(instance: session.0, url: session.1, remote: true) { self.completeView(call, $0) }
+                } else {
+                    throw IOSFileError.invalid("No ready Tavern session exists")
+                }
+            } catch { call.reject(error.localizedDescription) }
+        }
+    }
+    @objc func closeTavern(_ call: CAPPluginCall) { stop(call) }
+    @objc func stop(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            if NodeRunner.shared.status["instanceId"] == nil,
+               let remote = self.pendingViewSession ?? self.viewSession, remote.2 {
+                if call.getString("operationId") != nil
+                    || (call.getString("instanceId") != nil && call.getString("instanceId") != remote.0) {
+                    call.reject("The requested remote session is no longer current"); return
+                }
+                self.viewGeneration += 1
+                self.pendingViewSession = nil
+                self.viewSession = nil
+                TavernViewController.shared.clearTavernSession()
+                call.resolve(["success": true])
+                return
+            }
+            let generation = self.viewGeneration
+            NodeRunner.shared.stop(instance: call.getString("instanceId"), operation: call.getString("operationId")) { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success:
+                        if self.viewGeneration == generation {
+                            self.viewGeneration += 1
+                            self.pendingViewSession = nil
+                            self.viewSession = nil
+                            TavernViewController.shared.clearTavernSession()
+                        }
+                        if NodeRunner.shared.status["serverReady"] as? Bool != true { KeepAliveService.shared.stop() }
+                        call.resolve(["success": true])
+                    case .failure(let error): call.reject(error.localizedDescription)
+                    }
+                }
             }
         }
     }
-
+    @objc func getLogs(_ call: CAPPluginCall) {
+        call.resolve(["logs": NodeRunner.shared.getLogs(limit: call.getInt("limit") ?? 200, instance: call.getString("instanceId"))])
+    }
     @objc func sendCommand(_ call: CAPPluginCall) {
-        let text = call.getString("text") ?? ""
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            let lower = trimmed.lowercased()
-            if lower == "gc" {
-                NodeRunner.shared.triggerGarbageCollection()
-                let msg = "[Console] 已触发 V8 垃圾回收 (Garbage Collection)"
-                NodeRunner.shared.appendLog(msg)
-                notifyListeners("log", data: ["message": msg, "level": "info"])
-            } else if lower == "status" {
-                let status = NodeRunner.shared.isRunning ? "运行中 (Port: 8000)" : "已停止"
-                let msg = "[Console] iOS NodeMobile 运行状态: \(status)"
-                NodeRunner.shared.appendLog(msg)
-                notifyListeners("log", data: ["message": msg, "level": "info"])
-            } else if lower == "help" {
-                let msg = "[Console] iOS 沙盒可用指令: status (查看状态), gc (主动垃圾回收)"
-                NodeRunner.shared.appendLog(msg)
-                notifyListeners("log", data: ["message": msg, "level": "info"])
-            } else {
-                let msg = "[Console] \(trimmed)"
-                NodeRunner.shared.appendLog(msg)
-                notifyListeners("log", data: ["message": msg, "level": "info"])
-            }
+        let command = (call.getString("text") ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let current = NodeRunner.shared.status
+        let message: String
+        switch command {
+        case "status": message = "iOS NodeMobile: \(current["state"] ?? "unknown"), port \(current["port"] ?? 0)"
+        case "gc": NodeRunner.shared.triggerGarbageCollection(); message = "Host and worker garbage collection requested"
+        case "help": message = "Supported iOS commands: status, gc, help"
+        default: call.reject("Arbitrary shell commands are unsupported on iOS"); return
         }
+        NodeRunner.shared.appendLog(message, instance: current["instanceId"] as? String ?? "runtime",
+                                    operation: current["operationId"] as? String ?? "")
         call.resolve(["success": true])
     }
-
     @objc func reloadTavern(_ call: CAPPluginCall) {
-        call.resolve(["success": true])
+        DispatchQueue.main.async {
+            if TavernViewController.shared.reloadTavern() { call.resolve(["success": true]) }
+            else { call.reject("No Tavern page is loaded") }
+        }
     }
-
+    @objc func setPullToRefresh(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            if TavernViewController.shared.setPullToRefresh(call.getBool("enabled") ?? false) { call.resolve(["success": true]) }
+            else { call.reject("Tavern WebView is unavailable") }
+        }
+    }
     @objc func clearWebViewData(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
-            WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: Date.distantPast) {
+            self.viewGeneration += 1
+            let generation = self.viewGeneration
+            self.pendingViewSession = nil
+            self.viewSession = nil
+            WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {
+                if self.viewGeneration == generation { TavernViewController.shared.clearTavernSession() }
                 call.resolve(["success": true])
             }
         }
     }
-
-    @objc func setPullToRefresh(_ call: CAPPluginCall) {
-        call.resolve(["success": true])
+    @objc func getContentOpenMode(_ call: CAPPluginCall) {
+        call.resolve(["mode": UserDefaults.standard.string(forKey: "contentOpenMode") ?? "webview"])
     }
-
-    @objc func uninstallInstance(_ call: CAPPluginCall) {
-        let rawId = call.getString("instanceId") ?? ""
-        let safeId = normalizeInstanceId(rawId)
-        let dataPath = resolveInstanceDataPath(instanceId: safeId)
-        let fm = FileManager.default
-        var freed: Int64 = 0
-        if fm.fileExists(atPath: dataPath) {
-            freed = calculateDirectorySize(at: dataPath)
-            try? fm.removeItem(atPath: dataPath)
+    @objc func setContentOpenMode(_ call: CAPPluginCall) {
+        guard let mode = call.getString("mode"), ["webview", "browser"].contains(mode) else { call.reject("Invalid content open mode"); return }
+        UserDefaults.standard.set(mode, forKey: "contentOpenMode")
+        call.resolve(["mode": mode])
+    }
+    @objc func setRemoteBasicAuth(_ call: CAPPluginCall) {
+        perform(call) {
+            let instance = try self.id(call)
+            try IOSRemoteCredentials.save(instance, username: call.getString("username") ?? "", password: call.getString("password"))
+            return ["configured": true, "username": call.getString("username") ?? ""]
         }
-        call.resolve(["success": true, "freedBytes": freed])
     }
-
-    @objc func cleanGarbage(_ call: CAPPluginCall) {
-        call.resolve(["items": [], "totalBytes": 0])
+    @objc func getRemoteBasicAuthStatus(_ call: CAPPluginCall) {
+        perform(call) { try IOSRemoteCredentials.status(self.id(call)) }
     }
-
-    @objc func deleteGarbageItem(_ call: CAPPluginCall) {
-        call.resolve(["success": true])
-    }
-
-    @objc func openFilesApp(_ call: CAPPluginCall) {
-        let documentsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        guard let sharedUrl = URL(string: "shareddocuments://\(documentsUrl.path)") else {
-            call.reject("生成文件 App URL 失败")
-            return
-        }
-        DispatchQueue.main.async {
-            if UIApplication.shared.canOpenURL(sharedUrl) {
-                UIApplication.shared.open(sharedUrl, options: [:]) { success in
-                    call.resolve(["success": success])
+    @objc func clearRemoteBasicAuth(_ call: CAPPluginCall) {
+        io.async {
+            do {
+                let instance = try self.id(call)
+                try IOSRemoteCredentials.clear(instance)
+                DispatchQueue.main.async {
+                    if let current = self.viewSession, current.2, current.0 == instance {
+                        TavernViewController.shared.clearRemoteCredentials()
+                    }
+                    call.resolve(["success": true])
                 }
-            } else {
-                call.resolve(["success": true])
+            } catch { call.reject(error.localizedDescription) }
+        }
+    }
+    @objc func pingUrl(_ call: CAPPluginCall) {
+        do {
+            let url = try IOSNavigationPolicy.validatedURL(call.getString("url") ?? "")
+            var request = URLRequest(url: url)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 5
+            let suppliedUsername = call.getString("username")
+            let suppliedPassword = call.getString("password")
+            guard (suppliedUsername == nil) == (suppliedPassword == nil) else {
+                throw IOSFileError.invalid("Supply both username and password when verifying new credentials")
+            }
+            let stored = suppliedUsername == nil
+                ? try call.getString("instanceId").flatMap { try IOSRemoteCredentials.read($0, for: url) } : nil
+            let username = suppliedUsername ?? stored?.0
+            let password = suppliedPassword ?? stored?.1
+            if let username = username, let password = password {
+                request.setValue("Basic " + Data("\(username):\(password)".utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+            }
+            IOSBoundedHTTP.send(request, maximumBytes: 65536) { result in
+                let code: Int
+                switch result {
+                case .success(let response): code = response.0.statusCode
+                case .failure:
+                    call.resolve(["online": false, "statusCode": 0, "authRequired": false, "error": "Connection failed"])
+                    return
+                }
+                if (200..<300).contains(code),
+                   let username = suppliedUsername, let password = suppliedPassword {
+                    do { try IOSRemoteCredentials.recordVerifiedPreflight(url: url, username: username, password: password) }
+                    catch { call.reject(error.localizedDescription); return }
+                }
+                call.resolve(["online": (200..<300).contains(code), "statusCode": code,
+                    "authRequired": code == 401, "error": ""])
+            }
+        } catch { call.reject(error.localizedDescription) }
+    }
+    private func releases(_ path: String, completion: @escaping (Result<Any, Error>) -> Void) {
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(path)")!)
+        request.timeoutInterval = 15
+        request.setValue("SillyClient-iOS/\(version)", forHTTPHeaderField: "User-Agent")
+        IOSBoundedHTTP.send(request, maximumBytes: 2 * 1024 * 1024) { result in
+            do {
+                let (response, bytes) = try result.get()
+                guard response.statusCode == 200 else {
+                    throw IOSFileError.invalid("Release metadata could not be retrieved")
+                }
+                completion(.success(try JSONSerialization.jsonObject(with: bytes)))
+            } catch { completion(.failure(error)) }
+        }
+    }
+    @objc func fetchReleases(_ call: CAPPluginCall) {
+        releases("SillyTavern/SillyTavern/releases?per_page=15") { result in
+            switch result {
+            case .success(let value):
+                guard let list = value as? [[String: Any]] else { call.reject("Release metadata is invalid"); return }
+                call.resolve(["releases": list.map { ["tag": $0["tag_name"] ?? "", "zipballUrl": $0["zipball_url"] ?? "",
+                    "prerelease": $0["prerelease"] ?? false] }])
+            case .failure(let error): call.reject(error.localizedDescription)
             }
         }
     }
-
-    @objc func setSecret(_ call: CAPPluginCall) {
-        guard let key = call.getString("key"), let value = call.getString("value") else {
-            call.reject("缺少参数")
-            return
-        }
-        let ok = saveSecret(key: key, value: value)
-        call.resolve(["success": ok])
-    }
-
-    @objc func getSecret(_ call: CAPPluginCall) {
-        guard let key = call.getString("key") else {
-            call.reject("缺少参数")
-            return
-        }
-        let val = loadSecret(key: key)
-        call.resolve(["value": val ?? NSNull()])
-    }
-
-    @objc func deleteSecret(_ call: CAPPluginCall) {
-        guard let key = call.getString("key") else {
-            call.reject("缺少参数")
-            return
-        }
-        let ok = deleteSecretKey(key: key)
-        call.resolve(["success": ok])
-    }
-
     @objc func checkUpdate(_ call: CAPPluginCall) {
-        call.resolve([
-            "currentVersion": "1.9.2",
-            "latestVersion": "1.9.2",
-            "updateAvailable": false
-        ])
-    }
-
-    // MARK: - Private Keychain Helpers
-    private func saveSecret(key: String, value: String) -> Bool {
-        guard let data = value.data(using: .utf8) else { return false }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: key,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
-        SecItemDelete(query as CFDictionary)
-        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
-    }
-
-    private func loadSecret(key: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: key,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-           let data = result as? Data,
-           let str = String(data: data, encoding: .utf8) {
-            return str
+        releases("CAPTCHAAAAA/SillyClient/releases/latest") { result in
+            switch result {
+            case .success(let value):
+                guard let metadata = value as? [String: Any], let raw = metadata["tag_name"] as? String else {
+                    call.reject("Application release metadata is invalid"); return
+                }
+                let latest = raw.replacingOccurrences(of: "^v+", with: "", options: .regularExpression)
+                call.resolve(["currentVersion": self.version, "latestVersion": latest,
+                    "updateAvailable": self.version.compare(latest, options: .numeric) == .orderedAscending,
+                    "releaseUrl": metadata["html_url"] ?? "", "publishedAt": metadata["published_at"] ?? ""])
+            case .failure(let error): call.reject(error.localizedDescription)
+            }
         }
-        return nil
+    }
+    @objc func migrateInstance(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            do {
+                let instance = try self.id(call)
+                let operation = try IOSInstanceStore.identity(call.getString("operationId") ?? UUID().uuidString)
+                guard let source = call.getString("sourcePath") else { throw IOSFileError.invalid("Migration source is required") }
+                try self.reserveLocal(instance: instance, operation: operation)
+                let scoped = self.scopedDirectories.removeValue(forKey: source)
+                self.io.async {
+                    defer { scoped?.stopAccessingSecurityScopedResource() }
+                    do {
+                        let target = try self.store.migrate(instance: instance, operation: operation, sourcePath: source,
+                            targetPath: call.getString("targetPath"), installPathMode: call.getString("installPathMode"),
+                            mode: call.getString("mode") ?? "copy",
+                            includeSecrets: call.getBool("includeSecrets") ?? false, preinstall: call.getObject("preinstall"),
+                            scopedSource: scoped)
+                        NodeRunner.shared.stop(instance: instance, operation: operation) { _ in
+                            call.resolve(["success": true, "instanceId": instance, "targetPath": target.path])
+                        }
+                    } catch {
+                        NodeRunner.shared.failProvision(instance: instance, operation: operation, error: error)
+                        call.reject(error.localizedDescription)
+                    }
+                }
+            } catch { call.reject(error.localizedDescription) }
+        }
+    }
+    @objc func uninstallInstance(_ call: CAPPluginCall) { perform(call) { try self.store.uninstall(self.id(call), installPath: call.getString("installPath")) } }
+    @objc func scanInstanceMaintenance(_ call: CAPPluginCall) { perform(call) { try IOSInstanceMaintenance.shared.scan(self.id(call)) } }
+    @objc func applyInstanceMaintenance(_ call: CAPPluginCall) {
+        perform(call) {
+            guard let scan = call.getString("scanId"), let items = call.getArray("items") as? [[String: Any]] else {
+                throw IOSFileError.invalid("A maintenance plan and exact selections are required")
+            }
+            return try IOSInstanceMaintenance.shared.apply(instance: self.id(call), scanId: scan, selections: items)
+        }
+    }
+    @objc func listInstanceMaintenanceRecovery(_ call: CAPPluginCall) { perform(call) { try IOSInstanceMaintenance.shared.list(self.id(call)) } }
+    @objc func restoreInstanceMaintenance(_ call: CAPPluginCall) {
+        perform(call) {
+            guard let recovery = call.getString("recoveryId"), let token = call.getString("token") else {
+                throw IOSFileError.invalid("A recovery identity and token are required")
+            }
+            return try IOSInstanceMaintenance.shared.restore(instance: self.id(call), recovery: recovery, token: token)
+        }
+    }
+    @objc func cleanGarbage(_ call: CAPPluginCall) {
+        guard call.getBool("dryRun") == true else { call.reject("Use stopped-instance maintenance for supported cleanup"); return }
+        call.resolve(["items": [], "totalBytes": 0, "warnings": ["Global garbage deletion is unsupported on iOS"]])
+    }
+    @objc func deleteGarbageItem(_ call: CAPPluginCall) { call.reject("Arbitrary path deletion is unsupported; use a maintenance token") }
+    @objc func setSecret(_ call: CAPPluginCall) { call.reject("Generic secret access is unsupported; use secure remote authentication") }
+    @objc func getSecret(_ call: CAPPluginCall) { call.reject("Generic secret access is unsupported; credentials are never returned to JavaScript") }
+    @objc func deleteSecret(_ call: CAPPluginCall) { call.reject("Use clearRemoteBasicAuth for managed credentials") }
+    @objc func openFilesApp(_ call: CAPPluginCall) {
+        var components = URLComponents()
+        components.scheme = "shareddocuments"
+        components.path = store.documents.path
+        guard let url = components.url else { call.reject("Files URL could not be constructed"); return }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url, options: [:]) { opened in
+                if opened { call.resolve(["success": true]) } else { call.reject("Files app could not open the Documents directory") }
+            }
+        }
     }
 
-    private func deleteSecretKey(key: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: key
-        ]
-        return SecItemDelete(query as CFDictionary) == errSecSuccess
+    private func presentPicker(_ call: CAPPluginCall, action: String, types: [UTType], exporting: URL? = nil) {
+        DispatchQueue.main.async {
+            guard self.pendingPickerCall == nil, let presenter = self.bridge?.viewController,
+                  presenter.presentedViewController == nil, presenter.view.window != nil else {
+                call.reject("Another picker is active or the presenter is unavailable"); return
+            }
+            let picker = exporting.map { UIDocumentPickerViewController(forExporting: [$0], asCopy: true) }
+                ?? UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: action != "dir")
+            picker.delegate = self
+            picker.allowsMultipleSelection = false
+            self.pendingPickerCall = call
+            self.pendingPickerAction = action
+            self.pendingInstanceId = call.getString("instanceId") ?? "default"
+            presenter.present(picker, animated: true)
+        }
     }
-
-    // MARK: - UIDocumentPickerDelegate
+    @objc func pickDirectory(_ call: CAPPluginCall) {
+        guard call.getString("purpose") == nil || ["installation", "source"].contains(call.getString("purpose") ?? "") else {
+            call.reject("Unsupported directory picker purpose"); return
+        }
+        presentPicker(call, action: call.getString("purpose") == "installation" ? "installDir" : "dir", types: [.folder])
+    }
+    @objc func pickZipFile(_ call: CAPPluginCall) { presentPicker(call, action: "zip", types: [.zip]) }
+    @objc func pickImage(_ call: CAPPluginCall) {
+        do { _ = try id(call); presentPicker(call, action: "image", types: [.image]) }
+        catch { call.reject(error.localizedDescription) }
+    }
+    @objc func readTextFile(_ call: CAPPluginCall) {
+        if let path = call.getString("path") {
+            perform(call) {
+                let url = try self.store.files.checked(URL(fileURLWithPath: path))
+                guard let content = String(data: try self.store.files.data(url, maximum: 2 * 1024 * 1024), encoding: .utf8) else {
+                    throw IOSFileError.invalid("Text file is not valid UTF-8")
+                }
+                return ["content": content, "fileName": url.lastPathComponent]
+            }
+        } else { presentPicker(call, action: "readText", types: [.json, .plainText, .text]) }
+    }
+    @objc func saveTextFile(_ call: CAPPluginCall) {
+        io.async {
+            do {
+            guard let content = call.getString("content"), content.utf8.count <= 2 * 1024 * 1024,
+                  let name = call.getString("fileName"), name.count <= 160, name != "." && name != "..",
+                  name.range(of: "^[A-Za-z0-9_. -]+$", options: .regularExpression) != nil else {
+                throw IOSFileError.invalid("Invalid or oversized text export")
+            }
+            let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            let files = IOSManagedFiles(root: root)
+            let directory = root.appendingPathComponent("sillyclient-export-\(UUID().uuidString)")
+            try files.createDirectory(directory)
+            let target = directory.appendingPathComponent(name)
+            try files.write(Data(content.utf8), to: target, replace: false)
+            self.presentPicker(call, action: "save", types: [], exporting: target)
+            } catch { call.reject(error.localizedDescription) }
+        }
+    }
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        guard let url = urls.first else {
-            pendingPickerCall?.reject("未选择文件")
-            pendingPickerCall = nil
+        guard let call = pendingPickerCall, let selected = urls.first else { pendingPickerCall?.reject("No file was selected"); pendingPickerCall = nil; return }
+        let action = pendingPickerAction
+        let instance = pendingInstanceId
+        pendingPickerCall = nil
+        if action == "save" { call.resolve(["success": true]); return }
+        if action == "installDir" {
+            io.async {
+                do {
+                    let root = try self.store.locations.select(selected)
+                    call.resolve(["name": root.lastPathComponent, "path": root.path, "installPathMode": "root",
+                        "runtimeLocation": "selected", "persistentAuthorization": true])
+                } catch { call.reject(error.localizedDescription) }
+            }
             return
         }
-
-        let shouldStop = url.startAccessingSecurityScopedResource()
-        defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
-
-        let fileManager = FileManager.default
-        let tempDir = fileManager.temporaryDirectory
-
-        if pendingPickerAction == "zip" {
-            let destUrl = tempDir.appendingPathComponent(url.lastPathComponent)
-            try? fileManager.removeItem(at: destUrl)
-            do {
-                try fileManager.copyItem(at: url, to: destUrl)
-                let attrs = try? fileManager.attributesOfItem(atPath: destUrl.path)
-                let size = (attrs?[.size] as? Int64) ?? 0
-                pendingPickerCall?.resolve(["path": destUrl.path, "sizeBytes": size])
-            } catch {
-                pendingPickerCall?.reject("读取 ZIP 文件失败: \(error.localizedDescription)")
+        let scoped = selected.startAccessingSecurityScopedResource()
+        let source = selected.resolvingSymlinksInPath()
+        if action == "dir" {
+            guard scopedDirectories.count < 8 else { if scoped { selected.stopAccessingSecurityScopedResource() }; call.reject("Too many pending directory imports"); return }
+            if scoped {
+                scopedDirectories.removeValue(forKey: source.path)?.stopAccessingSecurityScopedResource()
+                scopedDirectories[source.path] = selected
             }
-        } else if pendingPickerAction == "dir" {
-            pendingPickerCall?.resolve(["name": url.lastPathComponent, "path": url.path])
-        } else if pendingPickerAction == "image" {
-            let docsUrl = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let coversDir = docsUrl.appendingPathComponent("covers")
-            try? fileManager.createDirectory(at: coversDir, withIntermediateDirectories: true)
-            let destUrl = coversDir.appendingPathComponent("\(pendingInstanceId).jpg")
-            try? fileManager.removeItem(at: destUrl)
-            do {
-                try fileManager.copyItem(at: url, to: destUrl)
-                pendingPickerCall?.resolve(["path": destUrl.path, "url": "file://\(destUrl.path)"])
-            } catch {
-                pendingPickerCall?.reject("保存封面图失败: \(error.localizedDescription)")
-            }
-        } else {
-            pendingPickerCall?.resolve(["success": true])
+            call.resolve(["name": source.lastPathComponent, "path": source.path])
+            return
         }
-        pendingPickerCall = nil
+        io.async {
+            defer { if scoped { selected.stopAccessingSecurityScopedResource() } }
+            do {
+                let sourceFiles = IOSManagedFiles(root: source.deletingLastPathComponent())
+                if action == "readText" {
+                    guard let content = String(data: try sourceFiles.data(source, maximum: 2 * 1024 * 1024), encoding: .utf8) else {
+                        throw IOSFileError.invalid("Text file is not valid UTF-8")
+                    }
+                    call.resolve(["content": content, "fileName": source.lastPathComponent])
+                    return
+                }
+                let maximum = action == "image" ? 16 * 1024 * 1024 : 256 * 1024 * 1024
+                let sourceGuard = try sourceFiles.guardValue(source)
+                guard !sourceGuard.isDirectory, sourceGuard.size >= 0, sourceGuard.size <= maximum else {
+                    throw IOSFileError.invalid("Selected file exceeds its size limit")
+                }
+                let root = action == "image" ? self.store.documents
+                    : FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                let files = IOSManagedFiles(root: root)
+                let destination = action == "image" ? root.appendingPathComponent("covers/\(try IOSInstanceStore.identity(instance))-\(UUID().uuidString).\(source.pathExtension)")
+                    : root.appendingPathComponent("sillyclient-import-\(UUID().uuidString).zip")
+                try files.createDirectory(destination.deletingLastPathComponent())
+                try sourceFiles.copyTree(source, to: destination, destination: files,
+                                         budget: IOSInspectionBudget(maxEntries: 1, maxBytes: Int64(maximum)))
+                call.resolve(["path": destination.path, "url": destination.absoluteString, "sizeBytes": sourceGuard.size])
+            } catch { call.reject(error.localizedDescription) }
+        }
     }
-
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        pendingPickerCall?.reject("用户取消了选择")
+        pendingPickerCall?.reject("Selection cancelled")
         pendingPickerCall = nil
     }
+    #if DEBUG
+    @objc func dismissPickerForTesting(_ call: CAPPluginCall) {
+        guard ProcessInfo.processInfo.arguments.contains("--sillyclient-test") else { call.reject("Test harness is not enabled"); return }
+        DispatchQueue.main.async {
+            self.pendingPickerCall?.reject("Test cancelled the picker")
+            self.pendingPickerCall = nil
+            self.bridge?.viewController?.dismiss(animated: false)
+            call.resolve(["dismissed": true])
+        }
+    }
+    #endif
 }

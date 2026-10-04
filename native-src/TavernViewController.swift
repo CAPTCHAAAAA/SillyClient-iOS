@@ -47,6 +47,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
     private var credentialOrigin: URL?
     private var credentials: URLCredential?
     private var pullRefreshControl: UIRefreshControl?
+    private var pullToRefreshEnabled = false
 
     public override var prefersStatusBarHidden: Bool {
         return isTavernActive
@@ -143,6 +144,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
         wv.isHidden = true
         view.addSubview(wv)
         self.tavernWebView = wv
+        _ = setPullToRefresh(pullToRefreshEnabled)
 
         self.chameleonEngine = ChameleonEngine(webView: wv)
 
@@ -328,7 +330,8 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     public func setPullToRefresh(_ enabled: Bool) -> Bool {
-        guard let scrollView = tavernWebView?.scrollView else { return false }
+        pullToRefreshEnabled = enabled
+        guard let scrollView = tavernWebView?.scrollView else { return true }
         if enabled {
             if pullRefreshControl == nil {
                 let control = UIRefreshControl()

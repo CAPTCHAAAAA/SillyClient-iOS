@@ -37,6 +37,8 @@ CAP_PLUGIN(TarvenEnvPlugin, "TarvenEnv",
     CAP_PLUGIN_METHOD(setSecret, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(getSecret, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(deleteSecret, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(readTextFile, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(migrateInstance, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(checkUpdate, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(dismissPickerForTesting, CAPPluginReturnPromise);
 )

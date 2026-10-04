@@ -225,7 +225,11 @@ jobs:
           raise 'Incorrect linked Keychain group' unless linked['keychain-access-groups'] == [identity]
           raise 'Linked simulator entitlements differ from the source' unless linked == expected
           VERIFY
+          node scripts/simulator-recorder.mjs "$DEVICE_UUID" evidence &
+          RECORDER_PID=$!
           node scripts/run-ios-e2e.mjs "$DEVICE_UUID" "$APP_PATH"
+          kill -INT $RECORDER_PID 2>/dev/null || true
+          wait $RECORDER_PID 2>/dev/null || true
 
       - name: Upload the unsigned build archive
         if: always()

@@ -42,8 +42,12 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
     public private(set) var currentKeyboardHeight: CGFloat = 0
 
     // 状态
-    private var isTavernActive = false
+    public private(set) var isTavernActive = false
     private var currentTavernUrl: URL?
+    private var credentialOrigin: URL?
+    private var credentials: URLCredential?
+    private var pullRefreshControl: UIRefreshControl?
+    private var pullToRefreshEnabled = false
 
     public override var prefersStatusBarHidden: Bool {
         return isTavernActive
@@ -140,6 +144,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
         wv.isHidden = true
         view.addSubview(wv)
         self.tavernWebView = wv
+        _ = setPullToRefresh(pullToRefreshEnabled)
 
         self.chameleonEngine = ChameleonEngine(webView: wv)
 
@@ -235,9 +240,13 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
     /**
      * 进入酒馆全沉浸态 (由 TarvenEnvPlugin.enterImmersive 调用)
      */
-    public func enterImmersive(url: URL, showGestureHint: Bool = true) {
-        guard let wv = tavernWebView else { return }
-        let isAlreadyOnUrl = (currentTavernUrl == url && (wv.url == url || wv.url?.absoluteString == url.absoluteString))
+    @discardableResult
+    public func enterImmersive(url: URL, showGestureHint: Bool = true, username: String? = nil, password: String? = nil) -> Bool {
+        guard let validated = try? IOSNavigationPolicy.validatedURL(url.absoluteString),
+              let wv = tavernWebView else { return false }
+        let url = validated
+        updateRemoteCredentials(url: url, username: username, password: password)
+        let isAlreadyOnUrl = currentTavernUrl == url && wv.url.map { IOSNavigationPolicy.sameOrigin($0, url) } == true
         let isAlreadyLoadingSameUrl = (currentTavernUrl == url && wv.isLoading)
         currentTavernUrl = url
         isTavernActive = true
@@ -257,29 +266,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
                 }
             }
         } else if !isAlreadyLoadingSameUrl {
-            if url.scheme == "data" {
-                let fullStr = url.absoluteString
-                if let commaIndex = fullStr.range(of: ",")?.upperBound {
-                    let payload = String(fullStr[commaIndex...])
-                    if fullStr.contains(";base64,") {
-                        if let data = Data(base64Encoded: payload), let html = String(data: data, encoding: .utf8) {
-                            wv.loadHTMLString(html, baseURL: nil)
-                        } else {
-                            wv.load(URLRequest(url: url))
-                        }
-                    } else {
-                        let html = payload.removingPercentEncoding ?? payload
-                        wv.loadHTMLString(html, baseURL: nil)
-                    }
-                } else if let decoded = fullStr.removingPercentEncoding {
-                    let html = decoded.replacingOccurrences(of: "data:text/html;charset=utf-8,", with: "")
-                    wv.loadHTMLString(html, baseURL: nil)
-                } else {
-                    wv.load(URLRequest(url: url))
-                }
-            } else {
-                wv.load(URLRequest(url: url))
-            }
+            wv.load(URLRequest(url: url))
         }
 
         wv.isHidden = false
@@ -298,6 +285,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
             self.bottomScrimBar.alpha = 0.0
             self.consoleWebView?.alpha = 0.0
         }) { _ in
+            guard self.isTavernActive, self.currentTavernUrl == url else { return }
             self.consoleWebView?.isHidden = true
             self.startChameleon()
 
@@ -306,6 +294,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
                 self.showGestureHint()
             }
         }
+        return true
     }
 
     /**
@@ -327,10 +316,57 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
             self.topScrimBar.alpha = 0.0
             self.bottomScrimBar.alpha = 0.0
         }) { _ in
+            guard !self.isTavernActive else { return }
             self.tavernWebView?.isHidden = true
             self.topScrimBar.isHidden = true
             self.bottomScrimBar.isHidden = true
         }
+    }
+
+    public func reloadTavern() -> Bool {
+        guard currentTavernUrl != nil, let webView = tavernWebView, webView.url != nil else { return false }
+        webView.reload()
+        return true
+    }
+
+    public func setPullToRefresh(_ enabled: Bool) -> Bool {
+        pullToRefreshEnabled = enabled
+        guard let scrollView = tavernWebView?.scrollView else { return true }
+        if enabled {
+            if pullRefreshControl == nil {
+                let control = UIRefreshControl()
+                control.addTarget(self, action: #selector(refreshTavern(_:)), for: .valueChanged)
+                pullRefreshControl = control
+            }
+            scrollView.refreshControl = pullRefreshControl
+        } else {
+            pullRefreshControl?.endRefreshing()
+            scrollView.refreshControl = nil
+            pullRefreshControl = nil
+        }
+        return true
+    }
+
+    @objc private func refreshTavern(_ control: UIRefreshControl) {
+        if !reloadTavern() { control.endRefreshing() }
+    }
+
+    func updateRemoteCredentials(url: URL, username: String?, password: String?) {
+        credentialOrigin = username == nil ? nil : url
+        credentials = username.map { URLCredential(user: $0, password: password ?? "", persistence: .forSession) }
+    }
+
+    func clearRemoteCredentials() {
+        credentials = nil
+        credentialOrigin = nil
+    }
+
+    public func clearTavernSession() {
+        exitImmersive()
+        clearRemoteCredentials()
+        currentTavernUrl = nil
+        tavernWebView?.stopLoading()
+        tavernWebView?.loadHTMLString("", baseURL: nil)
     }
 
     private func showGestureHint() {
@@ -585,6 +621,59 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     // MARK: - WKNavigationDelegate
+    public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard webView == tavernWebView,
+              navigationAction.targetFrame?.isMainFrame == true || navigationAction.targetFrame == nil else {
+            decisionHandler(.allow)
+            return
+        }
+        if #available(iOS 14.5, *), navigationAction.shouldPerformDownload {
+            decisionHandler(.allow)
+            return
+        }
+        guard let destination = navigationAction.request.url else {
+            decisionHandler(.cancel)
+            return
+        }
+        if destination.absoluteString == "about:blank", currentTavernUrl == nil {
+            decisionHandler(.allow)
+        } else if (try? IOSNavigationPolicy.validatedURL(destination.absoluteString)) != nil,
+                  let current = currentTavernUrl, IOSNavigationPolicy.sameOrigin(current, destination) {
+            decisionHandler(.allow)
+        } else if let external = try? IOSNavigationPolicy.validatedURL(destination.absoluteString) {
+            decisionHandler(.cancel)
+            UIApplication.shared.open(external, options: [:])
+        } else {
+            decisionHandler(.cancel)
+        }
+    }
+
+    public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                        for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard let raw = navigationAction.request.url,
+              let destination = try? IOSNavigationPolicy.validatedURL(raw.absoluteString) else { return nil }
+        if let current = currentTavernUrl, IOSNavigationPolicy.sameOrigin(current, destination) {
+            webView.load(navigationAction.request)
+        } else if let external = try? IOSNavigationPolicy.validatedURL(destination.absoluteString) {
+            UIApplication.shared.open(external, options: [:])
+        }
+        return nil
+    }
+
+    public func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let space = challenge.protectionSpace
+        if space.authenticationMethod == NSURLAuthenticationMethodHTTPBasic,
+           challenge.previousFailureCount == 0, let origin = credentialOrigin, let credentials = credentials,
+           let requestOrigin = IOSNavigationPolicy.originURL(scheme: space.protocol ?? "https", host: space.host, port: space.port),
+           IOSNavigationPolicy.sameOrigin(origin, requestOrigin) {
+            completionHandler(.useCredential, credentials)
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         NSLog("[TavernViewController] didFailProvisionalNavigation: %@", error.localizedDescription)
         let nsErr = error as NSError
@@ -595,7 +684,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
         // 若因本地服务正在拉起连接被拒，1 秒后自动重试加载
         if isTavernActive, let url = currentTavernUrl {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self = self, self.isTavernActive else { return }
+                guard let self = self, self.isTavernActive, self.currentTavernUrl == url else { return }
                 if self.tavernWebView?.isLoading == false {
                     NSLog("[TavernViewController] Retrying loading SillyTavern URL: %@", url.absoluteString)
                     self.tavernWebView?.load(URLRequest(url: url))
@@ -615,6 +704,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         NSLog("[TavernViewController] didFinish navigation: %@", webView.url?.absoluteString ?? "")
         if webView == self.tavernWebView {
+            pullRefreshControl?.endRefreshing()
             let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
             let loadedFile = docsUrl.appendingPathComponent("tavern-rendered.txt")
             try? "loaded".write(to: loadedFile, atomically: true, encoding: .utf8)
@@ -732,7 +822,13 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
         NSLog("[TavernViewController] requestMediaCapturePermissionFor type: \(type.rawValue), origin: \(origin.host)")
-        decisionHandler(.grant)
+        guard let current = currentTavernUrl,
+              let requested = IOSNavigationPolicy.originURL(scheme: origin.protocol, host: origin.host, port: origin.port),
+              IOSNavigationPolicy.sameOrigin(current, requested) else {
+            decisionHandler(.deny)
+            return
+        }
+        decisionHandler(.prompt)
     }
 
     // MARK: - UIDocumentPickerDelegate & Testing
@@ -758,6 +854,41 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
             let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
             let marker = docsUrl.appendingPathComponent("native-picker-presented.txt")
             try? "tavern_picker".write(to: marker, atomically: true, encoding: .utf8)
+        }
+    }
+
+    public func presentExportSheetForTesting() {
+        let tempDir = FileManager.default.temporaryDirectory
+        let exportUrl = tempDir.appendingPathComponent("SillyTavern-Export-Chat.json")
+        let jsonSample = """
+        {
+          "character": "Seraphina",
+          "exportDate": "2026-09-24",
+          "model": "deepseek-chat",
+          "mes": [
+            { "user": "User", "text": "你好！" },
+            { "character": "Seraphina", "text": "你好，旅行者！欢迎来到酒馆。" }
+          ]
+        }
+        """
+        try? jsonSample.write(to: exportUrl, atomically: true, encoding: .utf8)
+        let activityVC = UIActivityViewController(activityItems: [exportUrl], applicationActivities: nil)
+        if let popover = activityVC.popoverPresentationController {
+            popover.sourceView = self.view
+            popover.sourceRect = CGRect(x: self.view.bounds.midX, y: self.view.bounds.midY, width: 0, height: 0)
+        }
+        let presenter = self.presentedViewController ?? self
+        presenter.present(activityVC, animated: true) {
+            let docsUrl = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            let marker = docsUrl.appendingPathComponent("native-export-presented.txt")
+            try? "export_sheet_presented".write(to: marker, atomically: true, encoding: .utf8)
+        }
+    }
+
+    public func dismissActiveExportSheet() {
+        let presenter = self.presentedViewController ?? self
+        if let act = presenter as? UIActivityViewController ?? presenter.presentedViewController as? UIActivityViewController {
+            act.dismiss(animated: true, completion: nil)
         }
     }
 }

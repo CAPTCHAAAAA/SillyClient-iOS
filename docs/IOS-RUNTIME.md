@@ -39,8 +39,46 @@ is published by an exclusive staging-directory rename; no incomplete
 `server.js` directory is silently treated as a prepared runtime.
 
 The supported runtime is the one prepared by this build. Arbitrary server
-versions, external takeover, and arbitrary custom destinations fail explicitly
-on iOS. Copy migration retains source files, selects their user-data root, and
+versions and external takeover fail explicitly on iOS. Installation paths are
+full absolute paths (or local, credential-free file URLs), not folder names or
+instance IDs. `installPathMode: root` appends the validated instance identity;
+`exact` uses the complete destination and is the default. A successful start
+returns its actual path in exact mode. A registered instance cannot silently
+move to another path.
+
+The installation directory picker uses `purpose: installation`, without
+changing source/import pickers. Documents-relative roots and registrations
+survive store recreation; external directories retain an iOS minimal bookmark
+and their approved root identity. A restored bookmark must resolve to that
+same local directory, retain its identity, and successfully start security-scoped
+access. Stale, moved, revoked, cloud-only, linked, overlapping, and unsupported
+locations fail explicitly, without provisioning an internal replacement.
+The external root selection coordinates its local capability probe and verifies
+exclusive creation, atomic rename, fsync-backed writes, and readback. This is
+not a claim that every third-party File Provider supports an uncoordinated,
+long-lived Node runtime, or that external provider behavior has been physically
+verified. Runtime roots requiring provider-mediated streaming or materialization
+are not an external-backup mode disguised as custom installation.
+
+Each operation owns a managed-file authority limited to its approved root.
+`NodeRunner` retains the security-scoped lease until confirmed Worker termination
+or failure; uncertain transport and failed stop keep it retained. The permanent
+supervisor validates operation-bound directory/data/config paths and root/server
+filesystem identities against the native private control mapping, rather than
+accepting a caller-provided allowed root. Staging and removal use exclusive
+same-parent paths, allowing same-volume commits outside Documents. A launcher
+ownership receipt permits recovery after registration failure without replacing
+runtime or user data. Scanning retains unavailable registered instances as
+unavailable; it does not silently drop them. Uninstall refuses arbitrary
+unregistered destinations and never removes a selected installation root.
+Maintenance and recovery use the same registered per-root authority.
+An existing runtime ignores persisted creation-only preinstallation selections,
+preserving installed extensions and settings instead of reapplying them on each
+start. Configuration updates reject unknown input keys and conflicting YAML
+mapping types without writing the original file. Unrelated mapping siblings are
+preserved, and heartbeat uses the cross-platform nonnegative signed-32-bit range.
+
+Copy migration retains source files, selects their user-data root, and
 streams only filtered data into a fresh pinned runtime. Old dependencies, Git
 metadata, and, unless explicitly selected, `secrets.json`/`secrets.json.enc`
 never enter the destination. Files are SHA-256 verified, cancellation is checked
@@ -163,8 +201,19 @@ archived unsigned Release IPA. Its capability-probe
 process never creates a production console or deploys an instance. Tests,
 source assertions, host fixtures, simulator acceptance, and physical-device
 acceptance are distinct evidence categories.
-The current harness contains 28 fixture groups, including full-capacity token
+The current harness contains 33 fixture groups, including full-capacity token
 recovery, flat/multi-user migration layouts, and captured-output event routing.
+Its five installation groups also cover absolute/root/exact paths, recreated
+stores, synthetic bookmark/scope failures and bounded lease ownership,
+registration recovery, custom copy migration, maintenance, and uninstall source/
+root/sibling preservation. External authorization in these fixtures is injected;
+it is not evidence that a physical device or a third-party provider was tested.
+The 24-stage hosted bridge driver registers a real sandbox-selected root through
+the Debug-only native selection service, starts the runtime there, preserves the
+same-process Worker restart stages, then relaunches the app and starts the same
+registered exact path. Copy migration and maintenance run under that selected
+root, and uninstall checks retained source and unrelated contents. The Debug
+selection action cannot grant access outside Documents and never ships in Release.
 The capacity regression also changes a restored record's phase in place while
 preserving its exact file guard, then checks overflow rejection and a fresh
 request's capacity accounting.

@@ -104,6 +104,19 @@ public final class IOSDebugHarness {
             respond(id, ["success": true, "result": result])
             return
         }
+        if request["action"] as? String == "installationRoot" {
+            do {
+                guard let options = request["options"] as? [String: Any], let path = options["path"] as? String else {
+                    throw IOSFileError.invalid("A synthetic sandbox installation root is required")
+                }
+                let store = IOSInstanceStore.shared
+                let selected = try store.files.checked(IOSInstallationLocations.path(path))
+                guard selected.path != store.documents.path else { throw IOSFileError.invalid("Select a test subdirectory") }
+                let root = try store.locations.select(selected)
+                respond(id, ["success": true, "result": ["path": root.path, "installPathMode": "root", "persistentAuthorization": true]])
+            } catch { respond(id, ["success": false, "error": error.localizedDescription]) }
+            return
+        }
         guard let webView = TavernViewController.shared.consoleWebView else {
             respond(id, ["success": false, "error": "Console WebView is unavailable"])
             return
