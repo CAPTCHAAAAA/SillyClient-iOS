@@ -229,9 +229,16 @@ jobs:
           VERIFY
           node scripts/simulator-recorder.mjs "$DEVICE_UUID" evidence &
           RECORDER_PID=$!
+          set +e
           node scripts/run-ios-e2e.mjs "$DEVICE_UUID" "$APP_PATH"
+          E2E_STATUS=$?
+          set -e
           kill -INT $RECORDER_PID 2>/dev/null || true
           wait $RECORDER_PID 2>/dev/null || true
+          if [ $E2E_STATUS -ne 0 ]; then
+            echo "E2E runner exited with error status: $E2E_STATUS"
+            exit $E2E_STATUS
+          fi
 
       - name: Upload the unsigned build archive
         if: always()

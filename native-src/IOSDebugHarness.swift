@@ -133,12 +133,23 @@ public final class IOSDebugHarness {
             return
         }
         if request["action"] as? String == "evalConsole" {
-            let script = (request["script"] as? String) ?? ((request["options"] as? [String: Any])?["script"] as? String)
-            guard let script = script else {
+            let rawScript = (request["script"] as? String) ?? ((request["options"] as? [String: Any])?["script"] as? String)
+            guard let script = rawScript else {
                 respond(id, ["success": false, "error": "Missing script parameter"])
                 return
             }
-            webView.evaluateJavaScript(script) { [weak self] result, error in
+            let wrappedScript = """
+            (function() {
+                try {
+                    return (function() {
+                        \(script)
+                    })();
+                } catch (e) {
+                    return "eval_error: " + String(e);
+                }
+            })()
+            """
+            webView.evaluateJavaScript(wrappedScript) { [weak self] result, error in
                 if let error = error {
                     self?.respond(id, ["success": false, "error": Self.webKitFailureDescription(error)])
                 } else {

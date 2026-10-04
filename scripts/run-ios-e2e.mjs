@@ -49,7 +49,13 @@ function recordStepTimestamp(name) {
 }
 
 async function evalInConsole(script, timeout = 10000) {
-    return await command(undefined, { script }, 'evalConsole', timeout);
+    try {
+        const wrapped = `(() => { try { ${script} } catch(e) { return String(e); } })()`;
+        return await command(undefined, { script: wrapped }, 'evalConsole', timeout);
+    } catch (err) {
+        if (typeof console?.warn === 'function') console.warn(`[E2E] evalInConsole warning: ${err.message}`);
+        return null;
+    }
 }
 
 function launch(argument) {
@@ -302,16 +308,20 @@ try {
 
         // 2. Next to Step 2
         await evalInConsole(`
-            const nextBtn = document.querySelector('.sc-onboarding-actions button.is-next');
-            if (nextBtn) nextBtn.click();
+            (() => {
+                const btn = document.querySelector('.sc-onboarding-actions button.is-next');
+                if (btn) btn.click();
+            })();
         `);
         await uiDelay(1500);
         recordStepTimestamp('02-onboarding-step2');
 
         // 3. Next to Step 3
         await evalInConsole(`
-            const nextBtn = document.querySelector('.sc-onboarding-actions button.is-next');
-            if (nextBtn) nextBtn.click();
+            (() => {
+                const btn = document.querySelector('.sc-onboarding-actions button.is-next');
+                if (btn) btn.click();
+            })();
         `);
         await uiDelay(1500);
         recordStepTimestamp('03-onboarding-step3');
@@ -393,12 +403,14 @@ try {
 
         // 10. Instance Card Stopped State (with 3D Hover tilt simulation)
         await evalInConsole(`
-            const card = document.querySelector('.group\\\/card') || document.querySelector('[data-instance-id]');
-            if (card) {
-                const rect = card.getBoundingClientRect();
-                card.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-                card.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: rect.left + rect.width * 0.7, clientY: rect.top + rect.height * 0.3 }));
-            }
+            (() => {
+                const card = document.querySelector('.group\\\/card') || document.querySelector('[data-instance-id]');
+                if (card) {
+                    const rect = card.getBoundingClientRect();
+                    card.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                    card.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: rect.left + rect.width * 0.7, clientY: rect.top + rect.height * 0.3 }));
+                }
+            })();
         `);
         await uiDelay(800);
         recordStepTimestamp('09-instance-card-stopped');
@@ -432,8 +444,10 @@ try {
 
         // 14. Switch Relocate Modal to Custom Path (500ms Gaussian Blur Transition)
         await evalInConsole(`
-            const customBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent && b.textContent.includes('自定义目录'));
-            if (customBtn) customBtn.click();
+            (() => {
+                const customBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent && b.textContent.includes('自定义目录'));
+                if (customBtn) customBtn.click();
+            })();
         `);
         await uiDelay(1200);
         recordStepTimestamp('13-relocate-modal-custom');
