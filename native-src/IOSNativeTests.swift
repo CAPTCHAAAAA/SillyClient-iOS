@@ -21,17 +21,27 @@ enum IOSNativeTests {
         try require(rejected, message)
     }
 
-    static func run() -> [String: Any] {
+    static func run(progress: (([String: Any]) -> Void)? = nil) -> [String: Any] {
         let parent = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .resolvingSymlinksInPath().appendingPathComponent("ios-test-fixtures-\(UUID().uuidString)")
         var results: [[String: Any]] = []
         func test(_ name: String, _ body: (URL, IOSManagedFiles) throws -> Void) {
             let root = parent.appendingPathComponent(UUID().uuidString)
-            do {
-                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-                try body(root, IOSManagedFiles(root: root))
-                results.append(["name": name, "passed": true])
-            } catch { results.append(["name": name, "passed": false, "error": error.localizedDescription]) }
+            let started = Date()
+            progress?(["currentGroup": name, "completedGroups": results.count, "results": results, "state": "running"])
+            autoreleasepool {
+                var result: [String: Any] = ["name": name, "passed": true]
+                do {
+                    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                    try body(root, IOSManagedFiles(root: root))
+                } catch {
+                    result["passed"] = false
+                    result["error"] = error.localizedDescription
+                }
+                result["elapsedMs"] = max(0, Int(Date().timeIntervalSince(started) * 1000))
+                results.append(result)
+            }
+            progress?(["currentGroup": name, "completedGroups": results.count, "results": results, "state": "completed"])
         }
         defer { try? FileManager.default.removeItem(at: parent) }
         test("Credential-free URL validation and origin boundaries") { _, _ in

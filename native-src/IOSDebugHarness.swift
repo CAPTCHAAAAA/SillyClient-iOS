@@ -94,11 +94,28 @@ public final class IOSDebugHarness {
               id != lastRequest else { return }
         lastRequest = id
         if request["action"] as? String == "nativeTests" {
-            respond(id, ["success": true, "result": IOSNativeTests.run()])
+            let result = IOSNativeTests.run { [weak self] progress in
+                guard let self = self else { return }
+                var report = progress
+                report["requestId"] = id
+                guard let data = try? JSONSerialization.data(withJSONObject: report) else { return }
+                try? data.write(to: self.directory.appendingPathComponent("native-module-progress.json"), options: .atomic)
+            }
+            respond(id, ["success": true, "result": result])
             return
         }
         guard let webView = TavernViewController.shared.consoleWebView else {
             respond(id, ["success": false, "error": "Console WebView is unavailable"])
+            return
+        }
+        if request["action"] as? String == "console" {
+            webView.evaluateJavaScript("({loggingEnabled: window.Capacitor?.isLoggingEnabled})") { [weak self] result, error in
+                if let error = error {
+                    self?.respond(id, ["success": false, "error": Self.webKitFailureDescription(error)])
+                } else {
+                    self?.respond(id, ["success": true, "result": result ?? NSNull()])
+                }
+            }
             return
         }
         if request["action"] as? String == "tavern" {

@@ -4,6 +4,12 @@ import Capacitor
 import SillyClientCore
 
 class SillyBridgeViewController: CAPBridgeViewController {
+    override func instanceDescriptor() -> InstanceDescriptor {
+        let descriptor = super.instanceDescriptor()
+        descriptor.loggingBehavior = .none
+        return descriptor
+    }
+
     override func capacitorDidLoad() {
         super.capacitorDidLoad()
         if let bridge = bridge {

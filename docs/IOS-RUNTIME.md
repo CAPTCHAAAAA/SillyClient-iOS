@@ -17,6 +17,10 @@ unframed host output belongs to the runtime, not whichever instance is current.
 Captured native/Capacitor diagnostics are stored without publishing a log event,
 preventing listener delivery output from feeding itself back into the console.
 Only validated Worker frames and explicit native business logs publish events.
+The native bridge disables Capacitor payload/console logging before its
+configuration is created, in Debug and Release alike. Imported text-file
+contents and native request options are not copied into the runtime log by
+framework diagnostic printing. Business and Worker log routing remains separate.
 Oversized lines and saturated output are discarded within explicit bounds.
 Native accepted log work is bounded through disk completion; this does not
 claim a global lifetime disk cap for all historical instance identities.
@@ -156,6 +160,12 @@ source assertions, host fixtures, simulator acceptance, and physical-device
 acceptance are distinct evidence categories.
 The current harness contains 27 fixture groups, including full-capacity token
 recovery, flat/multi-user migration layouts, and captured-output event routing.
+Each group persists its request-bound progress and elapsed time before the next
+group starts. The driver retains that report on failure and uses a bounded
+three-minute deadline for the complete filesystem-heavy native suite. This is
+diagnostic coverage, not a substitute for all groups completing successfully.
+The real bridge stage also checks that the injected Capacitor logging flag is
+false; an enabled or absent flag fails simulator verification.
 Debug bridge rejection envelopes retain bounded, redacted native diagnostics;
 oversized diagnostics fail closed without leaking a truncated credential.
 WebKit fallback reports only a sanitized domain and numeric code.

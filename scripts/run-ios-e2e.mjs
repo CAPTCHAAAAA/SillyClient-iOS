@@ -66,7 +66,20 @@ async function nativeRequest(method, options = {}, action = 'call', timeout = 10
         const temporary = path.join(directory, 'request.tmp');
         fs.writeFileSync(temporary, JSON.stringify({ id, action, method, options }));
         fs.renameSync(temporary, path.join(directory, 'request.json'));
-        return await waitForFile(path.join(directory, `${id}.json`), timeout);
+        try {
+            return await waitForFile(path.join(directory, `${id}.json`), timeout);
+        } catch (error) {
+            if (action === 'nativeTests') {
+                try {
+                    const progress = JSON.parse(fs.readFileSync(path.join(directory, 'native-module-progress.json'), 'utf8'));
+                    if (progress.requestId === id && typeof progress.currentGroup === 'string'
+                        && Number.isInteger(progress.completedGroups)) {
+                        error.message += `; native group ${progress.currentGroup} (${progress.completedGroups} completed)`;
+                    }
+                } catch {}
+            }
+            throw error;
+        }
     } finally {
         commandInFlight = false;
     }
@@ -248,10 +261,12 @@ try {
         await waitForBridge();
         const version = await command('getAppVersion');
         assert.equal(version.version, '1.10.0');
-        return version;
+        const consoleStatus = await command(undefined, {}, 'console');
+        assert.equal(consoleStatus.loggingEnabled, false, 'Capacitor payload logging must be disabled');
+        return { ...version, loggingEnabled: consoleStatus.loggingEnabled };
     });
     await check('Actual native filesystem, URL policy, and archive module regressions', async () => {
-        const result = await command(undefined, {}, 'nativeTests', 60000);
+        const result = await command(undefined, {}, 'nativeTests', 180000);
         fs.writeFileSync(path.join(evidence, 'native-module-results.json'), JSON.stringify(result, null, 2));
         assert.ok(Array.isArray(result.results) && result.results.length === 27, 'Native tests did not report all 27 current groups');
         assert.equal(result.success, true, JSON.stringify(result.results.filter(item => item.passed !== true)));
@@ -530,7 +545,8 @@ try {
     throw error;
 } finally {
     const diagnosticRoots = [
-        [documents, ['server-failed.json', 'server-ready.txt', 'SillyTavern/data/server.log']],
+        [documents, ['server-failed.json', 'server-ready.txt', 'SillyTavern/data/server.log',
+            'ios-test/native-module-progress.json']],
         [container, ['status.json', 'default.log', 'default.log.1', 'runtime.log', 'runtime.log.1']
             .map(name => `Library/Application Support/SillyClient/runtime/${name}`)],
     ];

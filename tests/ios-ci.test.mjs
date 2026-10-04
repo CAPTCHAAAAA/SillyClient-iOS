@@ -46,6 +46,36 @@ test('copy migration is explicitly whitelisted only in the Debug test harness', 
     assert.match(harness, /guard let method = request\["method"\] as\? String, methods\.contains\(method\)/);
 });
 
+test('Debug native fixtures retain current progress and per-group timing on timeout', () => {
+    const harness = read('native-src/IOSDebugHarness.swift');
+    const fixtures = read('native-src/IOSNativeTests.swift');
+    const runner = read('scripts/run-ios-e2e.mjs');
+    assert.match(fixtures, /static func run\(progress: \(\(\[String: Any\]\) -> Void\)\? = nil\)/);
+    assert.match(fixtures, /"currentGroup": name/);
+    assert.match(fixtures, /"completedGroups": results\.count/);
+    assert.match(fixtures, /"elapsedMs"/);
+    assert.match(fixtures, /autoreleasepool \{/);
+    assert.match(harness, /IOSNativeTests\.run \{[\s\S]*"requestId"[\s\S]*native-module-progress\.json/);
+    assert.match(runner, /progress\.requestId === id/);
+    assert.match(runner, /ios-test\/native-module-progress\.json/);
+    assert.match(runner, /'nativeTests', 180000/);
+});
+
+test('native bridge initialization disables framework payload logging in every configuration', () => {
+    const delegate = read('native-src/AppDelegate.swift');
+    const bridge = delegate.slice(delegate.indexOf('class SillyBridgeViewController'),
+        delegate.indexOf('@UIApplicationMain'));
+    const descriptor = bridge.match(/override func instanceDescriptor\(\) -> InstanceDescriptor \{([\s\S]*?)\n    \}/)?.[1];
+    assert.ok(descriptor, 'The native bridge does not override its early configuration');
+    assert.match(descriptor, /let descriptor = super\.instanceDescriptor\(\)/);
+    assert.match(descriptor, /descriptor\.loggingBehavior = \.none[\s\S]*return descriptor/);
+    assert.doesNotMatch(descriptor, /#if DEBUG/);
+    const harness = read('native-src/IOSDebugHarness.swift');
+    assert.match(harness, /request\["action"\] as\? String == "console"[\s\S]*window\.Capacitor\?\.isLoggingEnabled/);
+    const runner = read('scripts/run-ios-e2e.mjs');
+    assert.match(runner, /assert\.equal\(consoleStatus\.loggingEnabled, false/);
+});
+
 test('capability probe returns before creating the real console and stays isolated on foreground', () => {
     const delegate = read('native-src/AppDelegate.swift');
     const launch = delegate.slice(delegate.indexOf('func application(_ application: UIApplication, didFinishLaunching'));
@@ -339,7 +369,19 @@ async function simulateDriver(scenario = 'success') {
     let migrated;
     let maintenance;
     const respond = request => {
+        if (request.action === 'console') {
+            return { success: true, result: { loggingEnabled: scenario === 'bridge-payload-logging-enabled' } };
+        }
         if (request.action === 'nativeTests') {
+            if (['native-fixture-timeout', 'stale-native-fixture-progress'].includes(scenario)) {
+                put(path.join(documents, 'ios-test/native-module-progress.json'), JSON.stringify({
+                    requestId: scenario === 'stale-native-fixture-progress' ? 'previous-request' : request.id,
+                    currentGroup: 'Virtual stalled group', completedGroups: 21,
+                    results: Array.from({ length: 21 }, (_, index) =>
+                        ({ name: `Virtual group ${index}`, passed: true, elapsedMs: index })),
+                }));
+                return undefined;
+            }
             return { success: true, result: { success: true,
                 results: Array.from({ length: 27 }, (_, index) => ({ name: `Virtual group ${index}`, passed: true })) } };
         }
@@ -585,7 +627,9 @@ async function simulateDriver(scenario = 'success') {
     } catch (failure) { error = failure; }
     const report = JSON.parse(get(path.join(evidence, 'simulator-results.json')).toString());
     const hostDiagnostics = get(path.join(evidence, 'host-signing.log')).toString();
-    return { report, error, clock, acceptedStops, listening, hostDiagnostics };
+    const nativeProgress = files.get(key(path.join(evidence, 'ios-test-native-module-progress.json')));
+    return { report, error, clock, acceptedStops, listening, hostDiagnostics,
+        nativeProgress: nativeProgress && JSON.parse(nativeProgress.toString()) };
 }
 
 test('real simulator driver completes all lifecycle stages using isolated protocol fixtures', async () => {
@@ -594,6 +638,7 @@ test('real simulator driver completes all lifecycle stages using isolated protoc
     assert.equal(actual.report.results.length, 22);
     assert.ok(actual.report.results.every(result => result.passed));
     assert.equal(actual.report.results.find(result => result.name.includes('native filesystem')).actual.groups, 27);
+    assert.equal(actual.report.results.find(result => result.name.includes('Real Capacitor')).actual.loggingEnabled, false);
     const remoteRejection = actual.report.results.find(result => result.name.includes('Remote navigation')).actual;
     assert.equal(remoteRejection.rejected, true);
     assert.equal(remoteRejection.instanceId, 'default');
@@ -611,10 +656,28 @@ test('real simulator driver completes all lifecycle stages using isolated protoc
     assert.match(actual.hostDiagnostics, /Virtual host signing diagnostic log/);
 });
 
+test('simulator native fixture timeout retains the current group and completed timings', async () => {
+    const actual = await simulateDriver('native-fixture-timeout');
+    assert.match(actual.error?.message, /Timed out waiting.*Virtual stalled group.*21 completed/);
+    assert.equal(actual.nativeProgress.currentGroup, 'Virtual stalled group');
+    assert.equal(actual.nativeProgress.results.length, 21);
+    assert.equal(actual.report.results.length, 4);
+    assert.equal(actual.report.results.at(-1).passed, false);
+});
+
+test('simulator native fixture timeout does not attach another request progress', async () => {
+    const actual = await simulateDriver('stale-native-fixture-progress');
+    assert.match(actual.error?.message, /Timed out waiting/);
+    assert.doesNotMatch(actual.error?.message, /Virtual stalled group|21 completed/);
+    assert.equal(actual.nativeProgress.requestId, 'previous-request');
+    assert.equal(actual.report.results.at(-1).passed, false);
+});
+
 for (const [scenario, stage, message] of [
     ['install-denied', 'Simulator setup or transition', /Simulator installation denied/],
     ['probe-launch-denied', 'Actual NodeMobile worker', /Capability probe launch denied by codesigning/],
     ['test-launch-denied', 'Real Capacitor native bridge', /Test application launch denied by codesigning/],
+    ['bridge-payload-logging-enabled', 'Real Capacitor native bridge', /Capacitor payload logging must be disabled/],
     ['remote-navigation-success', 'Remote navigation', /unexpectedly accepted/],
     ['remote-navigation-replaces-operation', 'Remote navigation', /remote-hardening-operation/],
     ['listener-left-open', 'Native stop closes', /listener open/],
