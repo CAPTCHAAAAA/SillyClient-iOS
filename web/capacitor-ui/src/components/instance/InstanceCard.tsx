@@ -17,7 +17,7 @@ export interface InstanceCardProps {
   onReturnToTavern?: (instance: TavernInstance) => void;
   onStopInstance?: (instance: TavernInstance) => void;
   onOpenMenu: (instance: TavernInstance, rect: DOMRect) => void;
-  onRenameSave?: (instanceId: string, newName: string) => void;
+  onRenameSave?: (instanceId: string, newName: string) => void | boolean | Promise<void | boolean>;
   isExternallyRenaming?: boolean;
   onClearExternalRenaming?: () => void;
   isWindows?: boolean;

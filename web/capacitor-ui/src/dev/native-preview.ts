@@ -1,6 +1,7 @@
 import { Capacitor } from "@capacitor/core";
 import type { TarvenEnvPlugin, TarvenEvent, GarbageItem, MaintenanceItem, MaintenanceScan, MaintenanceRecovery } from "../capacitor-plugin";
-import { exactInstallTarget } from "../lib/install-location";
+import { exactInstallTarget, sanitizeFolderName } from "../lib/install-location";
+import type { LegacyInstanceLocation } from "../capacitor-plugin";
 import { validateExternalUrl } from "../lib/external-url";
 import { APP_VERSION } from "../constants/app-version";
 
@@ -9,6 +10,15 @@ const listeners = new Map<EventName, Set<(event: TarvenEvent) => void>>();
 const calls: { method: string; options?: unknown }[] = [];
 const pending = new Map<string, { instanceId: string; port: number; path: string; resolve: (value: { ready: boolean }) => void }>();
 const credentials = new Map<string, string>();
+const instancePasswords = new Map<string, string>();
+type PasswordMethod = "setInstancePassword" | "verifyInstancePassword" | "hasInstancePassword" | "clearInstancePassword" | "listInstancePasswordStatus";
+interface PasswordFixture {
+  passwords?: Record<string, string>;
+  delayMillis?: number;
+  delayByMethod?: Partial<Record<PasswordMethod, number>>;
+  failMethods?: PasswordMethod[];
+}
+let passwordFixture: PasswordFixture = {};
 let listenerDelay = 0;
 let manualProvision = false;
 let failDeletes = new Set<string>();
@@ -22,10 +32,22 @@ type DirectorySelection = Awaited<ReturnType<TarvenEnvPlugin["pickDirectory"]>>;
 let platform: "windows" | "android" | "ios" = "windows";
 let directorySelection: DirectorySelection | null | undefined;
 let directoryDelay = 0;
+interface StorageFixture {
+  legacyInstances?: LegacyInstanceLocation[];
+  failRelocateIds?: string[];
+  falseRelocateIds?: string[];
+  retainedSourceIds?: string[];
+  delayMillis?: number;
+  renameError?: string;
+  renameKeepsId?: boolean;
+  uninstallWarning?: string;
+  uninstallInstanceIds?: Record<string, string>;
+}
+let storageFixture: StorageFixture = {};
 
 function syntheticRoot() {
   return platform === "windows" ? "D:\\Synthetic" : platform === "android"
-    ? "/data/user/0/com.sillyclient/files/tarven/installations" : "/private/Synthetic/Documents/Installations";
+    ? "/data/user/0/com.sillyclient/files/tarven/installations" : "/private/Synthetic/Documents/instances";
 }
 interface MaintenanceFixture {
   failIds?: string[];
@@ -65,6 +87,24 @@ function record(method: string, options?: unknown) {
   calls.push({ method, options });
 }
 
+async function passwordOperation(method: PasswordMethod, instanceId?: string) {
+  record(method, instanceId ? { instanceId } : undefined);
+  const delay = passwordFixture.delayByMethod?.[method] ?? passwordFixture.delayMillis ?? 0;
+  const fails = passwordFixture.failMethods?.includes(method);
+  if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+  if (fails) throw new Error("Synthetic password operation failure");
+}
+
+function configurePasswords(fixture: PasswordFixture) {
+  passwordFixture = { ...passwordFixture, ...fixture };
+  if (fixture.passwords) {
+    instancePasswords.clear();
+    for (const [id, password] of Object.entries(fixture.passwords)) {
+      if (password) instancePasswords.set(id, password);
+    }
+  }
+}
+
 function scopedMaintenance(instanceId: string): MaintenanceItem[] {
   const existing = maintenanceItems.get(instanceId);
   if (existing) return existing;
@@ -93,6 +133,7 @@ export const nativePreview: TarvenEnvPlugin = {
   },
   async provisionAndStart(options) {
     record("provisionAndStart", options);
+    if (platform === "ios" && options.localZipPath) throw new Error("iOS 不支持从 ZIP 安装运行时");
     const operationId = options.operationId || "legacy-preview";
     status = { serverReady: false, mode: "launcher", instanceId: options.instanceId, operationId };
     emit("log", { instanceId: options.instanceId, operationId, message: "合成运行时：准备启动", level: "info" });
@@ -134,7 +175,7 @@ export const nativePreview: TarvenEnvPlugin = {
   async exitImmersive() { record("exitImmersive"); status = { ...status, mode: "launcher" }; },
   async returnToTavern() { record("returnToTavern"); },
   async getStatus() { record("getStatus"); return { ...status }; },
-  async fetchReleases() { return { releases: [{ tag: "1.19.0", zipballUrl: "https://example.test/synthetic.zip", prerelease: false }] }; },
+  async fetchReleases() { return { releases: [{ tag: "1.19.0", zipballUrl: platform === "ios" ? "" : "https://example.test/synthetic.zip", prerelease: false }] }; },
   async pickDirectory(options) {
     record("pickDirectory", options);
     const selection = directorySelection === undefined ? {
@@ -186,8 +227,49 @@ export const nativePreview: TarvenEnvPlugin = {
     return { configured: !!username, username };
   },
   async clearRemoteBasicAuth(options) { credentials.delete(options.instanceId); return { success: true }; },
+  async setInstancePassword(options) {
+    await passwordOperation("setInstancePassword", options.instanceId);
+    const old = instancePasswords.get(options.instanceId);
+    if (old && options.oldPassword !== old) throw new Error("原密码错误");
+    const password = options.password?.trim();
+    if (!password) throw new Error("新密码不能为空");
+    instancePasswords.set(options.instanceId, password);
+    return { success: true, hasPassword: true };
+  },
+  async verifyInstancePassword(options) {
+    const password = instancePasswords.get(options.instanceId);
+    const valid = !password || password === options.password;
+    await passwordOperation("verifyInstancePassword", options.instanceId);
+    return { valid };
+  },
+  async hasInstancePassword(options) {
+    const hasPassword = instancePasswords.has(options.instanceId);
+    await passwordOperation("hasInstancePassword", options.instanceId);
+    return { hasPassword };
+  },
+  async clearInstancePassword(options) {
+    await passwordOperation("clearInstancePassword", options.instanceId);
+    const old = instancePasswords.get(options.instanceId);
+    if (old && options.oldPassword !== old) throw new Error("原密码错误");
+    instancePasswords.delete(options.instanceId);
+    return { success: true };
+  },
+  async listInstancePasswordStatus() {
+    const snapshot = Object.fromEntries([...instancePasswords.keys()].map(id => [id, true]));
+    await passwordOperation("listInstancePasswordStatus");
+    return snapshot;
+  },
   async pingUrl() { return { online: true }; },
-  async uninstallInstance(options) { record("uninstallInstance", options); return { success: true, freedBytes: 1 }; },
+  async uninstallInstance(options) {
+    record("uninstallInstance", options);
+    const instanceId = storageFixture.uninstallInstanceIds?.[options.instanceId] || options.instanceId;
+    const warning = storageFixture.uninstallWarning;
+    if (!warning) instancePasswords.delete(instanceId);
+    migrated.delete(instanceId);
+    migrated.delete(options.instanceId);
+    scannedInstanceIds = scannedInstanceIds.filter(id => id !== instanceId && id !== options.instanceId);
+    return { success: true, instanceId, freedBytes: 1, ...(warning ? { warning } : {}) };
+  },
   async cleanGarbage(options) { record("cleanGarbage", options); return { items: garbage.map(item => ({ ...item })), totalBytes: 3072 }; },
   async deleteGarbageItem(options) {
     record("deleteGarbageItem", options);
@@ -259,6 +341,7 @@ export const nativePreview: TarvenEnvPlugin = {
   },
   async migrateInstance(options) {
     record("migrateInstance", options);
+    if (platform === "ios" && options.mode === "takeover") throw new Error("iOS 不支持原地接管，请使用复制迁移");
     if (failMigration) return { success: false, instanceId: options.instanceId };
     const targetPath = options.mode === "takeover" ? options.sourcePath : options.targetPath || exactInstallTarget(syntheticRoot(), "root", options.instanceId)!;
     migrated.set(options.instanceId, targetPath);
@@ -266,27 +349,65 @@ export const nativePreview: TarvenEnvPlugin = {
   },
   async checkLegacyInstances() {
     record("checkLegacyInstances", {});
-    return { instances: [] };
+    return { instances: (storageFixture.legacyInstances || [])
+      .filter(item => !migrated.has(item.instanceId) || migrated.get(item.instanceId) === item.currentPath)
+      .map(item => ({ ...item })) };
   },
   async relocateInstance(options) {
     record("relocateInstance", options);
-    const newPath = options.targetPath || exactInstallTarget(syntheticRoot(), "root", options.instanceId)!;
-    return { success: true, instanceId: options.instanceId, oldPath: "C:\\AppData\\Legacy", newPath };
+    maintenanceStopped();
+    if (storageFixture.delayMillis) await new Promise(resolve => setTimeout(resolve, storageFixture.delayMillis));
+    maintenanceStopped();
+    if (storageFixture.failRelocateIds?.includes(options.instanceId)) throw new Error("Synthetic relocation refusal");
+    const legacy = storageFixture.legacyInstances?.find(item => item.instanceId === options.instanceId);
+    const oldPath = migrated.get(options.instanceId) || options.installPath || legacy?.currentPath
+      || exactInstallTarget(syntheticRoot(), "root", options.instanceId)!;
+    const folderName = oldPath.split(/[\\/]/).filter(Boolean).pop() || options.instanceId;
+    const newPath = options.targetPath || exactInstallTarget(syntheticRoot(), "root", platform === "ios" ? options.instanceId : folderName)!;
+    if (storageFixture.falseRelocateIds?.includes(options.instanceId)) {
+      return { success: false, instanceId: options.instanceId, oldPath, newPath: oldPath };
+    }
+    migrated.set(options.instanceId, newPath);
+    if (!scannedInstanceIds.includes(options.instanceId)) scannedInstanceIds.push(options.instanceId);
+    return {
+      success: true, instanceId: options.instanceId, oldPath, newPath, unchanged: oldPath === newPath,
+      ...(storageFixture.retainedSourceIds?.includes(options.instanceId) ? { retainedSourcePath: oldPath } : {}),
+    };
   },
   async migrateLegacyInstances(options = {}) {
     record("migrateLegacyInstances", options);
-    return { success: true, results: [] };
+    const { instances } = await nativePreview.checkLegacyInstances();
+    const results = [];
+    for (const instance of instances) {
+      if (!options.instanceIds || options.instanceIds.includes(instance.instanceId)) {
+        results.push(await nativePreview.relocateInstance({ instanceId: instance.instanceId, targetPath: instance.targetPath }));
+      }
+    }
+    return { success: results.every(result => result.success), results };
   },
   async renameInstance(options) {
     record("renameInstance", options);
-    const newId = options.newName.trim().replace(/[\\/:*?"<>|\x00-\x1f]/g, "-").slice(0, 100) || "instance";
-    return {
-      success: true,
-      oldId: options.instanceId,
-      newId,
-      oldPath: options.installPath || `D:\\Software\\AI\\Entertainment\\SillyClient\\instances\\${options.instanceId}`,
-      newPath: `D:\\Software\\AI\\Entertainment\\SillyClient\\instances\\${newId}`,
-    };
+    maintenanceStopped();
+    if (storageFixture.delayMillis) await new Promise(resolve => setTimeout(resolve, storageFixture.delayMillis));
+    maintenanceStopped();
+    if (storageFixture.renameError) throw new Error(storageFixture.renameError);
+    const oldPath = migrated.get(options.instanceId) || options.installPath
+      || exactInstallTarget(syntheticRoot(), "root", options.instanceId)!;
+    const folderName = sanitizeFolderName(options.newName);
+    const newId = (storageFixture.renameKeepsId ?? platform !== "windows") ? options.instanceId : folderName;
+    const separatorAt = Math.max(oldPath.lastIndexOf("/"), oldPath.lastIndexOf("\\"));
+    const newPath = oldPath.slice(0, separatorAt + 1) + folderName;
+    if (newId !== options.instanceId && (migrated.has(newId) || scannedInstanceIds.includes(newId))) {
+      throw new Error("Synthetic destination already exists");
+    }
+    migrated.delete(options.instanceId);
+    migrated.set(newId, newPath);
+    if (newId !== options.instanceId && instancePasswords.has(options.instanceId)) {
+      instancePasswords.set(newId, instancePasswords.get(options.instanceId)!);
+      instancePasswords.delete(options.instanceId);
+    }
+    scannedInstanceIds = [...new Set(scannedInstanceIds.map(id => id === options.instanceId ? newId : id))];
+    return { success: true, oldId: options.instanceId, newId, oldPath, newPath };
   },
 };
 
@@ -299,6 +420,8 @@ export function installNativePreview() {
       status?: Awaited<ReturnType<TarvenEnvPlugin["getStatus"]>>;
       contentOpenMode?: "webview" | "browser";
       maintenance?: MaintenanceFixture;
+      storage?: StorageFixture;
+      password?: PasswordFixture;
       platform?: "windows" | "android" | "ios";
       directorySelection?: DirectorySelection | null;
       directoryDelay?: number;
@@ -316,7 +439,11 @@ export function installNativePreview() {
   if (global.__SILLYCLIENT_PREVIEW_FIXTURE__?.maintenance) {
     maintenanceFixture = { ...global.__SILLYCLIENT_PREVIEW_FIXTURE__.maintenance };
   }
-  platform = global.__SILLYCLIENT_PREVIEW_FIXTURE__?.platform || "windows";
+  storageFixture = { ...global.__SILLYCLIENT_PREVIEW_FIXTURE__?.storage };
+  if (global.__SILLYCLIENT_PREVIEW_FIXTURE__?.password) configurePasswords(global.__SILLYCLIENT_PREVIEW_FIXTURE__.password);
+  const queryPlatform = new URLSearchParams(window.location?.search || "").get("platform");
+  platform = global.__SILLYCLIENT_PREVIEW_FIXTURE__?.platform
+    || (queryPlatform === "ios" || queryPlatform === "android" || queryPlatform === "windows" ? queryPlatform : "windows");
   directorySelection = global.__SILLYCLIENT_PREVIEW_FIXTURE__?.directorySelection;
   directoryDelay = global.__SILLYCLIENT_PREVIEW_FIXTURE__?.directoryDelay || 0;
   global.__SILLYCLIENT_PLATFORM__ = platform;
@@ -329,6 +456,8 @@ export function installNativePreview() {
       failMigration?: boolean; failCommands?: boolean;
       scannedInstanceIds?: string[];
       maintenance?: MaintenanceFixture;
+      storage?: StorageFixture;
+      password?: PasswordFixture;
       status?: Awaited<ReturnType<TarvenEnvPlugin["getStatus"]>>;
       directorySelection?: DirectorySelection | null;
       directoryDelay?: number;
@@ -340,6 +469,8 @@ export function installNativePreview() {
       failCommands = options.failCommands ?? failCommands;
       if (options.scannedInstanceIds) scannedInstanceIds = [...options.scannedInstanceIds];
       if (options.maintenance) maintenanceFixture = { ...maintenanceFixture, ...options.maintenance };
+      if (options.storage) storageFixture = { ...storageFixture, ...options.storage };
+      if (options.password) configurePasswords(options.password);
       if (options.status) status = { ...options.status };
       if ("directorySelection" in options) directorySelection = options.directorySelection;
       if (options.directoryDelay !== undefined) directoryDelay = options.directoryDelay;

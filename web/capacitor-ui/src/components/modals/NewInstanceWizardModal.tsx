@@ -21,6 +21,7 @@ export interface NewInstanceWizardModalProps {
   isLight: boolean;
   glassBg: string;
   isWindows: boolean;
+  isIOS?: boolean;
   newInstanceName: string;
   setNewInstanceName: (v: string) => void;
   newInstanceMode: WizardMode;
@@ -233,6 +234,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
   isLight,
   glassBg,
   isWindows,
+  isIOS = false,
   newInstanceName,
   setNewInstanceName,
   newInstanceMode,
@@ -508,7 +510,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
               </div>
             </NewInstanceField>
 
-            <NewInstanceField label="版本" isLight={isLight}>
+            <NewInstanceField label="版本" desc={isIOS ? "iOS 使用随应用提供的内置运行时；备份数据请通过复制迁移导入" : undefined} isLight={isLight}>
               <div className="flex items-center gap-2 w-full">
                 <button
                   id="ver-trigger"
@@ -556,6 +558,8 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
                   />
                 </button>
                 <button
+                  disabled={isIOS}
+                  title={isIOS ? "iOS 不支持从 ZIP 安装运行时" : undefined}
                   onClick={async () => {
                     try {
                       const { path, sizeBytes } = await TarvenEnv.pickZipFile();
@@ -776,6 +780,8 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
                 </button>
                 <button
                   type="button"
+                  disabled={isIOS}
+                  title={isIOS ? "iOS 不支持原地运行外部目录，请使用复制迁移" : undefined}
                   onClick={() => setMigrationAccessMode("takeover")}
                   aria-pressed={migrationAccessMode === "takeover"}
                   className={cn(
@@ -792,6 +798,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
                   原地接管
                 </button>
               </div>
+              {isIOS && <p className="mt-2 text-[11px] opacity-50">iOS 仅支持复制用户数据到内置运行时，不支持原地接管。</p>}
 
               {/* 红色感叹号展开说明 */}
               <div

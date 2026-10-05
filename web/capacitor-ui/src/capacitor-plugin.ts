@@ -145,6 +145,23 @@ export interface PreinstallSelection {
 
 export type InstallPathMode = "root" | "exact"
 
+export interface LegacyInstanceLocation {
+  instanceId: string
+  name: string
+  currentPath: string
+  targetPath: string
+  version?: string
+}
+
+export interface InstanceRelocationResult {
+  success: boolean
+  instanceId: string
+  oldPath: string
+  newPath: string
+  unchanged?: boolean
+  retainedSourcePath?: string
+}
+
 export interface TarvenEnvPlugin {
   provisionAndStart(options: {
     port: number
@@ -244,7 +261,7 @@ export interface TarvenEnvPlugin {
   }): Promise<{ online: boolean; statusCode?: number; authRequired?: boolean; error?: string }>
 
   /** 卸载实例:删除安装目录和封面图。 */
-  uninstallInstance(options: { instanceId: string; installPath?: string; port?: number }): Promise<{ success: boolean; freedBytes: number }>
+  uninstallInstance(options: { instanceId: string; installPath?: string; port?: number }): Promise<{ success: boolean; freedBytes: number; instanceId?: string; warning?: string }>
 
   /** 清理垃圾:扫描孤立文件/目录,返回可清理项。dryRun=true 仅扫描不删除。 */
   cleanGarbage(options: { dryRun: boolean; activeInstanceIds?: string[]; activeCoverPaths?: string[] }): Promise<{ items: GarbageItem[]; totalBytes: number }>
@@ -281,41 +298,22 @@ export interface TarvenEnvPlugin {
     preinstall?: PreinstallSelection
   }): Promise<{ success: boolean; instanceId: string; targetPath?: string }>
 
-  /** 检测保存在旧版路径（如 C 盘 AppData）的待迁移实例 */
-  checkLegacyInstances(): Promise<{
-    instances: Array<{
-      instanceId: string
-      name: string
-      currentPath: string
-      targetPath: string
-      version?: string
-    }>
-  }>
+  /** 检测仍位于旧版默认目录的受管实例。 */
+  checkLegacyInstances(): Promise<{ instances: LegacyInstanceLocation[] }>
 
   /** 单个实例无损迁移 / 路径重定位 */
   relocateInstance(options: {
     instanceId: string
     targetPath?: string
-  }): Promise<{
-    success: boolean
-    instanceId: string
-    oldPath: string
-    newPath: string
-    unchanged?: boolean
-  }>
+    installPath?: string
+  }): Promise<InstanceRelocationResult>
 
   /** 一键批量无损迁移旧路径实例至当前客户端默认实例目录 */
   migrateLegacyInstances(options?: {
     instanceIds?: string[]
   }): Promise<{
     success: boolean
-    results: Array<{
-      success: boolean
-      instanceId: string
-      oldPath: string
-      newPath: string
-      unchanged?: boolean
-    }>
+    results: InstanceRelocationResult[]
   }>
 
   /** 重命名实例并同步修改底层物理存储文件夹与注册表 */
@@ -330,6 +328,12 @@ export interface TarvenEnvPlugin {
     oldPath: string
     newPath: string
   }>
+
+  setInstancePassword(options: { instanceId: string; password?: string; oldPassword?: string }): Promise<{ success: boolean; hasPassword: boolean }>
+  verifyInstancePassword(options: { instanceId: string; password: string }): Promise<{ valid: boolean }>
+  hasInstancePassword(options: { instanceId: string }): Promise<{ hasPassword: boolean }>
+  clearInstancePassword(options: { instanceId: string; oldPassword?: string }): Promise<{ success: boolean }>
+  listInstancePasswordStatus(): Promise<Record<string, boolean>>
 
   addListener(
     eventName: 'log' | 'progress' | 'ready' | 'mode' | 'error',

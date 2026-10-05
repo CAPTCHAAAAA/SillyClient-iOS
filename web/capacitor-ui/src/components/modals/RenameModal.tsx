@@ -83,6 +83,7 @@ export const RenameModal: React.FC<RenameModalProps> = ({
           {!saving && (
             <button
               onClick={onClose}
+              aria-label="关闭重命名"
               className={cn(
                 "motion-control p-1.5 rounded-lg transition-colors",
                 isLight
@@ -106,7 +107,7 @@ export const RenameModal: React.FC<RenameModalProps> = ({
               disabled={saving}
               onChange={(e) => onChange(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !saving && value.trim()) onSave();
+                if (e.key === "Enter" && !e.nativeEvent.isComposing && !saving && value.trim()) onSave();
               }}
               placeholder="输入新名称"
               autoFocus

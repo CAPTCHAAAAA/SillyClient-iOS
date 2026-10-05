@@ -38,6 +38,26 @@ test('test execution is guarded by Debug and an explicit launch argument', () =>
     assert.match(harness, /data\.count <= 65536/);
 });
 
+test('cloud build runs every current frontend test before building the console', () => {
+    const workflow = read('.github/workflows/build-ipa.yml');
+    const frontend = workflow.slice(workflow.indexOf('- name: Build the real React console'),
+        workflow.indexOf('- name: Prepare the official NodeMobile'));
+    assert.match(frontend, /working-directory: web\/capacitor-ui/);
+    assert.match(frontend, /pnpm install --frozen-lockfile\s+node --test tests\/\*\.test\.cjs\s+pnpm run build/);
+    assert.doesNotMatch(frontend, /continue-on-error|\|\| true/);
+    const testFiles = fs.readdirSync(path.join(root, 'web/capacitor-ui/tests'));
+    for (const name of ['install-location.test.cjs', 'instance-access.test.cjs', 'instance-location-state.test.cjs']) {
+        assert.ok(testFiles.includes(name), `Missing frontend test suite: ${name}`);
+    }
+});
+
+test('simulator acceptance does not claim synthetic showcase interactions', () => {
+    const runner = read('scripts/run-ios-e2e.mjs');
+    assert.doesNotMatch(runner, /__SC_TEST__|evalInConsole|uiStepsShowcased|setWizardMode|setManageTab/);
+    assert.match(runner, /uiInteractionTested: false/);
+    assert.match(runner, /const nativeFixtureGroups = 44;/);
+});
+
 test('copy migration is explicitly whitelisted only in the Debug test harness', () => {
     const harness = read('native-src/IOSDebugHarness.swift');
     assert.match(harness, /^#if DEBUG[\s\S]*#endif\s*$/);
@@ -94,7 +114,7 @@ test('unsigned artifact version and monotonic native build agree', () => {
     const workflow = read('.github/workflows/build-ipa.yml');
     assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.10\.0<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.ok(build >= 18);
+    assert.ok(build >= 28);
     assert.match(workflow, /SillyClient-iOS-v1\.10\.0-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
@@ -471,9 +491,6 @@ async function simulateDriver(scenario = 'success') {
             return { success: true, result: { ready: 'complete', hasChat: true, hasInput: true, hasClient: true,
                 title: 'SillyTavern', url: 'http://127.0.0.1:8000/' } };
         }
-        if (request.action === 'evalConsole') {
-            return { success: true, result: null };
-        }
         const options = request.options;
         const success = result => ({ success: true, result });
         const reject = error => ({ success: false, error });
@@ -758,6 +775,8 @@ test('real simulator driver completes all lifecycle stages using isolated protoc
     assert.equal(actual.listening, false);
     assert.equal(actual.report.physicalDeviceTested, false);
     assert.equal(actual.report.visualReviewPerformed, false);
+    assert.equal(actual.report.uiInteractionTested, false);
+    assert.equal(actual.report.results.find(result => result.name.includes('Real Capacitor')).actual.uiStepsShowcased, undefined);
     assert.match(actual.hostDiagnostics, /Virtual host signing diagnostic log/);
 });
 

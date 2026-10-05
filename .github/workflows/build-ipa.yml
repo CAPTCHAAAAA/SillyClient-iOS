@@ -35,12 +35,13 @@ jobs:
           version: 11.9.0
 
       - name: Verify iOS runtime regressions
-        run: node --test tests/ios-runtime.test.mjs tests/ios-ci.test.mjs tests/ios-supervisor.test.mjs
+        run: node --test tests/ios-runtime.test.mjs tests/ios-ci.test.mjs tests/ios-supervisor.test.mjs tests/ios-feature-sync.test.mjs
 
       - name: Build the real React console
         working-directory: web/capacitor-ui
         run: |
           pnpm install --frozen-lockfile
+          node --test tests/*.test.cjs
           pnpm run build
 
       - name: Prepare the official NodeMobile 18.20.4 XCFramework

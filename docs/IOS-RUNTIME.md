@@ -3,6 +3,10 @@
 This is an experimental branch, not a verified iOS release.
 The hardening build retains version `1.10.0`; it does not change the public
 Android/Windows/Main release, install a client, or publish a Release.
+The current feature-sync scope and remaining platform gaps are recorded in
+`IOS-FEATURE-PARITY.md`. On 2026-10-06 the user authorized local synchronization
+and the Xcode build/test flow. The reviewed frontend is now in this worktree;
+build 28 retains version 1.10.0. No Release or main-branch integration is authorized.
 
 ## Native Ownership
 
@@ -65,7 +69,7 @@ Each operation owns a managed-file authority limited to its approved root.
 or failure; uncertain transport and failed stop keep it retained. The permanent
 supervisor validates operation-bound directory/data/config paths and root/server
 filesystem identities against the native private control mapping, rather than
-accepting a caller-provided allowed root. Staging and removal use exclusive
+accepting a caller-provided allowed root. Installation staging uses exclusive
 same-parent paths, allowing same-volume commits outside Documents. A launcher
 ownership receipt permits recovery after registration failure without replacing
 runtime or user data. Scanning retains unavailable registered instances as
@@ -77,6 +81,35 @@ preserving installed extensions and settings instead of reapplying them on each
 start. Configuration updates reject unknown input keys and conflicting YAML
 mapping types without writing the original file. Unrelated mapping siblings are
 preserved, and heartbeat uses the cross-platform nonnegative signed-32-bit range.
+
+Rename and relocation retain the instance ID and persist a recovery journal
+before changing its physical directory. Journals use Documents-relative paths
+for internal storage, per-root authorizations, directory identities, and the
+original and intended metadata bytes. Interrupted moves can restore the original
+path without overwriting a replacement directory or edited configuration.
+Scanning recovers unregistered legacy directories hidden by an interrupted move.
+Committed internal destinations do not require the old external authorization.
+For uncommitted cross-volume copies, a verified intact source remains usable
+even if the destination authorization is lost or its staging identity was not
+persisted. Unverified destination contents are never deleted: the journal moves
+to `.sillyclient-relocations-retained` with a reason, bounded to 256 records.
+These records require later review; there is no automatic orphan cleanup UI or
+claim that every interrupted copy leaves zero residual files.
+
+Local start reserves its cancellable operation before entering the IO queue.
+Journal recovery acquires a maintenance lease bound to that provisioning
+operation, without holding the runtime state queue during filesystem work.
+Cancellation clears the pending runtime identity while the recovery lease keeps
+another startup out until recovery returns. The operation is rechecked before
+preparing files or starting a Worker. A pending maintenance recovery payload
+blocks rename/relocation rather than invalidating its configuration hash.
+
+Uninstall writes a `removalPending` record before in-place physical deletion.
+The record retains the authorized root, original path, and directory identity
+after a partial failure; retries cannot delete a same-path replacement.
+Registration is removed only after the directory is gone. A missing directory
+after a failed final registry commit can finish its unregistration on retry.
+Running instances remain protected by the runtime maintenance lock.
 
 Copy migration retains source files, selects their user-data root, and
 streams only filtered data into a fresh pinned runtime. Old dependencies, Git
@@ -141,6 +174,17 @@ entries are allowed; nonempty entries must refer to verified regular files.
 Existing extensions and disabled settings are preserved. SC Bordeaux uses the
 existing pinned companion assets, without a replacement visual design.
 
+`IOSInstanceAccessLock` implements the five Windows-compatible local access-lock
+methods in an independent atomic Keychain registry. PBKDF2-HMAC-SHA256 uses the
+Windows parameters (10,000 rounds, 32-byte digest, 16 random bytes encoded as
+UTF-8 hexadecimal salt text). Validation is bounded and malformed storage fails
+closed. This is a launcher entry lock, not file encryption, SillyTavern server
+authentication, a transferable Keychain backup, or a native session-token
+authorization layer. Remote HTTP Basic Auth remains a separate credential store.
+Physical rename keeps the stable lock identity. Successful uninstall attempts
+to clear the lock using the canonical ID returned by the store, not a `scan-`
+alias. A Keychain failure is returned as a warning after deletion.
+
 ## Build and Runtime Boundary
 
 The workflow pins SillyTavern to commit
@@ -184,7 +228,7 @@ are collected on failure and their artifact upload uses `always()`.
 Unit tests need no installed project dependencies:
 
 ```sh
-node --test tests/ios-runtime.test.mjs tests/ios-ci.test.mjs tests/ios-supervisor.test.mjs
+node --test tests/ios-runtime.test.mjs tests/ios-ci.test.mjs tests/ios-supervisor.test.mjs tests/ios-feature-sync.test.mjs
 ```
 
 The Debug-only native test harness executes the actual Swift modules against
@@ -201,8 +245,15 @@ archived unsigned Release IPA. Its capability-probe
 process never creates a production console or deploys an instance. Tests,
 source assertions, host fixtures, simulator acceptance, and physical-device
 acceptance are distinct evidence categories.
-The current harness contains 33 fixture groups, including full-capacity token
+The current harness contains 44 fixture groups, including full-capacity token
 recovery, flat/multi-user migration layouts, and captured-output event routing.
+Added groups cover actual access-lock derivation/Keychain, rename/relocation,
+retryable deletion, durable journal recovery, and pending maintenance backups.
+The journal group includes revoked source/target authorization, unknown staging
+identity, unregistered legacy scans, and cancellation before recovery can run.
+These current Swift groups await the feature-sync Xcode run. The current 114
+passing host tests (both Node 18 and Node 22) include source-contract assertions and do
+not establish a passing native harness, simulator acceptance, or device testing.
 Its five installation groups also cover absolute/root/exact paths, recreated
 stores, synthetic bookmark/scope failures and bounded lease ownership,
 registration recovery, custom copy migration, maintenance, and uninstall source/
@@ -226,6 +277,10 @@ false; an enabled or absent flag fails simulator verification.
 Debug bridge rejection envelopes retain bounded, redacted native diagnostics;
 oversized diagnostics fail closed without leaking a truncated credential.
 WebKit fallback reports only a sanitized domain and numeric code.
+The simulator driver does not claim frontend click-through acceptance. Old
+optional showcase hooks and synthetic running-card injection were removed;
+diagnostic recording checkpoints are not additional tests. Its result declares
+`uiInteractionTested: false` as well as `physicalDeviceTested: false`.
 
 Prepare a disposable SillyTavern copy with the workflow's pinned revision and
 dependencies. Do not use a personal installation: compatibility preparation
@@ -274,5 +329,7 @@ The workflow restores Node 22 before running Capacitor tools.
   runtime, but old runtime versions are not upgraded in place.
 - The maintenance backend does not authorize synchronizing its new frontend
   panel. That preview retains its separate user approval gate.
-- No subjective visual review, physical-device operations, Release, or
-  main-branch integration are part of this hardening verification.
+- No subjective visual review, Release, or main-branch integration is included.
+  Physical-device execution requires a connected device runner and signing;
+  the repository currently has neither configured. The unsigned generic-device
+  archive and hosted simulator execution do not establish physical-device acceptance.

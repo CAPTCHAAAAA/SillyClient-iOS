@@ -124,6 +124,15 @@ public final class NodeRunner {
         }
     }
 
+    func beginProvisionRecovery(instance: String, operation: String) throws {
+        try queue.sync {
+            guard instanceId == instance, operationId == operation, state == "provisioning", maintenance.isEmpty else {
+                throw IOSFileError.invalid("Relocation recovery requires the current provisioning operation")
+            }
+            maintenance.insert(instance)
+        }
+    }
+
     func beginMaintenance(instance: String) throws {
         try queue.sync {
             guard instanceId == nil, maintenance.isEmpty else {

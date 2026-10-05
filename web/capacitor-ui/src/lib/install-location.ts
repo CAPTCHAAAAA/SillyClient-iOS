@@ -20,7 +20,7 @@ export function installationSelection(selection: { path?: string; installPathMod
   return { path, mode };
 }
 
-/** Migration targets are exact; the native installer owns root resolution for new installs. */
+/** Resolve an explicit parent selection or an exact path into the native execution target. */
 export function exactInstallTarget(value: string, mode: InstallPathMode, instanceIdOrName: string): string | undefined {
   const path = executablePath(value);
   if (!path) return undefined;

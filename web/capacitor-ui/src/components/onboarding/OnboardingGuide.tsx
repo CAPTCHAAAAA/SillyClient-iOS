@@ -43,13 +43,13 @@ const guideSteps: GuideStep[] = [
       },
       {
         label: "创建面板",
-        description: "填写名称并选择本地或远程连接。本地版本可使用内置版，也可从版本一栏右侧导入 ZIP。",
+        description: "填写名称并选择本地或远程连接。iOS 本地实例使用应用内置版本；已有酒馆数据可通过导入功能迁入。",
         image: "./onboarding/create-open.webp",
         imageAlt: "展开后的新建实例面板",
         imageClass: "is-panel",
       },
       {
-        label: "主题预设",
+        label: "预设安装",
         description: "创建本地实例时可启用 SC Bordeaux，安装完成后会自动应用主题预设与配套壁纸。",
         image: "./onboarding/theme-preset-open.webp",
         imageAlt: "新建实例面板中的 SC Bordeaux 主题预设",
@@ -70,6 +70,51 @@ const guideSteps: GuideStep[] = [
     ],
   },
   {
+    title: "密码保护",
+    views: [
+      {
+        label: "私密锁定",
+        description: "设置访问密码后，实例卡片会显示锁定标记。本地实例与远程连接均需在本机校验密码后才能打开。",
+        image: "./onboarding/instance-card-locked.webp",
+        imageAlt: "带有访问密码锁定标记的实例卡片",
+        imageClass: "is-card",
+      },
+      {
+        label: "设置密码",
+        description: "在实例管理的启动设置中开启访问密码保护。修改或解除已有密码时，需要先输入原密码。",
+        image: "./onboarding/password-set.webp",
+        imageAlt: "实例管理中的访问密码设置面板",
+        imageClass: "is-panel",
+      },
+      {
+        label: "本地解锁",
+        description: "启动或打开受保护实例时，输入本地访问密码解锁。校验无需联网，此密码与远程服务的登录密码分别管理。",
+        image: "./onboarding/password-unlock.webp",
+        imageAlt: "本地访问密码解锁面板",
+        imageClass: "is-panel",
+      },
+    ],
+  },
+  {
+    title: "数据迁移",
+    views: [
+      {
+        label: "存储管理",
+        description: "在实例管理的存储页面查看当前路径、重命名或迁移实例。iOS 的可用目录受系统文件访问权限限制。",
+        image: "./onboarding/storage-manage.webp",
+        imageAlt: "实例管理中的存储路径与操作面板",
+        imageClass: "is-panel",
+      },
+      {
+        label: "迁移目录",
+        description: "停止实例后可选择系统授权的目录或恢复默认位置。迁移会校验复制结果；请确认结果与来源保留提示后再处理原文件。",
+        image: "./onboarding/storage-migrate.webp",
+        imageAlt: "实例存储路径选择与迁移面板",
+        imageClass: "is-panel",
+      },
+    ],
+  },
+  {
     title: "控制台",
     views: [
       {
@@ -80,7 +125,7 @@ const guideSteps: GuideStep[] = [
         imageClass: "is-toolbar",
       },
       {
-        label: "展开后",
+        label: "实时日志",
         description: "下载、安装、启动与错误信息会保留在这里，便于确认实例当前所处的阶段。",
         image: "./onboarding/terminal-open.webp",
         imageAlt: "展开后的运行控制台",

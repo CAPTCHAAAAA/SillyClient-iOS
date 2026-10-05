@@ -243,6 +243,7 @@ final class IOSManagedFiles {
 
     func copyTree(_ source: URL, to target: URL, destination: IOSManagedFiles,
                   budget: IOSInspectionBudget = IOSInspectionBudget(maxEntries: 32768, maxBytes: 2 * 1024 * 1024 * 1024),
+                  rootCreated: ((IOSFileGuard) throws -> Void)? = nil,
                   include: (String) -> Bool = { _ in true }, cancelled: () throws -> Void = {}) throws {
         let original = try checked(source)
         guard !destination.exists(target) else { throw IOSFileError.invalid("Copy destination already exists") }
@@ -256,6 +257,7 @@ final class IOSManagedFiles {
             inspected.append((current, before))
             if before.isDirectory {
                 try destination.createDirectory(output)
+                if current == original { try rootCreated?(destination.guardValue(output)) }
                 for child in try children(current, limit: budget.maxEntries - budget.entries) {
                     let relative = String(child.path.dropFirst(original.path.count + 1))
                     if include(relative) {
@@ -345,9 +347,13 @@ final class IOSManagedFiles {
     }
 
     func move(_ source: URL, to target: URL, replace: Bool = false) throws {
+        try move(source, to: target, destination: self, replace: replace)
+    }
+
+    func move(_ source: URL, to target: URL, destination: IOSManagedFiles, replace: Bool = false) throws {
         let safeSource = try checked(source)
-        let safeTarget = try checked(target, allowMissing: !replace)
-        guard try guardValue(safeTarget.deletingLastPathComponent()).isDirectory else {
+        let safeTarget = try destination.checked(target, allowMissing: !replace)
+        guard try destination.guardValue(safeTarget.deletingLastPathComponent()).isDirectory else {
             throw IOSFileError.invalid("Move destination parent is unavailable")
         }
         let flags = replace ? UInt32(0) : UInt32(RENAME_EXCL)

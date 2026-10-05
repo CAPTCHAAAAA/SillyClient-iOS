@@ -43,6 +43,19 @@ final class IOSInstanceMaintenance {
     private let ttl: TimeInterval = 300
     private let base = ".sillyclient-maintenance"
 
+    static func requireNoPendingRecovery(_ root: URL, files: IOSManagedFiles) throws {
+        let parent = root.appendingPathComponent(".sillyclient-maintenance/recovery")
+        guard files.exists(parent) else { return }
+        for child in try files.children(parent, limit: 4096) {
+            guard try files.guardValue(child).isDirectory,
+                  files.exists(child.appendingPathComponent("payload")) else { continue }
+            let phase = (try? files.json(child.appendingPathComponent("record.json")))?["phase"] as? String
+            guard phase == "restored" else {
+                throw IOSFileError.invalid("Restore pending maintenance backups before renaming or relocating this instance")
+            }
+        }
+    }
+
     init(store: IOSInstanceStore, now: @escaping () -> TimeInterval = { Date().timeIntervalSince1970 }) {
         self.store = store
         self.now = now

@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useEffect, useRef, useCallback, useMemo, startTransition } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, startTransition } from "react";
 import {
   Menu,
   ChevronDown,
@@ -18,7 +18,7 @@ import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
 import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId } from "@/capacitor-plugin";
-import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection, sanitizeFolderName } from "@/lib/install-location";
+import { exactInstallTarget, installationSelection, sanitizeFolderName } from "@/lib/install-location";
 import { normalizeStoredInstances, serializeInstanceRecords, parseInstanceBackup, type StoredInstance } from "@/lib/instance-persistence";
 import { GLOBAL_LOG_KEY, instanceLogs, type LogLine } from "@/lib/log-store";
 import { OperationCoordinator, OperationCancelledError, type OperationContext } from "@/lib/operation-coordinator";
@@ -28,6 +28,9 @@ import OnboardingGuide from "@/components/onboarding/OnboardingGuide";
 import { WhatsNewModal } from "@/components/modals/WhatsNewModal";
 import { LegacyMigrationModal, type LegacyMigrationItem } from "@/components/modals/LegacyMigrationModal";
 import { RelocateInstanceModal } from "@/components/modals/RelocateInstanceModal";
+import type { InstanceRelocationResult } from "@/capacitor-plugin";
+import { applyInstanceLocation } from "@/lib/instance-location-state";
+import { InstanceAccessScope, instanceAccessIdentity, instanceAccessTarget, readInstancePasswordStatus, requireUnlockedRemoteDeletion } from "@/lib/instance-access";
 import { LAYERS } from "@/constants/layers";
 import { useLayerStack } from "@/hooks/useLayerStack";
 import { LayerBackdrop } from "@/components/common/LayerBackdrop";
@@ -44,7 +47,8 @@ import { RenameModal } from "@/components/modals/RenameModal";
 import { VersionDropdownMenu } from "@/components/modals/VersionDropdownMenu";
 import { CardActionMenu } from "@/components/modals/CardActionMenu";
 import { LaunchConsoleModal } from "@/components/modals/LaunchConsoleModal";
-import type { TavernInstance, ManageTab, InstanceSnapshot, BgMode, ThemeStyle, OperationPurpose } from "@/types";
+import { UnlockInstanceModal } from "@/components/modals/UnlockInstanceModal";
+import type { TavernInstance, ManageTab, BgMode, ThemeStyle, OperationPurpose } from "@/types";
 
 export const Route = createFileRoute("/")({
   component: SillyClientLauncher,
@@ -64,7 +68,6 @@ const BACKGROUND_PANEL_EXIT_MS = 300;
 const PANEL_EXIT_MS = 300;
 const POPOVER_EXIT_MS = 200;
 const MANAGE_PANEL_OPEN_GAP_MS = 32;
-const INSTANCE_SNAPSHOTS_KEY = "sillyclient.instanceSnapshots";
 
 function hydrateInstance(t: StoredInstance): TavernInstance {
   return {
@@ -207,7 +210,7 @@ function SillyClientLauncher() {
   const terminalPrompt = isWindows ? "C:\\>" : (isIOS ? "ios >" : "~ $");
   const terminalBanner = isWindows
     ? `SillyClient ${APP_VERSION} · Windows · cmd.exe`
-    : (isIOS ? "SillyClient 1.9.2 · iOS · NodeMobile" : `SillyClient ${APP_VERSION} · Android shell`);
+    : (isIOS ? `SillyClient ${APP_VERSION} · iOS · NodeMobile` : `SillyClient ${APP_VERSION} · Android shell`);
   const terminalPlaceholder = isWindows ? "输入 Windows 命令" : (isIOS ? "iOS 进程内环境（可查看服务运行日志）" : "输入 Android shell 命令");
   const [showOnboarding, setShowOnboarding] = useState(
     () => (!isWeb || isWindows) && !isShowcase && localStorage.getItem(ONBOARDING_KEY) !== ONBOARDING_VERSION,
@@ -222,11 +225,59 @@ function SillyClientLauncher() {
   const [relocatingInstance, setRelocatingInstance] = useState<TavernInstance | null>(null);
   const [showRelocateModal, setShowRelocateModal] = useState(false);
   const [isRelocateModalClosing, setIsRelocateModalClosing] = useState(false);
+  const [isRelocationBusy, setIsRelocationBusy] = useState(false);
+  const [isLegacyMigrationBusy, setIsLegacyMigrationBusy] = useState(false);
+  const legacyCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const relocateCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const legacyCheckRef = useRef(0);
+  const renameRequestsRef = useRef(new Set<string>());
   const [instances, setInstances] = useState<TavernInstance[]>(() => {
     if (isShowcase) return [];
     const loaded = loadInstances();
     return isDemoPreview ? [DEMO_INSTANCE, ...loaded] : loaded;
   });
+  const instancesRef = useRef(instances);
+  instancesRef.current = instances;
+  const launchAccessScope = useRef(new InstanceAccessScope()).current;
+  const launchAccessTargetRef = useRef<TavernInstance | null>(null);
+  const [unlockingInstance, setUnlockingInstance] = useState<TavernInstance | null>(null);
+  const [isUnlockModalClosing, setIsUnlockModalClosing] = useState(false);
+  const unlockingRef = useRef<TavernInstance | null>(null);
+  const unlockReturnToSessionRef = useRef(false);
+  const unlockCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const passwordRevisionRef = useRef(0);
+  const closeUnlockModal = useCallback(() => {
+    unlockingRef.current = null;
+    launchAccessTargetRef.current = null;
+    launchAccessScope.select(null);
+    setIsUnlockModalClosing(true);
+    if (unlockCloseTimerRef.current) clearTimeout(unlockCloseTimerRef.current);
+    unlockCloseTimerRef.current = setTimeout(() => {
+      setUnlockingInstance(null);
+      setIsUnlockModalClosing(false);
+      unlockCloseTimerRef.current = null;
+    }, POPOVER_EXIT_MS);
+  }, [launchAccessScope]);
+  const invalidateInstanceAccess = useCallback(() => {
+    passwordRevisionRef.current++;
+    closeUnlockModal();
+  }, [closeUnlockModal]);
+  const handleUpdateInstancePasswordStatus = useCallback((instanceId: string, hasPassword: boolean) => {
+    passwordRevisionRef.current++;
+    const update = (item: TavernInstance) => item.id === instanceId || instanceAccessIdentity(item) === instanceId
+      ? { ...item, hasPassword } : item;
+    setInstances(previous => previous.map(update));
+    setShowManagePanel(previous => previous ? update(previous) : previous);
+    if (unlockingRef.current && (unlockingRef.current.id === instanceId || instanceAccessIdentity(unlockingRef.current) === instanceId)) {
+      closeUnlockModal();
+    }
+  }, [closeUnlockModal]);
+  useLayoutEffect(() => {
+    const target = unlockingRef.current || launchAccessTargetRef.current;
+    if (!target) return;
+    const current = instances.find(item => item.id === target.id);
+    if (!current || instanceAccessTarget(current) !== instanceAccessTarget(target)) closeUnlockModal();
+  }, [instances, closeUnlockModal]);
   const [showBgPanel, setShowBgPanel] = useState(false);
   const [isPanelClosing, setIsPanelClosing] = useState(false);
   const [bgMode, setBgMode] = useState<BgMode>("dynamic");
@@ -323,7 +374,6 @@ function SillyClientLauncher() {
   const setTerminalLogs = useCallback((value: LogLine[] | ((previous: LogLine[]) => LogLine[])) => {
     instanceLogs.update(terminalLogTarget.current, value);
   }, []);
-  const [instanceSnapshots, setInstanceSnapshots] = useState<Record<string, InstanceSnapshot[]>>({});
   // 关于页真实数据
   const [aboutInfo, setAboutInfo] = useState<{ version: string; path: string; sizeBytes: number; createdAt: string; status: string } | null>(null);
   // 安全 insets(挖孔避让)
@@ -462,6 +512,12 @@ function SillyClientLauncher() {
     if (managePanelOpenTimerRef.current) clearTimeout(managePanelOpenTimerRef.current);
     if (managePanelCloseTimerRef.current) clearTimeout(managePanelCloseTimerRef.current);
     if (renameCloseTimerRef.current) clearTimeout(renameCloseTimerRef.current);
+    if (legacyCloseTimerRef.current) clearTimeout(legacyCloseTimerRef.current);
+    if (relocateCloseTimerRef.current) clearTimeout(relocateCloseTimerRef.current);
+    if (unlockCloseTimerRef.current) clearTimeout(unlockCloseTimerRef.current);
+    launchAccessScope.select(null);
+    unlockingRef.current = null;
+    legacyCheckRef.current++;
   }, []);
 
   useEffect(() => {
@@ -505,15 +561,6 @@ function SillyClientLauncher() {
     return () => window.removeEventListener("resize", updateRight);
   }, [appUpdateState]);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(INSTANCE_SNAPSHOTS_KEY);
-      if (raw) setInstanceSnapshots(JSON.parse(raw) as Record<string, InstanceSnapshot[]>);
-    } catch {
-      /* ignore invalid local snapshots */
-    }
-  }, []);
-
   // 支持通过 URL 参数直接唤起向导指定面板 (例如 ?wizard=import 方便本地走查)
   useEffect(() => {
     try {
@@ -542,12 +589,16 @@ function SillyClientLauncher() {
 
   useEffect(() => {
     if (isShowcase) return;
-    try {
-      localStorage.setItem(INSTANCE_SNAPSHOTS_KEY, JSON.stringify(instanceSnapshots));
-    } catch {
-      /* ignore storage quota errors */
-    }
-  }, [instanceSnapshots, isShowcase]);
+    let active = true;
+    const revision = passwordRevisionRef.current;
+    TarvenEnv.listInstancePasswordStatus().then(status => {
+      if (!active || revision !== passwordRevisionRef.current || !status || typeof status !== "object") return;
+      setInstances(previous => previous.map(item => ({
+        ...item, hasPassword: status[instanceAccessIdentity(item)] === true,
+      })));
+    }).catch(() => { /* Every launch still requires a fresh native status query. */ });
+    return () => { active = false; };
+  }, [isShowcase]);
 
   // 液态玻璃底色:动态模式微偏红,黑夜模式蓝紫,白天模式白色
   const glassBg = isLight
@@ -657,6 +708,7 @@ function SillyClientLauncher() {
   useEffect(() => {
     if (!showManagePanel) return;
     const t = showManagePanel;
+    let cancelled = false;
     setAboutInfo(null);
     (async () => {
       try {
@@ -666,6 +718,7 @@ function SillyClientLauncher() {
             installPath: t.installPath,
             port: t.port ?? 8000,
           });
+          if (cancelled) return;
           setAboutInfo({
             version: info.version,
             path: info.path,
@@ -688,6 +741,7 @@ function SillyClientLauncher() {
         }
       } catch { /* 远程或非 Capacitor */ }
     })();
+    return () => { cancelled = true; };
   }, [showManagePanel]);
 
   const toggleBgPanel = () => {
@@ -1181,8 +1235,11 @@ function SillyClientLauncher() {
   }, [contentOpenMode, setLaunchLogs]);
 
   // 启动实例入口
-  const launchTavern = useCallback(async (instance: TavernInstance) => {
+  const launchTavernDirect = useCallback(async (instance: TavernInstance, returnToSession = false) => {
     if (operations.busy) return;
+    if (returnToSession) {
+      try { await TarvenEnv.returnToTavern(); return; } catch {}
+    }
     const operation = operations.begin(instance.installDir || instance.id, "launch");
     lastMigration.current = null;
     setLaunchLogKey(operation.logKey);
@@ -1248,18 +1305,59 @@ function SillyClientLauncher() {
     }
   }, [operations, doLaunch, openRemoteInstance, setLaunchLogs]);
 
+  const launchTavern = useCallback(async (instance: TavernInstance, returnToSession = false) => {
+    if (operations.busy) return;
+    if (unlockingRef.current) closeUnlockModal();
+    const target = instanceAccessTarget(instance);
+    launchAccessScope.select(target);
+    const request = launchAccessScope.begin();
+    if (!request) return;
+    launchAccessTargetRef.current = instance;
+    const passwordRevision = passwordRevisionRef.current;
+    try {
+      const hasPassword = await readInstancePasswordStatus(instance, options => TarvenEnv.hasInstancePassword(options));
+      const current = instancesRef.current.find(item => item.id === instance.id);
+      if (!request.isCurrent() || passwordRevision !== passwordRevisionRef.current
+        || !current || instanceAccessTarget(current) !== target) return;
+      handleUpdateInstancePasswordStatus(instance.id, hasPassword);
+      if (hasPassword) {
+        if (unlockCloseTimerRef.current) clearTimeout(unlockCloseTimerRef.current);
+        unlockingRef.current = current;
+        unlockReturnToSessionRef.current = returnToSession;
+        setUnlockingInstance(current);
+        setIsUnlockModalClosing(false);
+      } else {
+        closeUnlockModal();
+        await launchTavernDirect(current, returnToSession);
+      }
+    } catch (error) {
+      const current = instancesRef.current.find(item => item.id === instance.id);
+      if (!request.isCurrent() || !current || instanceAccessTarget(current) !== target) return;
+      const message = error instanceof Error ? error.message : "无法确认实例密码状态，请重试";
+      setLaunchError(message);
+      setLaunchProgress(null);
+      setLastLaunchParams(instance);
+      setOperationPurpose("launch");
+      setIsLaunchPanelClosing(false);
+      setShowLaunchPanel(true);
+      setLaunchLogs([{ msg: message, level: "error" }]);
+    } finally { request.finish(); }
+  }, [operations, launchAccessScope, launchTavernDirect, handleUpdateInstancePasswordStatus, closeUnlockModal, setLaunchLogs]);
+
+  const completeInstanceUnlock = useCallback((instance: TavernInstance) => {
+    const target = unlockingRef.current;
+    const current = instancesRef.current.find(item => item.id === instance.id);
+    if (!target || !current || instanceAccessTarget(target) !== instanceAccessTarget(instance)
+      || instanceAccessTarget(current) !== instanceAccessTarget(instance)) return;
+    const returnToSession = unlockReturnToSessionRef.current;
+    closeUnlockModal();
+    void launchTavernDirect(current, returnToSession);
+  }, [closeUnlockModal, launchTavernDirect]);
+
   // 返回酒馆会话（无缝唤醒后台保活的酒馆 WebView）
   const handleReturnToTavern = useCallback(async (instance: TavernInstance) => {
-    const expected = operations.current;
-    try {
-      if (expected) await expected.wait(TarvenEnv.returnToTavern());
-      else await TarvenEnv.returnToTavern();
-    } catch (error) {
-      if (error instanceof OperationCancelledError || operations.current !== expected) return;
-      // 容错或浏览器环境 fallback
-      await launchTavern(instance);
-    }
-  }, [launchTavern, operations]);
+    await launchTavern(instance, true);
+  }, [launchTavern]);
 
   // 直接停止/关闭实例（就地停止进程并解除运行态）
   const handleStopInstance = useCallback(async (instance: TavernInstance) => {
@@ -1360,6 +1458,14 @@ function SillyClientLauncher() {
 
   const createInstance = useCallback(async () => {
     if (operations.busy) return;
+    if (isIOS && newInstanceMode === "local" && newInstanceLocalZip) {
+      setNewInstanceError("iOS 不支持从 ZIP 安装运行时，请通过复制迁移导入备份数据");
+      return;
+    }
+    if (isIOS && newInstanceMode === "import" && migrationAccessMode === "takeover") {
+      setNewInstanceError("iOS 不支持原地接管，请使用复制迁移");
+      return;
+    }
     const now = Date.now();
     const rawGivenName = newInstanceName.trim();
     let instanceDisplayName: string;
@@ -1410,12 +1516,7 @@ function SillyClientLauncher() {
     try {
       const installDir = instanceId;
       pendingInstanceId = instanceId;
-      const customParentDir = cleanInstallPath(newInstanceDir);
-      let resolvedCustomPath: string | undefined = undefined;
-      if (customParentDir) {
-        // 统一在指定父目录下生成以实例名命名的子文件夹
-        resolvedCustomPath = buildInstanceSubfolder(customParentDir, instanceDisplayName);
-      }
+      const resolvedCustomPath = exactInstallTarget(newInstanceDir, newInstancePathMode, instanceDisplayName);
       let selectedVersion = newInstanceVersion;
       let selectedZipballUrl: string | undefined;
 
@@ -1428,6 +1529,7 @@ function SillyClientLauncher() {
             setReleases(availableReleases);
           } catch (error) {
             if (error instanceof OperationCancelledError) throw error;
+            if (isIOS) throw error;
             availableReleases = [{ tag: "1.12.0", prerelease: false, zipballUrl: "" }];
             setReleases(availableReleases);
           }
@@ -1474,10 +1576,7 @@ function SillyClientLauncher() {
         if (migrationAccessMode === "takeover") {
           cleanCustomDest = cleanSourcePath;
         } else {
-          const rawDest = cleanInstallPath(migrationCustomDest);
-          if (rawDest) {
-            cleanCustomDest = buildInstanceSubfolder(rawDest, instanceDisplayName);
-          }
+          cleanCustomDest = exactInstallTarget(migrationCustomDest, migrationTargetPathMode, instanceDisplayName);
         }
       }
 
@@ -1639,6 +1738,7 @@ function SillyClientLauncher() {
     newInstanceName,
     newInstanceUrl,
     newInstanceVersion,
+    isIOS,
     newRemoteAuthEnabled,
     newRemoteAuthPassword,
     newRemoteAuthUsername,
@@ -1656,29 +1756,21 @@ function SillyClientLauncher() {
   // 重试当前操作
   const retryLaunch = useCallback(async () => {
     if (!lastLaunchParams || operations.busy) return;
+    if (operationPurpose === "launch") {
+      const current = instancesRef.current.find(item => item.id === lastLaunchParams.id);
+      if (current) await launchTavern(current);
+      return;
+    }
     const operation = operations.begin(lastLaunchParams.installDir || lastLaunchParams.id, operationPurpose);
     setLaunchLogKey(operation.logKey);
     setLaunchError(null);
-    setLaunchProgress({ pct: 0, text: operationPurpose === "create" ? "重新创建" : "重新启动" });
-    if (operationPurpose === "launch" && lastLaunchParams.type === "local") {
-      setInstances(prev => prev.map(t => t.id === lastLaunchParams.id ? { ...t, status: "running" } : t));
-    }
+    setLaunchProgress({ pct: 0, text: "重新创建" });
     setLaunchingId(lastLaunchParams.id);
     try {
-      if (operationPurpose === "create") {
-        if (lastMigration.current) {
-          await migrateCreatedInstance(lastLaunchParams, lastMigration.current, operation);
-        } else {
-          await provisionCreatedInstance(lastLaunchParams, operation);
-        }
-      } else if (lastLaunchParams.type === "remote") {
-        await openRemoteInstance(lastLaunchParams, operation);
-        setInstances(prev => prev.map(t => t.id === lastLaunchParams.id ? { ...t, status: "online" } : t));
-        operation.schedule(() => { setShowLaunchPanel(false); setLaunchProgress(null); }, 500);
+      if (lastMigration.current) {
+        await migrateCreatedInstance(lastLaunchParams, lastMigration.current, operation);
       } else {
-        const result = await doLaunch(lastLaunchParams, operation);
-        setInstances(prev => prev.map(t => t.id === lastLaunchParams.id ? { ...t, status: "running", port: result.port } : t));
-        operation.schedule(() => { setShowLaunchPanel(false); setLaunchProgress(null); }, 800);
+        await provisionCreatedInstance(lastLaunchParams, operation);
       }
     } catch (err: any) {
       if (!operation.isCurrent || err instanceof OperationCancelledError) return;
@@ -1686,16 +1778,13 @@ function SillyClientLauncher() {
       setLaunchError(msg);
       setLaunchProgress(null);
       setLaunchLogs(prev => [...prev, { msg: `重试失败: ${msg}`, level: "error" }]);
-      if (operationPurpose === "launch") {
-        setInstances(prev => prev.map(t => t.id === lastLaunchParams.id ? { ...t, status: "error" } : t));
-      }
     } finally {
       if (operation.isCurrent) {
         operation.finish();
         setLaunchingId(null);
       }
     }
-  }, [lastLaunchParams, operationPurpose, doLaunch, openRemoteInstance, provisionCreatedInstance, migrateCreatedInstance, operations, setLaunchLogs]);
+  }, [lastLaunchParams, operationPurpose, launchTavern, provisionCreatedInstance, migrateCreatedInstance, operations, setLaunchLogs]);
 
   /** 终端拖拽调整大小(同时支持鼠标与触屏)。 */
   const startResize = (clientX: number, clientY: number) => {
@@ -1771,31 +1860,8 @@ function SillyClientLauncher() {
     }
   }, [isWindows]);
 
-  const createInstanceSnapshot = useCallback(() => {
-    if (!showManagePanel) return;
-    const createdAt = new Date().toISOString();
-    const snapshot: InstanceSnapshot = {
-      id: `${showManagePanel.id}-${Date.now()}`,
-      createdAt,
-      label: `快照 ${new Date(createdAt).toLocaleDateString("zh-CN")}`,
-      port: draftPort,
-      config: { ...draftConfig },
-    };
-    setInstanceSnapshots(prev => ({
-      ...prev,
-      [showManagePanel.id]: [snapshot, ...(prev[showManagePanel.id] || [])],
-    }));
-  }, [draftConfig, draftPort, showManagePanel]);
-
-  const deleteInstanceSnapshot = useCallback((instanceId: string, snapshotId: string) => {
-    setInstanceSnapshots(prev => ({
-      ...prev,
-      [instanceId]: (prev[instanceId] || []).filter(snapshot => snapshot.id !== snapshotId),
-    }));
-  }, []);
-
   const closeRenameDialog = useCallback(() => {
-    if (!renamingId || isRenameClosing) return;
+    if (!renamingId || isRenameClosing || renameRequestsRef.current.has(renamingId)) return;
     if (renameCloseTimerRef.current) clearTimeout(renameCloseTimerRef.current);
     setIsRenameClosing(true);
     renameCloseTimerRef.current = setTimeout(() => {
@@ -1807,78 +1873,54 @@ function SillyClientLauncher() {
     }, PANEL_EXIT_MS);
   }, [isRenameClosing, renamingId]);
 
+  const applyReturnedInstanceLocation = useCallback((previousId: string, instanceId: string, newPath: string, newName?: string) => {
+    const target = instances.find(instance => instance.id === previousId || instance.installDir === previousId);
+    const oldUiId = target?.id || previousId;
+    const oldNativeId = target?.installDir || oldUiId;
+    const update = (instance: TavernInstance) => applyInstanceLocation(instance, oldUiId, instanceId, newPath, newName);
+    setInstances(previous => previous.map(update));
+    setShowManagePanel(previous => previous ? update(previous) : previous);
+    setMaintenanceInstance(previous => previous ? update(previous) : previous);
+    setLastLaunchParams(previous => previous ? update(previous) : previous);
+    setTerminalInstanceId(previous => previous === oldUiId ? instanceId : previous);
+    setHoveredCard(previous => previous === oldUiId ? instanceId : previous);
+    setActiveCardMenu(previous => previous === oldUiId ? instanceId : previous);
+    setLaunchLogKey(previous => previous === oldNativeId ? instanceId : previous);
+    if (oldNativeId !== instanceId) {
+      instanceLogs.flush();
+      instanceLogs.update(instanceId, [...instanceLogs.getSnapshot(oldNativeId)]);
+    }
+  }, [instances]);
+
   const executeRenameInstance = useCallback(async (instanceId: string, newName: string): Promise<boolean> => {
     const trimmed = newName.trim();
-    if (!trimmed) return false;
-
-    const target = instances.find(inst => inst.id === instanceId);
-    if (!target) return false;
-
-    // 如果名称没有发生改变，直接返回成功
-    if (trimmed === (target.subtitle || target.name)) {
-      return true;
-    }
-
-    // 远程实例无本地文件系统目录，仅更新显示名称
+    const target = instances.find(instance => instance.id === instanceId);
+    if (!trimmed || !target) return false;
+    if (trimmed === (target.subtitle || target.name)) return true;
     if (target.type === "remote") {
-      setInstances(prev => prev.map(inst => inst.id === instanceId ? { ...inst, name: trimmed, subtitle: trimmed } : inst));
-      setShowManagePanel(prev => prev && prev.id === instanceId ? { ...prev, name: trimmed, subtitle: trimmed } : prev);
+      const update = (instance: TavernInstance) => instance.id === instanceId ? { ...instance, name: trimmed, subtitle: trimmed } : instance;
+      setInstances(previous => previous.map(update));
+      setShowManagePanel(previous => previous ? update(previous) : previous);
       return true;
     }
-
-    // 严密保护：如果实例正在运行，无法安全重命名底层文件夹
-    if (target.status === "running") {
-      throw new Error("实例正在运行中，请先停止实例再执行重命名！");
+    if (target.status === "running" || launchingId === instanceId) {
+      throw new Error("请先停止实例并等待当前任务完成，再重命名。");
     }
-
-    const res = await TarvenEnv.renameInstance({
-      instanceId: target.installDir || target.id,
-      newName: trimmed,
-      installPath: target.installPath,
-    });
-
-    if (res && res.success) {
-      setInstances(prev => prev.map(inst => {
-        if (inst.id === instanceId || inst.installDir === instanceId) {
-          return {
-            ...inst,
-            id: res.newId,
-            name: trimmed,
-            subtitle: trimmed,
-            installDir: res.newId,
-            installPath: res.newPath,
-          };
-        }
-        return inst;
-      }));
-
-      setShowManagePanel(prev => {
-        if (prev && (prev.id === instanceId || prev.installDir === instanceId)) {
-          return {
-            ...prev,
-            id: res.newId,
-            name: trimmed,
-            subtitle: trimmed,
-            installDir: res.newId,
-            installPath: res.newPath,
-          };
-        }
-        return prev;
+    if (renameRequestsRef.current.has(instanceId)) throw new Error("实例正在重命名，请稍候。");
+    renameRequestsRef.current.add(instanceId);
+    try {
+      const result = await TarvenEnv.renameInstance({
+        instanceId: target.installDir || target.id, newName: trimmed, installPath: target.installPath,
       });
-
-      setInstanceSnapshots(prev => {
-        if (!prev[instanceId]) return prev;
-        const next = { ...prev };
-        next[res.newId] = next[instanceId];
-        delete next[instanceId];
-        return next;
-      });
-
+      if (!result?.success || !result.newId?.trim() || !result.newPath?.trim()) {
+        throw new Error("重命名未成功，实例名称与路径保持不变。");
+      }
+      applyReturnedInstanceLocation(instanceId, result.newId, result.newPath, trimmed);
       return true;
+    } finally {
+      renameRequestsRef.current.delete(instanceId);
     }
-
-    return false;
-  }, [instances]);
+  }, [instances, launchingId, applyReturnedInstanceLocation]);
 
   const openInstanceTerminal = useCallback((instance: TavernInstance) => {
     setTerminalInstanceId(instance.id);
@@ -1949,6 +1991,8 @@ function SillyClientLauncher() {
 
     try {
       let freedBytes = 0;
+      let deletedNativeId = instanceAccessIdentity(pendingDelete);
+      let deletionWarning: string | undefined;
       if (pendingDelete.type === "local") {
         if (pendingDelete.status === "running") {
           operations.cancel(pendingDelete.installDir || pendingDelete.id);
@@ -1961,32 +2005,35 @@ function SillyClientLauncher() {
         });
         if (!result.success) throw new Error("原生端未能删除实例文件");
         freedBytes = result.freedBytes || 0;
+        deletedNativeId = result.instanceId || deletedNativeId;
+        deletionWarning = result.warning;
       } else {
+        const hasPassword = await readInstancePasswordStatus(pendingDelete, options => TarvenEnv.hasInstancePassword(options));
+        requireUnlockedRemoteDeletion(hasPassword);
         await TarvenEnv.clearRemoteBasicAuth({ instanceId: pendingDelete.id });
       }
 
-      setInstances(prev => prev.filter(instance => instance.id !== pendingDelete.id));
-      setInstanceSnapshots(prev => {
-        if (!(pendingDelete.id in prev)) return prev;
-        const next = { ...prev };
-        delete next[pendingDelete.id];
-        return next;
-      });
-      setTerminalInstanceId(current => current === pendingDelete.id ? null : current);
-      setTerminalLogs(prev => [...prev, {
+      const isDeletedInstance = (instance: TavernInstance) => instance.id === pendingDelete.id
+        || (pendingDelete.type === "local" && instance.type === "local"
+          && instanceAccessIdentity(instance) === deletedNativeId);
+      const deletedIds = new Set(instancesRef.current.filter(isDeletedInstance).map(instance => instance.id));
+      setInstances(prev => prev.filter(instance => !isDeletedInstance(instance)));
+      setTerminalInstanceId(current => current && deletedIds.has(current) ? null : current);
+      // Deletion results belong to the launcher, not a log bucket whose instance is gone.
+      instanceLogs.update(GLOBAL_LOG_KEY, prev => [...prev, {
         msg: freedBytes > 0
           ? `已删除 ${pendingDelete.subtitle || pendingDelete.name}，释放 ${(freedBytes / 1048576).toFixed(1)}MB`
           : `已移除 ${pendingDelete.subtitle || pendingDelete.name}`,
         level: "success",
-      }]);
+      }, ...(deletionWarning ? [{ msg: `警告: ${deletionWarning}`, level: "warning" }] : [])]);
       setPendingDelete(null);
-      setActiveSlide(current => Math.max(0, Math.min(current, instances.length - 1)));
+      setActiveSlide(current => Math.max(0, Math.min(current, instancesRef.current.length - deletedIds.size)));
     } catch (err: any) {
       setDeleteInstanceError(err?.message || String(err));
     } finally {
       setIsDeletingInstance(false);
     }
-  }, [instances.length, isDeletingInstance, pendingDelete, operations, setTerminalLogs]);
+  }, [isDeletingInstance, pendingDelete, operations]);
 
   /** 更新当前管理面板实例的 config 字段。 */
   const updateManagedConfig = (patch: Partial<InstanceConfig>) => {
@@ -2014,6 +2061,7 @@ function SillyClientLauncher() {
 
   const dismissLaunchPanel = useCallback(async () => {
     if (isLaunchPanelClosing) return;
+    launchAccessScope.select(null);
     const original = operations.current;
     const cancelled = original?.busy ? operations.cancel() : null;
     const expected = operations.current;
@@ -2151,38 +2199,27 @@ function SillyClientLauncher() {
   }, []);
 
   const dismissLegacyMigration = useCallback(() => {
+    if (isLegacyMigrationBusy || isLegacyMigrationClosing) return;
     setIsLegacyMigrationClosing(true);
-    setTimeout(() => {
+    if (legacyCloseTimerRef.current) clearTimeout(legacyCloseTimerRef.current);
+    legacyCloseTimerRef.current = setTimeout(() => {
       setShowLegacyMigration(false);
       setIsLegacyMigrationClosing(false);
+      legacyCloseTimerRef.current = null;
     }, PANEL_EXIT_MS);
-  }, []);
+  }, [isLegacyMigrationBusy, isLegacyMigrationClosing]);
 
-  const handleLegacyMigrationComplete = useCallback(() => {
-    if (TarvenEnv.scanInstances) {
-      TarvenEnv.scanInstances()
-        .then(({ instances: scanned }) => {
-          if (scanned && scanned.length > 0) {
-            setInstances((prev) => {
-              const updated = prev.map((inst) => {
-                const safeId = inst.installDir || inst.id;
-                const found = scanned.find((s) => s.instanceId === safeId);
-                if (found) {
-                  return {
-                    ...inst,
-                    installPath: found.path,
-                  };
-                }
-                return inst;
-              });
-              saveInstances(updated);
-              return updated;
-            });
-          }
-        })
-        .catch(() => {});
-    }
-  }, []);
+  const checkLegacyMigration = useCallback(async () => {
+    if ((isWeb && !isWindows) || isShowcase) return;
+    const generation = ++legacyCheckRef.current;
+    try {
+      const result = await TarvenEnv.checkLegacyInstances();
+      if (generation !== legacyCheckRef.current || !result.instances.length) return;
+      setLegacyMigrationList(result.instances);
+      setShowLegacyMigration(true);
+      setIsLegacyMigrationClosing(false);
+    } catch { /* Older hosts may not provide storage relocation. */ }
+  }, [isWeb, isWindows, isShowcase]);
 
   const dismissWhatsNew = useCallback(() => {
     localStorage.setItem(WHATS_NEW_KEY, WHATS_NEW_VERSION);
@@ -2190,62 +2227,35 @@ function SillyClientLauncher() {
     setTimeout(() => {
       setShowWhatsNew(false);
       setIsWhatsNewClosing(false);
-
-      // 公告关闭后，检测是否需要一键迁移旧版路径实例
-      if (isWindows && TarvenEnv.checkLegacyInstances) {
-        TarvenEnv.checkLegacyInstances()
-          .then(({ instances }) => {
-            if (instances && instances.length > 0) {
-              setLegacyMigrationList(instances);
-              setShowLegacyMigration(true);
-              setIsLegacyMigrationClosing(false);
-            }
-          })
-          .catch(() => {});
-      }
     }, PANEL_EXIT_MS);
-  }, [isWindows]);
+  }, []);
+
+  useEffect(() => {
+    if (!showOnboarding && !showWhatsNew) void checkLegacyMigration();
+  }, [showOnboarding, showWhatsNew, checkLegacyMigration]);
 
   const openRelocateModal = useCallback((target: TavernInstance) => {
+    if (relocateCloseTimerRef.current) clearTimeout(relocateCloseTimerRef.current);
     setRelocatingInstance(target);
     setShowRelocateModal(true);
     setIsRelocateModalClosing(false);
   }, []);
 
   const closeRelocateModal = useCallback(() => {
+    if (isRelocationBusy || isRelocateModalClosing) return;
     setIsRelocateModalClosing(true);
-    setTimeout(() => {
+    if (relocateCloseTimerRef.current) clearTimeout(relocateCloseTimerRef.current);
+    relocateCloseTimerRef.current = setTimeout(() => {
       setShowRelocateModal(false);
       setIsRelocateModalClosing(false);
       setRelocatingInstance(null);
+      relocateCloseTimerRef.current = null;
     }, PANEL_EXIT_MS);
-  }, []);
+  }, [isRelocationBusy, isRelocateModalClosing]);
 
-  const handleInstanceRelocated = useCallback((instanceId: string, newPath: string) => {
-    setInstances((prev) => {
-      const updated = prev.map((inst) => {
-        if (inst.id === instanceId || inst.installDir === instanceId) {
-          return {
-            ...inst,
-            installPath: newPath,
-          };
-        }
-        return inst;
-      });
-      saveInstances(updated);
-      return updated;
-    });
-
-    setShowManagePanel((current) => {
-      if (current && (current.id === instanceId || current.installDir === instanceId)) {
-        return {
-          ...current,
-          installPath: newPath,
-        };
-      }
-      return current;
-    });
-  }, []);
+  const handleInstanceRelocated = useCallback((previousId: string, result: InstanceRelocationResult) => {
+    applyReturnedInstanceLocation(previousId, result.instanceId, result.newPath);
+  }, [applyReturnedInstanceLocation]);
 
   const openWhatsNew = useCallback(() => {
     closeAppMenu();
@@ -2295,6 +2305,10 @@ function SillyClientLauncher() {
   const { registerLayer } = useLayerStack();
 
   useEffect(() => {
+    if (unlockingInstance && !isUnlockModalClosing) return registerLayer("unlock_instance", closeUnlockModal);
+  }, [unlockingInstance, isUnlockModalClosing, registerLayer, closeUnlockModal]);
+
+  useEffect(() => {
     if (showBgPanel) return registerLayer("bg_panel", () => {
       setIsPanelClosing(true);
       setTimeout(() => { setShowBgPanel(false); setIsPanelClosing(false); }, BACKGROUND_PANEL_EXIT_MS);
@@ -2316,8 +2330,8 @@ function SillyClientLauncher() {
   }, [showAppMenu, registerLayer]);
 
   useEffect(() => {
-    if (showManagePanel) return registerLayer("manage_panel", closeManagePanel);
-  }, [showManagePanel, registerLayer, closeManagePanel]);
+    if (showManagePanel && !isManagePanelClosing && !unlockingInstance) return registerLayer("manage_panel", closeManagePanel);
+  }, [showManagePanel, isManagePanelClosing, unlockingInstance, registerLayer, closeManagePanel]);
 
   useEffect(() => {
     if (showNewInstancePanel) return registerLayer("new_instance", () => {
@@ -2330,8 +2344,8 @@ function SillyClientLauncher() {
   }, [showNewInstancePanel, registerLayer, isCreatingInstance, closeVersionDropdown]);
 
   useEffect(() => {
-    if (showLaunchPanel) return registerLayer("launch_panel", dismissLaunchPanel);
-  }, [showLaunchPanel, registerLayer, dismissLaunchPanel]);
+    if (showLaunchPanel && !unlockingInstance) return registerLayer("launch_panel", dismissLaunchPanel);
+  }, [showLaunchPanel, unlockingInstance, registerLayer, dismissLaunchPanel]);
 
   useEffect(() => {
     if (pendingDelete) return registerLayer("delete_confirm", () => {
@@ -2340,11 +2354,16 @@ function SillyClientLauncher() {
   }, [pendingDelete, registerLayer, isDeletingInstance]);
 
   useEffect(() => {
-    if (renamingId) return registerLayer("rename_modal", () => {
-      setIsRenameClosing(true);
-      setTimeout(() => { setRenamingId(null); setIsRenameClosing(false); }, PANEL_EXIT_MS);
-    });
-  }, [renamingId, registerLayer]);
+    if (renamingId) return registerLayer("rename_modal", closeRenameDialog);
+  }, [renamingId, registerLayer, closeRenameDialog]);
+
+  useEffect(() => {
+    if (showLegacyMigration) return registerLayer("legacy_migration", dismissLegacyMigration);
+  }, [showLegacyMigration, registerLayer, dismissLegacyMigration]);
+
+  useEffect(() => {
+    if (showRelocateModal) return registerLayer("relocate_instance", closeRelocateModal);
+  }, [showRelocateModal, registerLayer, closeRelocateModal]);
 
   useEffect(() => {
     if (verDropdownOpen) return registerLayer("version_dropdown", closeVersionDropdown);
@@ -2549,7 +2568,7 @@ function SillyClientLauncher() {
                   }
                   if (!instance) {
                     setTerminalInstanceId(null);
-                    setTerminalLogs([{ msg: "请先选择一个实例，再打开实例终端", level: "info" }]);
+                    instanceLogs.append(GLOBAL_LOG_KEY, { msg: "请先选择一个实例，再打开实例终端", level: "info" });
                     setTerminalInput("");
                     setIsTerminalClosing(false);
                     setShowTerminal(true);
@@ -2740,14 +2759,7 @@ function SillyClientLauncher() {
             setActiveCardMenu(inst.id);
             setIsCardMenuClosing(false);
           }}
-          onRenameSave={async (instanceId, newName) => {
-            try {
-              await executeRenameInstance(instanceId, newName);
-              setExternallyRenamingId(null);
-            } catch (err: any) {
-              alert(err?.message || "重命名实例文件夹失败");
-            }
-          }}
+          onRenameSave={executeRenameInstance}
           externallyRenamingId={externallyRenamingId}
           onClearExternalRenaming={() => setExternallyRenamingId(null)}
           isWindows={isWindows}
@@ -2923,7 +2935,7 @@ function SillyClientLauncher() {
         error={renameError}
         saving={isRenamingSaving}
         onSave={async () => {
-          if (!renamingId || !renameValue.trim() || isRenamingSaving) return;
+          if (!renamingId || !renameValue.trim() || isRenamingSaving || renameRequestsRef.current.has(renamingId)) return;
           setIsRenamingSaving(true);
           setRenameError(null);
           try {
@@ -3042,6 +3054,7 @@ function SillyClientLauncher() {
         isLight={isLight}
         glassBg={glassBg}
         isWindows={isWindows}
+        isIOS={isIOS}
         newInstanceName={newInstanceName}
         setNewInstanceName={setNewInstanceName}
         newInstanceMode={newInstanceMode}
@@ -3135,15 +3148,6 @@ function SillyClientLauncher() {
           if (inst.type === "local") setMaintenanceInstance(inst);
         }}
         onOpenRelocate={openRelocateModal}
-        onOpenNewInstanceWizard={() => {
-          closeManagePanel();
-          setNewInstanceCompanionPresetEnabled(false);
-          setNewInstanceExtensionIds([]);
-          setTimeout(() => {
-            setShowNewInstancePanel(true);
-            setIsNewInstancePanelClosing(false);
-          }, PANEL_EXIT_MS);
-        }}
         onLaunchInstance={(inst) => {
           closeManagePanel();
           launchTavern(inst);
@@ -3164,14 +3168,6 @@ function SillyClientLauncher() {
         onPickCover={(inst) => {
           void pickInstanceCover(inst);
         }}
-        snapshots={instanceSnapshots}
-        onCreateSnapshot={createInstanceSnapshot}
-        onRestoreSnapshot={(snapshot) => {
-          setDraftPort(snapshot.port);
-          setDraftConfig({ ...snapshot.config });
-          setManageTab("launch");
-        }}
-        onDeleteSnapshot={deleteInstanceSnapshot}
         aboutInfo={aboutInfo}
         draftConfig={draftConfig}
         setDraftConfig={setDraftConfig}
@@ -3188,7 +3184,13 @@ function SillyClientLauncher() {
         onSaveManagedInstance={saveManagedInstance}
         terminalDisplayPrompt={terminalDisplayPrompt}
         terminalPlaceholder={terminalPlaceholder}
+        onUpdateInstancePasswordStatus={handleUpdateInstancePasswordStatus}
+        onPasswordMutationStart={invalidateInstanceAccess}
       />
+
+      <UnlockInstanceModal instance={unlockingInstance} isOpen={Boolean(unlockingInstance)}
+        isClosing={isUnlockModalClosing} onClose={closeUnlockModal} isLight={isLight}
+        glassBg={glassBg} onUnlockSuccess={completeInstanceUnlock} />
 
       <InstanceMaintenancePanel instance={maintenanceInstance} isOpen={!!maintenanceInstance}
         onClose={closeMaintenance} isLight={isLight} glassBg={glassBg} registerLayer={registerLayer} />
@@ -3219,7 +3221,10 @@ function SillyClientLauncher() {
         isLight={isLight}
         glassBg={glassBg}
         legacyInstances={legacyMigrationList}
-        onMigrationComplete={handleLegacyMigrationComplete}
+        isWindows={isWindows}
+        isIOS={isIOS}
+        onBusyChange={setIsLegacyMigrationBusy}
+        onInstanceRelocated={handleInstanceRelocated}
       />
 
       {/* 单实例存储路径迁移模态框 */}
@@ -3230,6 +3235,9 @@ function SillyClientLauncher() {
         onClose={closeRelocateModal}
         isLight={isLight}
         glassBg={glassBg}
+        isWindows={isWindows}
+        onBusyChange={setIsRelocationBusy}
+        isIOS={isIOS}
         onRelocated={handleInstanceRelocated}
       />
 

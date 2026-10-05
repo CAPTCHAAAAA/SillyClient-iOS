@@ -30,7 +30,9 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             "setPullToRefresh", "uninstallInstance", "cleanGarbage", "deleteGarbageItem", "openFilesApp",
             "setSecret", "getSecret", "deleteSecret", "checkUpdate", "scanInstanceMaintenance",
             "applyInstanceMaintenance", "listInstanceMaintenanceRecovery", "restoreInstanceMaintenance",
-            "checkLegacyInstances", "migrateLegacyInstances", "renameInstance", "relocateInstance"
+            "checkLegacyInstances", "migrateLegacyInstances", "renameInstance", "relocateInstance",
+            "setInstancePassword", "verifyInstancePassword", "hasInstancePassword",
+            "clearInstancePassword", "listInstancePasswordStatus"
         ]
         #if DEBUG
         names.append("dismissPickerForTesting")
@@ -84,6 +86,35 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     @objc func scanInstances(_ call: CAPPluginCall) { perform(call) { ["instances": try self.store.records()] } }
     @objc func getInstanceInfo(_ call: CAPPluginCall) { perform(call) { try self.store.info(self.id(call)) } }
 
+    private func password(_ call: CAPPluginCall, _ key: String) throws -> String? {
+        guard call.options[key] == nil || call.getString(key) != nil else {
+            throw IOSFileError.invalid("Access passwords must be strings")
+        }
+        return call.getString(key)
+    }
+    @objc func setInstancePassword(_ call: CAPPluginCall) {
+        perform(call) { try IOSInstanceAccessLock.shared.set(instanceId: self.id(call),
+            password: self.password(call, "password"), oldPassword: self.password(call, "oldPassword")) }
+    }
+    @objc func verifyInstancePassword(_ call: CAPPluginCall) {
+        perform(call) {
+            guard let password = try self.password(call, "password") else {
+                throw IOSFileError.invalid("An access password is required")
+            }
+            return ["valid": try IOSInstanceAccessLock.shared.verify(instanceId: self.id(call), password: password)]
+        }
+    }
+    @objc func hasInstancePassword(_ call: CAPPluginCall) {
+        perform(call) { ["hasPassword": try IOSInstanceAccessLock.shared.has(instanceId: self.id(call))] }
+    }
+    @objc func clearInstancePassword(_ call: CAPPluginCall) {
+        perform(call) { try IOSInstanceAccessLock.shared.clear(instanceId: self.id(call),
+            oldPassword: self.password(call, "oldPassword")) }
+    }
+    @objc func listInstancePasswordStatus(_ call: CAPPluginCall) {
+        perform(call) { try IOSInstanceAccessLock.shared.list().mapValues { $0 as Any } }
+    }
+
     private func reserveLocal(instance: String, operation: String) throws {
         guard viewSession?.2 != true, pendingViewSession?.2 != true else {
             throw IOSFileError.invalid("Close the current remote Tavern before preparing a local instance")
@@ -102,6 +133,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                 try self.reserveLocal(instance: instance, operation: operation)
                 self.io.async {
                     do {
+                        try self.store.recoverRelocation(instance, operation: operation)
+                        try NodeRunner.shared.checkCurrent(instance: instance, operation: operation)
                         self.notifyListeners("progress", data: ["instanceId": instance, "operationId": operation,
                             "percent": 10, "stage": "Preparing the pinned iOS runtime"])
                         let location = try self.store.location(instance, installPath: call.getString("installPath"), installPathMode: call.getString("installPathMode"), requireExisting: false)
@@ -400,15 +433,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         }
     }
     @objc func fetchReleases(_ call: CAPPluginCall) {
-        releases("SillyTavern/SillyTavern/releases?per_page=15") { result in
-            switch result {
-            case .success(let value):
-                guard let list = value as? [[String: Any]] else { call.reject("Release metadata is invalid"); return }
-                call.resolve(["releases": list.map { ["tag": $0["tag_name"] ?? "", "zipballUrl": $0["zipball_url"] ?? "",
-                    "prerelease": $0["prerelease"] ?? false] }])
-            case .failure(let error): call.reject(error.localizedDescription)
-            }
-        }
+        perform(call) { ["releases": try self.store.supportedReleases()] }
     }
     @objc func checkUpdate(_ call: CAPPluginCall) {
         releases("CAPTCHAAAAA/SillyClient/releases/latest") { result in
@@ -452,7 +477,19 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             } catch { call.reject(error.localizedDescription) }
         }
     }
-    @objc func uninstallInstance(_ call: CAPPluginCall) { perform(call) { try self.store.uninstall(self.id(call), installPath: call.getString("installPath")) } }
+    @objc func uninstallInstance(_ call: CAPPluginCall) {
+        perform(call) {
+            let id = try self.id(call)
+            var result = try self.store.uninstall(id, installPath: call.getString("installPath"))
+            guard let removedId = result["instanceId"] as? String else {
+                result["warning"] = "Instance removed; its canonical ID was not returned, so access locks were preserved"
+                return result
+            }
+            do { try IOSInstanceAccessLock.shared.remove(instanceId: removedId) }
+            catch { result["warning"] = "Instance removed; its access lock could not be cleared from Keychain" }
+            return result
+        }
+    }
     @objc func scanInstanceMaintenance(_ call: CAPPluginCall) { perform(call) { try IOSInstanceMaintenance.shared.scan(self.id(call)) } }
     @objc func applyInstanceMaintenance(_ call: CAPPluginCall) {
         perform(call) {
@@ -607,23 +644,36 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         pendingPickerCall = nil
     }
     @objc func checkLegacyInstances(_ call: CAPPluginCall) {
-        call.resolve(["instances": []])
+        perform(call) { ["instances": try self.store.legacyInstances()] }
     }
     @objc func migrateLegacyInstances(_ call: CAPPluginCall) {
-        call.resolve(["success": true, "results": []])
+        perform(call) {
+            let selection = call.getArray("instanceIds") as? [String]
+            guard call.options["instanceIds"] == nil || selection != nil else {
+                throw IOSFileError.invalid("Legacy migration requires an array of instance identities")
+            }
+            return try self.store.migrateLegacyInstances(instanceIds: selection)
+        }
     }
     @objc func renameInstance(_ call: CAPPluginCall) {
         perform(call) {
             let id = try self.id(call)
-            let newName = call.getString("newName") ?? id
-            return try self.store.rename(instanceId: id, newName: newName)
+            guard let newName = call.getString("newName"),
+                  call.options["installPath"] == nil || call.getString("installPath") != nil else {
+                throw IOSFileError.invalid("An instance name and an optional valid source path are required")
+            }
+            return try self.store.rename(instanceId: id, newName: newName, installPath: call.getString("installPath"))
         }
     }
     @objc func relocateInstance(_ call: CAPPluginCall) {
         perform(call) {
             let id = try self.id(call)
             let targetPath = call.getString("targetPath")
-            return try self.store.relocate(instanceId: id, targetPath: targetPath)
+            guard (call.options["targetPath"] == nil || targetPath != nil),
+                  call.options["installPath"] == nil || call.getString("installPath") != nil else {
+                throw IOSFileError.invalid("Relocation paths must be absolute local path strings")
+            }
+            return try self.store.relocate(instanceId: id, targetPath: targetPath, installPath: call.getString("installPath"))
         }
     }
     #if DEBUG

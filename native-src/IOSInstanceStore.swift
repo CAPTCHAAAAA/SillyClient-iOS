@@ -2,6 +2,7 @@ import Foundation
 import Yams
 import CryptoKit
 import CoreFoundation
+import Darwin
 
 final class IOSInstanceStore {
     static let shared = IOSInstanceStore()
@@ -26,7 +27,7 @@ final class IOSInstanceStore {
         return value
     }
 
-    private var registryURL: URL { documents.appendingPathComponent("instances-registry.json") }
+    var registryURL: URL { documents.appendingPathComponent("instances-registry.json") }
     func registry() throws -> [String: [String: Any]] {
         guard files.exists(registryURL) else { return [:] }
         guard let value = try files.json(registryURL) as? [String: [String: Any]], value.count <= 256 else {
@@ -35,7 +36,7 @@ final class IOSInstanceStore {
         return value
     }
 
-    private func recordPath(_ record: [String: Any]) throws -> URL {
+    func recordPath(_ record: [String: Any]) throws -> URL {
         if let relative = record["documentsRelativePath"] as? String {
             return documents.appendingPathComponent(try IOSSafeArchive.relativePath(relative))
         }
@@ -46,7 +47,11 @@ final class IOSInstanceStore {
     func location(_ raw: String, installPath: String? = nil, installPathMode: String? = nil,
                   requireExisting: Bool = true) throws -> IOSInstallationLocation {
         let id = try Self.identity(raw)
+        try recoverRelocation(id)
         let records = try registry()
+        guard records[id]?["removalPending"] as? Bool != true else {
+            throw IOSFileError.invalid("Instance deletion is incomplete; retry deletion before using this instance")
+        }
         let mode = installPathMode ?? "exact"
         guard mode == "exact" || mode == "root" else { throw IOSFileError.invalid("Invalid installation path mode") }
         if let record = records[id], record["isTakeover"] as? Bool == true {
@@ -62,6 +67,20 @@ final class IOSInstanceStore {
         }
         let target = registered ?? requestedTarget ?? defaultURL
         let location = try locations.acquire(target, grantId: records[id]?["grantId"] as? String)
+        try validateLocation(id, location: location, records: records)
+        let managed = location.files
+        if requireExisting || registered != nil {
+            let guardValue = try managed.guardValue(target)
+            guard guardValue.isDirectory else { throw IOSFileError.invalid("Instance directory is unavailable") }
+            if let expected = records[id]?["directoryIdentity"] as? String, expected != guardValue.identity {
+                throw IOSFileError.invalid("The registered instance directory was replaced; its contents were preserved") }
+        }
+        return location
+    }
+
+    func validateLocation(_ id: String, location: IOSInstallationLocation, records: [String: [String: Any]]) throws {
+        let target = location.directory
+        let defaultURL = documents.appendingPathComponent(id == "default" ? "SillyTavern" : "instances/\(id)")
         guard target.path != location.root.path, target.path != documents.appendingPathComponent("instances").path else {
             throw IOSFileError.invalid("An installation root cannot itself be an instance")
         }
@@ -84,15 +103,6 @@ final class IOSInstanceStore {
                 throw IOSFileError.invalid("The installation path overlaps existing managed storage")
             }
         }
-        let managed = location.files
-        if requireExisting || registered != nil {
-            let guardValue = try managed.guardValue(target)
-            guard guardValue.isDirectory else { throw IOSFileError.invalid("Instance directory is unavailable") }
-            if let expected = records[id]?["directoryIdentity"] as? String, expected != guardValue.identity {
-                throw IOSFileError.invalid("The registered instance directory was replaced; its contents were preserved")
-            }
-        }
-        return location
     }
 
     func directory(_ raw: String, requireExisting: Bool = true, maintenance: Bool = false) throws -> URL {
@@ -100,16 +110,20 @@ final class IOSInstanceStore {
     }
 
     func records() throws -> [[String: Any]] {
-        var ids = Set(try registry().keys)
+        let recoveryErrors = try recoverPendingRelocations()
+        let registered = try registry()
+        let registeredPaths = Set(try registered.values.map { try recordPath($0).path })
+        var ids = Set(registered.keys).union(recoveryErrors.keys)
         if files.exists(documents.appendingPathComponent("SillyTavern")) { ids.insert("default") }
         let parent = documents.appendingPathComponent("instances")
         if files.exists(parent) {
             for child in try files.children(parent, limit: 256) {
-                if (try? Self.identity(child.lastPathComponent)) != nil { ids.insert(child.lastPathComponent) }
+                if !registeredPaths.contains(child.path), (try? Self.identity(child.lastPathComponent)) != nil {
+                    ids.insert(child.lastPathComponent)
+                }
             }
         }
         var result: [[String: Any]] = []
-        let registered = try registry()
         for id in ids.sorted() {
             do { result.append(try info(id)) }
             catch {
@@ -121,6 +135,9 @@ final class IOSInstanceStore {
                     unavailable["hasServer"] = false
                     unavailable["error"] = error.localizedDescription
                     result.append(unavailable)
+                } else if let recoveryError = recoveryErrors[id] {
+                    result.append(["instanceId": id, "name": id, "status": "unavailable", "hasServer": false,
+                        "error": recoveryError, "relocationPending": true])
                 }
             }
         }
@@ -138,7 +155,7 @@ final class IOSInstanceStore {
         let version = files.exists(package) ? (try files.json(package)["version"] as? String ?? "local") : "local"
         let status = NodeRunner.shared.status
         let active = status["instanceId"] as? String == id
-        return ["instanceId": id, "version": version, "path": target.path, "installPath": target.path,
+        return ["instanceId": id, "name": record["name"] as? String ?? id, "version": version, "path": target.path, "installPath": target.path,
             "hasServer": files.exists(target.appendingPathComponent("server.js")),
             "sizeBytes": record["sizeBytes"] as? Int64 ?? 0,
             "createdAt": record["createdAt"] ?? Double(root.birthSeconds) * 1000,
@@ -148,29 +165,45 @@ final class IOSInstanceStore {
             "uptimeSeconds": active ? status["uptimeSeconds"] ?? 0 : 0, "isTakeover": false]
     }
 
-    private var ownershipName: String { ".sillyclient-installation.json" }
+    var ownershipName: String { ".sillyclient-installation.json" }
 
     private func register(_ id: String, location: IOSInstallationLocation) throws {
         var value = try registry()
         guard value[id] == nil, value.count < 256 else { throw IOSFileError.invalid("Instance is already registered or registry is full") }
-        let now = Date().timeIntervalSince1970 * 1000
-        let directory = location.directory
-        var record: [String: Any] = ["instanceId": id, "path": directory.path, "isTakeover": false,
-            "directoryIdentity": try location.files.guardValue(directory).identity,
-            "rootIdentity": location.rootIdentity,
-            "createdAt": now, "lastUsedAt": now, "totalUsageMs": 0]
-        if let grant = location.grantId { record["grantId"] = grant }
-        else { record["documentsRelativePath"] = String(directory.path.dropFirst(documents.path.count + 1)) }
-        value[id] = record
+        value[id] = try registrationRecord(id, location: location)
         try files.writeJSON(value, to: registryURL)
     }
 
-    private func ownership(_ id: String, location: IOSInstallationLocation, at directory: URL) throws {
+    func registrationRecord(_ id: String, location: IOSInstallationLocation, previous: [String: Any] = [:]) throws -> [String: Any] {
+        let now = Date().timeIntervalSince1970 * 1000
+        let directory = location.directory
+        var record = previous
+        record["instanceId"] = id
+        record["path"] = directory.path
+        record["isTakeover"] = false
+        record["directoryIdentity"] = try location.files.guardValue(directory).identity
+        record["rootIdentity"] = location.rootIdentity
+        record["createdAt"] = previous["createdAt"] ?? now
+        record["lastUsedAt"] = previous["lastUsedAt"] ?? now
+        record["totalUsageMs"] = previous["totalUsageMs"] ?? 0
+        record["grantId"] = nil
+        record["documentsRelativePath"] = nil
+        if let grant = location.grantId { record["grantId"] = grant }
+        else { record["documentsRelativePath"] = String(directory.path.dropFirst(documents.path.count + 1)) }
+        return record
+    }
+
+    func ownershipRecord(_ id: String, location: IOSInstallationLocation, at directory: URL) throws -> [String: Any] {
         var receipt: [String: Any] = ["revision": 1, "owner": "sillyclient", "instanceId": id,
             "path": location.directory.path, "rootIdentity": location.rootIdentity,
             "directoryIdentity": try location.files.guardValue(directory).identity]
         if let grant = location.grantId { receipt["grantId"] = grant }
-        try location.files.writeJSON(receipt, to: directory.appendingPathComponent(ownershipName), replace: false)
+        return receipt
+    }
+
+    private func ownership(_ id: String, location: IOSInstallationLocation, at directory: URL) throws {
+        try location.files.writeJSON(ownershipRecord(id, location: location, at: directory),
+                                     to: directory.appendingPathComponent(ownershipName), replace: false)
     }
 
     private func recoverRegistration(_ id: String, location: IOSInstallationLocation) throws {
@@ -191,6 +224,12 @@ final class IOSInstanceStore {
             if let value = value, fm.fileExists(atPath: value.appendingPathComponent("server.js").path) { return value }
         }
         throw IOSFileError.invalid("The pinned iOS runtime is missing")
+    }
+
+    public func supportedReleases() throws -> [[String: Any]] {
+        let runtime = try bundleRuntime()
+        let version = try validateRuntime(runtime, files: IOSManagedFiles(root: runtime))
+        return [["tag": version, "zipballUrl": "", "prerelease": false]]
     }
 
     @discardableResult
@@ -502,93 +541,94 @@ final class IOSInstanceStore {
         return target
     }
 
-    func uninstall(_ id: String, installPath: String? = nil) throws -> [String: Any] {
+    func uninstall(_ raw: String, installPath: String? = nil) throws -> [String: Any] {
+        let requestedId = try Self.identity(raw)
+        try recoverRelocation(requestedId)
+        let cleanId = requestedId.hasPrefix("scan-") ? String(requestedId.dropFirst(5)) : requestedId
+        if cleanId != requestedId {
+            let before = try registry()
+            if before[requestedId] == nil, before[cleanId] != nil { try recoverRelocation(cleanId) }
+        }
+        try NodeRunner.shared.beginMaintenance(instance: requestedId)
+        defer { NodeRunner.shared.endMaintenance(instance: requestedId) }
         var records = try registry()
-        let cleanId = id.hasPrefix("scan-") ? String(id.dropFirst(5)) : id
-        let isTakeover = (records[cleanId]?["isTakeover"] as? Bool == true) || (records[id]?["isTakeover"] as? Bool == true)
-        if isTakeover {
-            try NodeRunner.shared.beginMaintenance(instance: id)
-            defer { NodeRunner.shared.endMaintenance(instance: id) }
-            try NodeRunner.shared.stoppedMutation(instance: id) {
+        let id = records[requestedId] == nil && records[cleanId] != nil ? cleanId : requestedId
+        if records[id]?["isTakeover"] as? Bool == true {
+            try NodeRunner.shared.stoppedMutation(instance: requestedId) {
                 records.removeValue(forKey: id)
-                records.removeValue(forKey: cleanId)
                 try self.files.writeJSON(records, to: self.registryURL)
             }
-            return ["success": true, "freedBytes": 0]
+            return ["success": true, "freedBytes": 0, "instanceId": id]
         }
-        let location = try location(id, installPath: installPath)
+        let pending = records[id]?["removalPending"] as? Bool == true
+        let location: IOSInstallationLocation
+        if pending {
+            let record = records[id]!
+            let target = try recordPath(record)
+            if let requested = try installPath.map({ try IOSInstallationLocations.path($0) }), requested.path != target.path {
+                throw IOSFileError.invalid("The deletion path conflicts with the registered instance location")
+            }
+            location = try locations.acquire(target, grantId: record["grantId"] as? String)
+            try validateLocation(id, location: location, records: records)
+        } else {
+            location = try self.location(id, installPath: installPath)
+        }
         defer { withExtendedLifetime(location) {} }
         let source = location.directory
-        let files = location.files
-        let legacy = documents.appendingPathComponent(id == "default" ? "SillyTavern" : "instances/\(id)")
-        let legacyClean = documents.appendingPathComponent(cleanId == "default" ? "SillyTavern" : "instances/\(cleanId)")
-        let instancesDir = documents.appendingPathComponent("instances")
-        let isLauncherChild = source.path == legacy.path || source.path == legacyClean.path
-            || source.path.hasPrefix(instancesDir.path + "/")
-            || files.exists(source.appendingPathComponent(ownershipName))
-        guard records[id] != nil || records[cleanId] != nil || isLauncherChild else {
-            throw IOSFileError.invalid("Uninstall requires a registered instance; unregistered selected contents were preserved")
-        }
-        let identity = try files.guardValue(source).identity
-        try NodeRunner.shared.beginMaintenance(instance: id)
-        defer { NodeRunner.shared.endMaintenance(instance: id) }
-        let target = source.deletingLastPathComponent().appendingPathComponent(".sillyclient-removed-\(UUID().uuidString)")
-        try NodeRunner.shared.stoppedMutation(instance: id) {
-            guard try files.guardValue(source).identity == identity else { throw IOSFileError.invalid("Instance directory changed") }
-            try files.move(source, to: target)
-            records.removeValue(forKey: id)
-            records.removeValue(forKey: cleanId)
-            do { try self.files.writeJSON(records, to: registryURL) }
-            catch {
-                if !files.exists(source), (try? files.guardValue(target).identity) == identity {
-                    do { try files.move(target, to: source) }
-                    catch { throw IOSFileError.invalid("Removal was not committed; instance data was preserved at \(target.path)") }
+        let managed = location.files
+        if !pending {
+            let sourceIdentity = try managed.guardValue(source).identity
+            if let expected = records[id]?["directoryIdentity"] as? String, expected != sourceIdentity {
+                throw IOSFileError.invalid("The instance directory changed before deletion; its contents were preserved")
+            }
+            let legacy = documents.appendingPathComponent(id == "default" ? "SillyTavern" : "instances/\(id)")
+            if records[id] == nil, source.path != legacy.path {
+                let receipt = try managed.json(source.appendingPathComponent(ownershipName))
+                guard receipt["revision"] as? Int == 1, receipt["owner"] as? String == "sillyclient",
+                      receipt["instanceId"] as? String == id, receipt["path"] as? String == source.path,
+                      receipt["rootIdentity"] as? String == location.rootIdentity,
+                      receipt["grantId"] as? String == location.grantId,
+                      receipt["directoryIdentity"] as? String == sourceIdentity else {
+                    throw IOSFileError.invalid("Uninstall requires a registered or verified launcher-owned instance")
                 }
-                throw IOSFileError.invalid("Removal was not committed; instance data was preserved")
+            }
+            guard records[id] != nil || records.count < 256 else { throw IOSFileError.invalid("Instance registry is full") }
+            var record = try registrationRecord(id, location: location, previous: records[id] ?? [:])
+            guard record["directoryIdentity"] as? String == sourceIdentity else {
+                throw IOSFileError.invalid("The instance directory changed before deletion; its contents were preserved")
+            }
+            record["removalPending"] = true
+            records[id] = record
+            // Persist the original path and identities before a recursive removal can partially succeed.
+            try NodeRunner.shared.stoppedMutation(instance: requestedId) {
+                try self.files.writeJSON(records, to: registryURL)
             }
         }
-        try fm.removeItem(at: files.checked(target))
-        return ["success": true, "freedBytes": 0]
+        guard let record = records[id], let identity = record["directoryIdentity"] as? String,
+              record["rootIdentity"] as? String == location.rootIdentity else {
+            throw IOSFileError.invalid("Pending deletion ownership cannot be verified; contents were preserved")
+        }
+        let checked = try managed.checked(source, allowMissing: true)
+        var value = stat()
+        if lstat(checked.path, &value) == 0 {
+            let current = try managed.guardValue(checked)
+            guard current.isDirectory, current.identity == identity else {
+                throw IOSFileError.invalid("The pending deletion directory was replaced; its contents were preserved")
+            }
+            try fm.removeItem(at: checked)
+        } else {
+            guard errno == ENOENT else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+        try NodeRunner.shared.stoppedMutation(instance: requestedId) {
+            // A missing directory also completes a deletion interrupted after removal but before this commit.
+            guard lstat(checked.path, &value) != 0 else {
+                throw IOSFileError.invalid("The deletion path is still occupied; its registration was retained")
+            }
+            guard errno == ENOENT else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            records.removeValue(forKey: id)
+            try self.files.writeJSON(records, to: registryURL)
+        }
+        return ["success": true, "freedBytes": 0, "instanceId": id]
     }
 
-    func rename(instanceId: String, newName: String) throws -> [String: Any] {
-        let oldId = try Self.identity(instanceId)
-        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw IOSFileError.invalid("A non-empty new instance name is required")
-        }
-        var records = try registry()
-        var record = records[oldId] ?? [:]
-        record["name"] = trimmed
-        records[oldId] = record
-        try self.files.writeJSON(records, to: registryURL)
-        let dir = try? directory(oldId)
-        return [
-            "success": true,
-            "oldId": oldId,
-            "newId": oldId,
-            "oldPath": dir?.path ?? "",
-            "newPath": dir?.path ?? ""
-        ]
-    }
-
-    func relocate(instanceId: String, targetPath: String?) throws -> [String: Any] {
-        let id = try Self.identity(instanceId)
-        let sourceDir = try directory(id)
-        if targetPath == nil || targetPath == sourceDir.path {
-            return ["success": true, "instanceId": id, "oldPath": sourceDir.path, "newPath": sourceDir.path, "unchanged": true]
-        }
-        let target = try IOSInstallationLocations.path(targetPath!)
-        guard target.path != sourceDir.path else {
-            return ["success": true, "instanceId": id, "oldPath": sourceDir.path, "newPath": sourceDir.path, "unchanged": true]
-        }
-        try files.move(sourceDir, to: target)
-        var records = try registry()
-        var record = records[id] ?? [:]
-        record["path"] = target.path
-        record["documentsRelativePath"] = nil
-        records[id] = record
-        try self.files.writeJSON(records, to: registryURL)
-        return ["success": true, "instanceId": id, "oldPath": sourceDir.path, "newPath": target.path, "unchanged": false]
-    }
 }

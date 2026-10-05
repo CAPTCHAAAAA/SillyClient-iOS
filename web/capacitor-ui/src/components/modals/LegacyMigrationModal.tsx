@@ -1,9 +1,11 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { X, FolderSync, CheckCircle2, AlertCircle, ArrowRight, Loader2 } from "lucide-react";
 import { cn, formatDisplayVersion } from "../../lib/utils";
 import { LAYERS } from "../../constants/layers";
 import { LayerBackdrop } from "../common/LayerBackdrop";
 import { TarvenEnv } from "../../capacitor-plugin";
+import type { InstanceRelocationResult } from "../../capacitor-plugin";
+import { relocateLegacyItems } from "../../lib/instance-location-state";
 
 export interface LegacyMigrationItem {
   instanceId: string;
@@ -20,6 +22,10 @@ export interface LegacyMigrationModalProps {
   isLight: boolean;
   glassBg: string;
   legacyInstances: LegacyMigrationItem[];
+  isWindows?: boolean;
+  isIOS?: boolean;
+  onBusyChange?: (busy: boolean) => void;
+  onInstanceRelocated?: (previousId: string, result: InstanceRelocationResult) => void;
   onMigrationComplete?: () => void;
 }
 
@@ -35,6 +41,10 @@ export const LegacyMigrationModal: React.FC<LegacyMigrationModalProps> = ({
   isLight,
   glassBg,
   legacyInstances,
+  isWindows = false,
+  isIOS = false,
+  onBusyChange,
+  onInstanceRelocated,
   onMigrationComplete,
 }) => {
   const [migrating, setMigrating] = useState(false);
@@ -42,34 +52,60 @@ export const LegacyMigrationModal: React.FC<LegacyMigrationModalProps> = ({
   const [completedIds, setCompletedIds] = useState<string[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isAllDone, setIsAllDone] = useState(false);
+  const [completedLocations, setCompletedLocations] = useState<Record<string, InstanceRelocationResult>>({});
+  const completedRef = useRef(new Set<string>());
+  const busyRef = useRef(false);
+  const sessionRef = useRef(0);
+  useEffect(() => {
+    sessionRef.current++;
+    if (isOpen) {
+      completedRef.current = new Set();
+      setCompletedIds([]);
+      setErrorMsg(null);
+      setCompletedLocations({});
+      setIsAllDone(false);
+    }
+    return () => { sessionRef.current++; };
+  }, [isOpen]);
 
   if (!isOpen && !isClosing) return null;
 
   const handleStartMigration = async () => {
-    if (migrating || legacyInstances.length === 0) return;
+    if (busyRef.current || isClosing || legacyInstances.length === 0) return;
+    const session = sessionRef.current;
+    busyRef.current = true;
+    onBusyChange?.(true);
     setMigrating(true);
     setErrorMsg(null);
 
-    const successful: string[] = [];
     try {
-      for (const item of legacyInstances) {
+      await relocateLegacyItems(legacyInstances, completedRef.current, async (item) => {
         setCurrentMigratingId(item.instanceId);
-        const res = await TarvenEnv.relocateInstance({
+        return TarvenEnv.relocateInstance({
           instanceId: item.instanceId,
           targetPath: item.targetPath,
+          installPath: item.currentPath,
         });
-        if (res.success) {
-          successful.push(item.instanceId);
-          setCompletedIds([...successful]);
-        }
-      }
+      }, (item, result) => {
+        onInstanceRelocated?.(item.instanceId, result);
+        if (session !== sessionRef.current) return;
+        completedRef.current.add(item.instanceId);
+        setCompletedIds([...completedRef.current]);
+        setCompletedLocations(previous => ({ ...previous, [item.instanceId]: result }));
+      }, () => {
+        if (session !== sessionRef.current) throw new Error("迁移视图已关闭");
+      });
       setIsAllDone(true);
       onMigrationComplete?.();
     } catch (err: any) {
-      setErrorMsg(err?.message || "迁移过程中发生异常，未完成项保留原状");
+      if (session === sessionRef.current) setErrorMsg(err?.message || "迁移过程中发生异常，未完成项保留原状");
     } finally {
-      setMigrating(false);
-      setCurrentMigratingId(null);
+      busyRef.current = false;
+      onBusyChange?.(false);
+      if (session === sessionRef.current) {
+        setMigrating(false);
+        setCurrentMigratingId(null);
+      }
     }
   };
 
@@ -152,7 +188,7 @@ export const LegacyMigrationModal: React.FC<LegacyMigrationModalProps> = ({
                 : "bg-white/[0.03] border-white/[0.06] text-white/75"
             )}
           >
-            新版本优化了实例目录架构，默认实例由系统 <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono text-[11px]">AppData</code> 迁移至客户端运行根目录下的 <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono text-[11px]">instances/</code> 文件夹，不仅释放 C 盘空间，更便于数据独立备份与统一管理。
+            {isWindows ? "旧版系统目录中的实例可迁移至客户端默认的 " : isIOS ? "旧版目录中的实例可迁移至应用 Documents 下的 " : "旧版私有目录中的实例可迁移至应用外部的 "}<code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono text-[11px]">instances/</code> 目录。跨存储采用校验复制，原目录保留情况将在完成后列出。
             <div className="mt-1.5 text-[11px] opacity-70">
               迁移将无损保留所有聊天记录、角色、扩展与配置，并自动同步底层注册表，迁移后可直接启动继续使用。
             </div>
@@ -180,8 +216,8 @@ export const LegacyMigrationModal: React.FC<LegacyMigrationModalProps> = ({
                     )}
                   >
                     <div className="flex items-center justify-between mb-1.5">
-                      <div className="flex items-center gap-2">
-                        <span className={cn("font-semibold", isLight ? "text-[#1a1625]" : "text-white")}>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className={cn("font-semibold truncate", isLight ? "text-[#1a1625]" : "text-white")} title={item.name}>
                           {item.name}
                         </span>
                         {item.version && (
@@ -222,10 +258,15 @@ export const LegacyMigrationModal: React.FC<LegacyMigrationModalProps> = ({
                         {item.currentPath}
                       </span>
                       <ArrowRight className="w-3 h-3 flex-shrink-0 opacity-40" />
-                      <span className="truncate max-w-[45%] text-emerald-500/90" title={item.targetPath}>
-                        {item.targetPath}
+                      <span className="truncate max-w-[45%] text-emerald-500/90" title={completedLocations[item.instanceId]?.newPath || item.targetPath}>
+                        {completedLocations[item.instanceId]?.newPath || item.targetPath}
                       </span>
                     </div>
+                    {completedLocations[item.instanceId]?.retainedSourcePath && (
+                      <p className="mt-1 truncate text-[10px] opacity-60" title={completedLocations[item.instanceId].retainedSourcePath}>
+                        原目录保留：{completedLocations[item.instanceId].retainedSourcePath}
+                      </p>
+                    )}
                   </div>
                 );
               })}

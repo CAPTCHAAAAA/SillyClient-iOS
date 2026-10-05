@@ -9,6 +9,9 @@ import { cn, formatDisplayVersion } from "../../lib/utils";
 import { LAYERS } from "../../constants/layers";
 import { LayerBackdrop } from "../common/LayerBackdrop";
 import { TarvenEnv } from "../../capacitor-plugin";
+import type { InstanceRelocationResult } from "../../capacitor-plugin";
+import { exactInstallTarget, installationSelection } from "../../lib/install-location";
+import { requireRelocationResult } from "../../lib/instance-location-state";
 import type { TavernInstance } from "../../types";
 
 export interface RelocateInstanceModalProps {
@@ -18,7 +21,10 @@ export interface RelocateInstanceModalProps {
   onClose: () => void;
   isLight: boolean;
   glassBg: string;
-  onRelocated?: (instanceId: string, newPath: string) => void;
+  isWindows?: boolean;
+  isIOS?: boolean;
+  onBusyChange?: (busy: boolean) => void;
+  onRelocated?: (previousId: string, result: InstanceRelocationResult) => void;
 }
 
 /**
@@ -36,6 +42,9 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
   onClose,
   isLight,
   glassBg,
+  isWindows = false,
+  isIOS = false,
+  onBusyChange,
   onRelocated,
 }) => {
   const [targetMode, setTargetMode] = useState<"default" | "custom">("default");
@@ -43,7 +52,9 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
   const [currentRealPath, setCurrentRealPath] = useState<string>("");
   const [migrating, setMigrating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [successInfo, setSuccessInfo] = useState<{ newPath: string } | null>(null);
+  const [successInfo, setSuccessInfo] = useState<InstanceRelocationResult | null>(null);
+  const sessionRef = useRef(0);
+  const busyRef = useRef(false);
 
   const panelContainerRef = useRef<HTMLDivElement>(null);
   const defaultFaceRef = useRef<HTMLDivElement>(null);
@@ -83,12 +94,15 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
   };
 
   useEffect(() => {
+    const session = ++sessionRef.current;
+    setCurrentRealPath(instance?.installPath || "");
+    setErrorMsg(null);
+    setSuccessInfo(null);
+    setTargetMode("default");
+    setCustomPath("");
+    setPanelHeight(null);
     if (!isOpen || !instance) {
-      setErrorMsg(null);
-      setSuccessInfo(null);
       setMigrating(false);
-      setTargetMode("default");
-      setCustomPath("");
       return;
     }
 
@@ -100,13 +114,16 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
       port: instance.port ?? 8000,
     })
       .then((info) => {
+        if (sessionRef.current !== session) return;
         if (info.path) setCurrentRealPath(info.path);
         else setCurrentRealPath(instance.installPath || "—");
       })
       .catch(() => {
+        if (sessionRef.current !== session) return;
         setCurrentRealPath(instance.installPath || "—");
       });
-  }, [isOpen, instance]);
+    return () => { sessionRef.current++; };
+  }, [isOpen, instance?.id]);
 
   if (!isOpen && !isClosing) return null;
   if (!instance) return null;
@@ -114,26 +131,31 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
   const isRunning = instance.status === "running";
 
   const handlePickDirectory = async () => {
+    if (busyRef.current || isClosing) return;
+    const session = sessionRef.current;
     try {
-      const res = await (TarvenEnv as any).pickDirectory({
-        title: "选择实例迁移的目标目录",
+      const res = await TarvenEnv.pickDirectory({
+        purpose: "installation",
       });
-      if (res?.path) {
-        setCustomPath(res.path.replace(/^["']|["']$/g, "").trim());
-      }
-    } catch {
-      /* ignore */
+      if (session !== sessionRef.current || busyRef.current) return;
+      const selected = installationSelection(res);
+      setCustomPath(exactInstallTarget(selected.path, selected.mode, instance.subtitle || instance.name) || "");
+    } catch (error) {
+      if (session === sessionRef.current && error instanceof Error && !/cancel/i.test(error.message)) setErrorMsg(error.message);
     }
   };
 
   const handleExecuteRelocate = async () => {
-    if (isRunning || migrating) return;
+    if (isRunning || busyRef.current || isClosing) return;
+    const session = ++sessionRef.current;
+    busyRef.current = true;
+    onBusyChange?.(true);
     setErrorMsg(null);
     setMigrating(true);
 
     try {
       const safeId = instance.installDir || instance.id;
-      const target = targetMode === "custom" ? customPath.trim() : undefined;
+      const target = targetMode === "custom" ? exactInstallTarget(customPath, "exact", instance.id) : undefined;
 
       if (targetMode === "custom" && !target) {
         throw new Error("请先选择或输入自定义目标目录");
@@ -142,18 +164,20 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
       const res = await TarvenEnv.relocateInstance({
         instanceId: safeId,
         targetPath: target,
+        installPath: instance.installPath,
       });
-
-      if (res.success) {
-        setSuccessInfo({ newPath: res.newPath });
-        onRelocated?.(instance.id, res.newPath);
-      } else {
-        throw new Error("迁移未成功完成");
+      requireRelocationResult(res);
+      onRelocated?.(instance.id, res);
+      if (session === sessionRef.current) {
+        setSuccessInfo(res);
+        setCurrentRealPath(res.newPath);
       }
     } catch (err: any) {
-      setErrorMsg(err?.message || "迁移失败，请检查路径权限后重试");
+      if (session === sessionRef.current) setErrorMsg(err?.message || "迁移失败，请检查路径权限后重试");
     } finally {
-      setMigrating(false);
+      busyRef.current = false;
+      onBusyChange?.(false);
+      if (session === sessionRef.current) setMigrating(false);
     }
   };
 
@@ -259,8 +283,10 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
               >
                 {successInfo.newPath}
               </div>
-              <p className="text-[11px] opacity-50 leading-relaxed">
-                底层注册表与配置已一键同步，该实例已就绪，可随时直接启动运行。
+              <p className="text-[11px] opacity-50 leading-relaxed break-all">
+                {successInfo.retainedSourcePath
+                  ? `新路径已启用，原目录保留供核对：${successInfo.retainedSourcePath}`
+                  : "实例位置已同步，可从新路径继续启动。"}
               </p>
             </div>
           ) : (
@@ -273,6 +299,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
                 <div className="flex gap-2">
                   <button
                     type="button"
+                    disabled={migrating}
                     onClick={() => handleSwitchMode("default")}
                     aria-pressed={targetMode === "default"}
                     className={cn(
@@ -291,6 +318,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
 
                   <button
                     type="button"
+                    disabled={migrating}
                     onClick={() => handleSwitchMode("custom")}
                     aria-pressed={targetMode === "custom"}
                     className={cn(
@@ -328,7 +356,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
                   inert={targetMode !== "default"}
                 >
                   <p className={cn("text-xs leading-relaxed opacity-60", isLight ? "text-[#1a1625]" : "text-white")}>
-                    将实例完整搬迁至客户端根目录下的 <code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono text-[11px]">instances/</code> 文件夹，消除 C 盘 AppData 碎片，便携性高且便于全量打包备份。
+                    {isWindows ? "将实例迁至客户端默认的 " : isIOS ? "将实例迁至应用 Documents 下的 " : "将实例迁至应用管理的外部 "}<code className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono text-[11px]">instances/</code> 目录，保留聊天记录、角色、扩展与配置。
                   </p>
                 </div>
 
@@ -348,6 +376,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
                     <input
                       type="text"
                       value={customPath}
+                      disabled={migrating}
                       onChange={(e) => setCustomPath(e.target.value)}
                       placeholder="选择或输入完整目标目录绝对路径"
                       className={cn(
@@ -360,6 +389,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
                     <button
                       type="button"
                       onClick={handlePickDirectory}
+                      disabled={migrating}
                       className={cn(
                         "motion-control h-9 px-3 rounded-xl text-[11px] font-medium border flex-shrink-0 transition-colors",
                         isLight
@@ -371,7 +401,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
                     </button>
                   </div>
                   <p className={cn("text-[11px] opacity-45 leading-relaxed", isLight ? "text-[#1a1625]" : "text-white")}>
-                    支持任意磁盘或分区路径。跨盘迁移时将执行安全校验并自动清理原位置。
+                    目标必须是可访问的新目录。跨存储迁移时校验副本；需要保留的原目录会在完成后明确列出。
                   </p>
                 </div>
               </div>
@@ -388,7 +418,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
               <div className="flex items-start gap-2 pt-1 text-[11px] leading-relaxed opacity-55">
                 <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                 <p>
-                  向导中的“导入旧酒馆”流程因涉及外部未知数据，需留存充分的备份与补救余地；而对于当前软件已接管或创建的实例，数据与依赖均处于受管状态，支持一键直接原子搬迁并自动重定向注册表与配置，一步到位无损继续运行。
+                  “导入旧酒馆”用于接入外部数据；此处只迁移当前受管实例并同步其位置。同一存储采用目录移动，跨存储采用校验复制，不覆盖目标中的已有文件。
                 </p>
               </div>
             </>

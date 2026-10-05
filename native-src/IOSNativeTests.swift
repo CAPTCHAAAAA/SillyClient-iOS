@@ -22,6 +22,21 @@ enum IOSNativeTests {
         try require(rejected, message)
     }
 
+    private static func relocationFixture(_ root: URL, files: IOSManagedFiles,
+                                           id: String = "stable-id", relative: String? = nil) throws -> (IOSInstanceStore, URL) {
+        let store = IOSInstanceStore(root: root)
+        let path = root.appendingPathComponent(relative ?? "instances/\(id)")
+        try files.createDirectory(path.appendingPathComponent("data/default-user"))
+        try files.write(Data("fixture".utf8), to: path.appendingPathComponent("server.js"))
+        try files.writeJSON(["name": "SillyTavern", "version": "1.0.0"], to: path.appendingPathComponent("package.json"))
+        try files.write(Data("dataRoot: \(path.path)/data\nport: 8123\ncustom: retained\n".utf8),
+                        to: path.appendingPathComponent("config.yaml"))
+        try files.write(Data("retained chat".utf8), to: path.appendingPathComponent("data/default-user/chat.txt"))
+        let location = try store.locations.acquire(path)
+        try files.writeJSON([id: store.registrationRecord(id, location: location)], to: store.registryURL)
+        return (store, path)
+    }
+
     static func run(progress: (([String: Any]) -> Void)? = nil) -> [String: Any] {
         let parent = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .resolvingSymlinksInPath().appendingPathComponent("ios-test-fixtures-\(UUID().uuidString)")
@@ -45,6 +60,122 @@ enum IOSNativeTests {
             progress?(["currentGroup": name, "completedGroups": results.count, "results": results, "state": "completed"])
         }
         defer { try? FileManager.default.removeItem(at: parent) }
+        test("Instance access locks match Windows vectors and preserve protection on invalid data or failed writes") { _, _ in
+            try IOSInstanceAccessLockTests.run()
+        }
+        test("Instance access lock Keychain storage survives recreation and deletion") { _, _ in
+            try IOSInstanceAccessLockTests.runKeychain()
+        }
+        test("Instance deletion retains retryable ownership until physical removal and registry commit complete") { root, files in
+            try IOSInstanceDeletionTests.run(root, files: files)
+        }
+        test("Instance rename preserves identity and data while updating the physical directory and scan") { root, files in
+            let (store, source) = try relocationFixture(root, files: files)
+            let identity = try files.guardValue(source).identity
+            let result = try store.rename(instanceId: "stable-id", newName: "Renamed Instance", installPath: source.path)
+            let renamed = root.appendingPathComponent("instances/Renamed Instance")
+            try require(result["oldId"] as? String == "stable-id" && result["newId"] as? String == "stable-id", "Rename changed identity")
+            try require(!files.exists(source) && files.guardValue(renamed).identity == identity, "Physical directory was not renamed")
+            try require(files.data(renamed.appendingPathComponent("data/default-user/chat.txt")) == Data("retained chat".utf8), "User data changed")
+            try require(store.migrationDataDirectory(renamed, files: files).path == renamed.appendingPathComponent("data").path,
+                        "Rename left an absolute dataRoot at its previous path")
+            try require(store.info("stable-id")["name"] as? String == "Renamed Instance", "Display name was not persisted")
+            try require(store.records().count == 1, "Renamed directory was rediscovered as a second identity")
+            let lower = try store.rename(instanceId: "stable-id", newName: "renamed instance")
+            try require(lower["newPath"] as? String == root.appendingPathComponent("instances/renamed instance").path,
+                        "Case-only rename did not update the real path")
+            for name in ["", "..", "../outside", "nested/name", ".sillyclient-owned", "invalid\nname"] {
+                try rejects("Unsafe instance name was accepted") { _ = try store.rename(instanceId: "stable-id", newName: name) }
+            }
+        }
+        test("Instance relocation honors selected roots and defaults while rejecting overlap and unknown sources") { root, files in
+            let (store, source) = try relocationFixture(root, files: files)
+            let selected = root.appendingPathComponent("selected")
+            try files.createDirectory(selected)
+            try store.locations.select(selected)
+            let result = try store.relocate(instanceId: "stable-id", targetPath: selected.path, installPath: source.path)
+            let target = selected.appendingPathComponent("stable-id")
+            try require(result["newPath"] as? String == target.path && !files.exists(source), "Selected root was ignored")
+            let recreated = IOSInstanceStore(root: root)
+            try require(recreated.directory("stable-id").path == target.path, "Recreated store lost the destination")
+            try require(recreated.registry()["stable-id"]?["documentsRelativePath"] as? String == "selected/stable-id",
+                        "Relocation dropped the sandbox-relative registration")
+            try rejects("A nested destination was accepted") {
+                _ = try store.relocate(instanceId: "stable-id", targetPath: target.appendingPathComponent("nested").path)
+            }
+            try rejects("An unregistered identity could rename another directory") {
+                _ = try store.rename(instanceId: "unknown", newName: "stolen", installPath: target.path)
+            }
+            try rejects("Unsupported external path silently fell back") {
+                _ = try store.relocate(instanceId: "stable-id", targetPath: root.deletingLastPathComponent().appendingPathComponent("unapproved/target").path)
+            }
+            let movedBack = try store.relocate(instanceId: "stable-id", targetPath: nil)
+            try require(movedBack["newPath"] as? String == source.path && files.exists(source), "Default relocation was a false no-op")
+        }
+        test("Instance location mutations reject active runtime reservations without changing disk") { root, files in
+            let (store, source) = try relocationFixture(root, files: files)
+            let before = try files.data(store.registryURL)
+            let operation = UUID().uuidString
+            try NodeRunner.shared.reserve(instance: "busy-fixture", operation: operation)
+            defer {
+                let stopped = DispatchSemaphore(value: 0)
+                NodeRunner.shared.stop(instance: "busy-fixture", operation: operation) { _ in stopped.signal() }
+                _ = stopped.wait(timeout: .now() + 5)
+            }
+            try rejects("Rename moved a runtime with an active reservation") { _ = try store.rename(instanceId: "stable-id", newName: "blocked") }
+            try rejects("Relocation moved a runtime with an active reservation") {
+                _ = try store.relocate(instanceId: "stable-id", targetPath: root.appendingPathComponent("blocked").path)
+            }
+            try require(files.exists(source) && files.data(store.registryURL) == before, "Rejected operation changed instance state")
+        }
+        test("Registry commit failure restores the original directory configuration and ownership") { root, files in
+            let (store, source) = try relocationFixture(root, files: files)
+            let before = try files.data(store.registryURL)
+            let configuration = try files.data(source.appendingPathComponent("config.yaml"))
+            try require(chmod(root.path, mode_t(0o500)) == 0, "Could not prepare the registry failure fixture")
+            defer { _ = chmod(root.path, mode_t(0o700)) }
+            try rejects("Unwritable registry reported a successful rename") {
+                _ = try store.rename(instanceId: "stable-id", newName: "uncommitted")
+            }
+            try require(files.exists(source) && !files.exists(root.appendingPathComponent("instances/uncommitted")), "Failed commit did not restore the original path")
+            try require(files.data(source.appendingPathComponent("config.yaml")) == configuration, "Rollback changed the original YAML")
+            try require(!files.exists(source.appendingPathComponent(store.ownershipName)), "Rollback left a new ownership receipt")
+            try require(files.data(store.registryURL) == before, "Failed commit changed the registry")
+        }
+        test("Legacy migration enumerates real instances and reports partial failure without losing committed results") { root, files in
+            let (store, source) = try relocationFixture(root, files: files, id: "default", relative: "SillyTavern")
+            let candidates = try store.legacyInstances()
+            try require(candidates.count == 1 && candidates[0]["currentPath"] as? String == source.path, "Legacy detection returned a stub")
+            let result = try store.migrateLegacyInstances(instanceIds: ["default", "missing"])
+            let results = result["results"] as? [[String: Any]] ?? []
+            try require(result["success"] as? Bool == false && results.count == 2, "Partial failure was reported as total success")
+            try require(results[0]["success"] as? Bool == true && results[1]["success"] as? Bool == false, "Committed item or failure details were lost")
+            try require(store.directory("default").path == root.appendingPathComponent("instances/default").path,
+                        "Legacy migration did not change the registered physical path")
+            try require(store.legacyInstances().isEmpty, "Migrated instance was offered again")
+            try rejects("Duplicated migration selection was accepted") { _ = try store.migrateLegacyInstances(instanceIds: ["default", "default"]) }
+        }
+        test("Relocation across approved authorities keeps leases and refreshes the destination registration") { root, files in
+            let documents = root.appendingPathComponent("documents")
+            let external = root.appendingPathComponent("external")
+            try files.createDirectory(documents)
+            try files.createDirectory(external)
+            var scopes = 0
+            let locations = IOSInstallationLocations(documents: documents,
+                makeBookmark: { Data($0.path.utf8) },
+                resolveBookmark: { (URL(fileURLWithPath: String(decoding: $0, as: UTF8.self)), false) },
+                startScope: { _ in scopes += 1; return true }, stopScope: { _ in scopes -= 1 }, externalCapability: { _ in })
+            let (initial, original) = try relocationFixture(documents, files: IOSManagedFiles(root: documents))
+            _ = initial
+            let store = IOSInstanceStore(root: documents, locations: locations)
+            try locations.select(external)
+            let moved = try store.relocate(instanceId: "stable-id", targetPath: external.path)
+            try require(moved["newPath"] as? String == external.appendingPathComponent("stable-id").path, "Approved external root was ignored")
+            try require(scopes == 0 && store.registry()["stable-id"]?["grantId"] as? String != nil, "External lease or grant was lost")
+            let restored = try store.relocate(instanceId: "stable-id", targetPath: nil)
+            try require(restored["newPath"] as? String == original.path && scopes == 0, "Return to Documents leaked a lease")
+            try require(store.registry()["stable-id"]?["grantId"] == nil, "Internal registration retained an obsolete external grant")
+        }
         test("Installation paths require absolute local paths and preserve quoted file URL semantics") { root, _ in
             let selected = root.appendingPathComponent("selected root")
             try require(IOSInstallationLocations.path("  \"\(selected.path)\"  ").path == selected.path, "Quoted path changed")
@@ -53,6 +184,23 @@ enum IOSNativeTests {
                         root.path + "/../outside", root.path + "/unsafe\nsuffix", "D:\\Tavern", "/unsafe\u{2028}name"] {
                 try rejects("Unsafe installation path was accepted") { _ = try IOSInstallationLocations.path(raw) }
             }
+        }
+        test("Relocation journal recovers interrupted moves and refuses occupied source directories") { root, files in
+            try IOSRelocationJournalTests.run(root, files: files)
+        }
+        test("Relocation preserves pending maintenance backups instead of invalidating restore metadata") { root, files in
+            let (store, source) = try relocationFixture(root, files: files)
+            let recovery = source.appendingPathComponent(".sillyclient-maintenance/recovery/\(UUID().uuidString)")
+            try files.createDirectory(recovery)
+            try files.write(Data("backup".utf8), to: recovery.appendingPathComponent("payload"))
+            try files.writeJSON(["phase": "quarantined"], to: recovery.appendingPathComponent("record.json"))
+            let before = try files.data(source.appendingPathComponent("config.yaml"))
+            try rejects("Rename invalidated a pending maintenance backup") {
+                _ = try store.rename(instanceId: "stable-id", newName: "blocked")
+            }
+            try require(files.data(source.appendingPathComponent("config.yaml")) == before,
+                        "Rejected rename changed backup configuration")
+            try require(files.data(recovery.appendingPathComponent("payload")) == Data("backup".utf8), "Recovery payload was lost")
         }
         test("Documents root and exact installation modes persist and reject conflicting instance paths") { root, files in
             let store = IOSInstanceStore(root: root)
