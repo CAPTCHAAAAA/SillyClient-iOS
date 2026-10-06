@@ -90,8 +90,20 @@ public final class NodeRunner {
         return value
     }
 
+    func updateOperation(instance: String, operation: String) {
+        queue.sync {
+            if instanceId == instance {
+                operationId = operation
+            }
+        }
+    }
+
     func reserve(instance: String, operation: String) throws {
         try queue.sync {
+            if let existing = instanceId, existing == instance {
+                operationId = operation
+                return
+            }
             guard !hostExited, instanceId == nil, maintenance.isEmpty else {
                 throw IOSFileError.invalid("Stop the current operation before starting an instance")
             }
@@ -107,7 +119,7 @@ public final class NodeRunner {
 
     func checkCurrent(instance: String, operation: String) throws {
         try queue.sync {
-            guard instanceId == instance, operationId == operation, state == "provisioning" || state == "starting" else {
+            guard instanceId == instance, operationId == operation, state == "provisioning" || state == "starting" || state == "ready" else {
                 throw IOSFileError.invalid("Operation cancelled or superseded")
             }
         }

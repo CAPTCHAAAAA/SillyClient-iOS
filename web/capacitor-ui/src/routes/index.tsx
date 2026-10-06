@@ -1237,8 +1237,13 @@ function SillyClientLauncher() {
   // 启动实例入口
   const launchTavernDirect = useCallback(async (instance: TavernInstance, returnToSession = false) => {
     if (operations.busy) return;
-    if (returnToSession) {
-      try { await TarvenEnv.returnToTavern(); return; } catch {}
+    if (returnToSession || instance.status === "running") {
+      try {
+        await TarvenEnv.returnToTavern();
+        return;
+      } catch (err) {
+        console.warn("[launchTavernDirect] returnToTavern fallback:", err);
+      }
     }
     const operation = operations.begin(instance.installDir || instance.id, "launch");
     lastMigration.current = null;

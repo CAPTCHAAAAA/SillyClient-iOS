@@ -130,6 +130,18 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                 let instance = try self.id(call)
                 let operation = try IOSInstanceStore.identity(call.getString("operationId") ?? UUID().uuidString)
                 let port = call.getInt("port") ?? 8000
+                let current = NodeRunner.shared.status
+                if current["serverReady"] as? Bool == true, current["instanceId"] as? String == instance {
+                    NodeRunner.shared.updateOperation(instance: instance, operation: operation)
+                    let location = try? self.store.location(instance, installPath: call.getString("installPath"), installPathMode: call.getString("installPathMode"), requireExisting: false)
+                    if (call.getObject("config")?["keepAlive"] as? Bool) == true { KeepAliveService.shared.start() }
+                    else { KeepAliveService.shared.stop() }
+                    self.notifyListeners("ready", data: ["ready": true, "instanceId": instance,
+                        "operationId": operation, "port": current["port"] ?? port, "url": current["url"] ?? ""])
+                    call.resolve(["ready": true, "instanceId": instance, "operationId": operation,
+                        "installPath": location?.directory.path ?? "", "installPathMode": "exact"])
+                    return
+                }
                 try self.reserveLocal(instance: instance, operation: operation)
                 self.io.async {
                     do {
@@ -530,8 +542,14 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
 
     private func presentPicker(_ call: CAPPluginCall, action: String, types: [UTType], exporting: URL? = nil) {
         DispatchQueue.main.async {
-            guard self.pendingPickerCall == nil, let presenter = self.bridge?.viewController,
-                  presenter.presentedViewController == nil, presenter.view.window != nil else {
+            var topPresenter: UIViewController? = self.bridge?.viewController ?? TavernViewController.shared
+            while let presented = topPresenter?.presentedViewController {
+                if presented is UIDocumentPickerViewController {
+                    call.reject("Another picker is active"); return
+                }
+                topPresenter = presented
+            }
+            guard self.pendingPickerCall == nil, let presenter = topPresenter, presenter.view.window != nil else {
                 call.reject("Another picker is active or the presenter is unavailable"); return
             }
             let isFolder = types.contains(.folder) || action == "dir" || action == "installDir"
@@ -539,6 +557,16 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                 ?? UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: !isFolder)
             picker.delegate = self
             picker.allowsMultipleSelection = false
+            picker.modalPresentationStyle = .formSheet
+            if let popover = picker.popoverPresentationController {
+                popover.sourceView = presenter.view
+                popover.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 0, height: 0)
+                popover.permittedArrowDirections = []
+            }
+            if #available(iOS 14.0, *) {
+                try? FileManager.default.createDirectory(at: self.store.documents, withIntermediateDirectories: true)
+                picker.directoryURL = self.store.documents
+            }
             self.pendingPickerCall = call
             self.pendingPickerAction = action
             self.pendingInstanceId = call.getString("instanceId") ?? "default"
