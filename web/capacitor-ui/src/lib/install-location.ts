@@ -50,3 +50,23 @@ export function buildInstanceSubfolder(parentDir: string, instanceName: string):
   }
   return `${clean}${separator}${safeName}`;
 }
+
+/**
+ * Normalizes a raw instance display name or user input into an ASCII-safe native instance identity.
+ * Strictly adheres to `^[A-Za-z0-9_-]{1,128}$` required by native runtimes.
+ */
+export function normalizeInstanceIdentity(name: string, fallback?: string): string {
+  const asciiSlug = name
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  if (asciiSlug && /^[A-Za-z0-9_-]{1,128}$/.test(asciiSlug)) {
+    return asciiSlug;
+  }
+  const defaultFallback = fallback && /^[A-Za-z0-9_-]{1,128}$/.test(fallback)
+    ? fallback
+    : `inst-${Date.now().toString(36)}`;
+  return defaultFallback;
+}
+

@@ -497,8 +497,9 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                   presenter.presentedViewController == nil, presenter.view.window != nil else {
                 call.reject("Another picker is active or the presenter is unavailable"); return
             }
+            let isFolder = types.contains(.folder) || action == "dir" || action == "installDir"
             let picker = exporting.map { UIDocumentPickerViewController(forExporting: [$0], asCopy: true) }
-                ?? UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: action != "dir")
+                ?? UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: !isFolder)
             picker.delegate = self
             picker.allowsMultipleSelection = false
             self.pendingPickerCall = call

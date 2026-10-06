@@ -8,14 +8,16 @@ import {
 } from '@tanstack/react-router';
 
 function NotFoundComponent() {
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const routerState = useRouterState();
+  const pathname = (routerState as any)?.location?.pathname;
   if (pathname === '/') return null;
   return <Navigate to="/" replace />;
 }
 
 function ErrorComponent({ error }: { error: Error; reset: () => void }) {
   console.error(error);
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const routerState = useRouterState();
+  const pathname = (routerState as any)?.location?.pathname;
   // 已在首页仍报错时不再 redirect，避免 / → / 死循环
   if (pathname === '/') return null;
   return <Navigate to="/" replace />;

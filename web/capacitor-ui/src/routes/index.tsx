@@ -18,7 +18,7 @@ import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
 import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId } from "@/capacitor-plugin";
-import { exactInstallTarget, installationSelection, sanitizeFolderName } from "@/lib/install-location";
+import { exactInstallTarget, installationSelection, normalizeInstanceIdentity, sanitizeFolderName } from "@/lib/install-location";
 import { normalizeStoredInstances, serializeInstanceRecords, parseInstanceBackup, type StoredInstance } from "@/lib/instance-persistence";
 import { GLOBAL_LOG_KEY, instanceLogs, type LogLine } from "@/lib/log-store";
 import { OperationCoordinator, OperationCancelledError, type OperationContext } from "@/lib/operation-coordinator";
@@ -1469,7 +1469,6 @@ function SillyClientLauncher() {
     const now = Date.now();
     const rawGivenName = newInstanceName.trim();
     let instanceDisplayName: string;
-    let safeCandidateId: string;
 
     if (rawGivenName) {
       // 严格检查重名：不允许创建同名实例
@@ -1482,7 +1481,6 @@ function SillyClientLauncher() {
         return;
       }
       instanceDisplayName = rawGivenName;
-      safeCandidateId = sanitizeFolderName(rawGivenName);
     } else {
       // 未输入名称时自动编号：新实例、新实例 (2)、新实例 (3)...
       const baseName = "新实例";
@@ -1495,14 +1493,15 @@ function SillyClientLauncher() {
         chosenName = `${baseName} (${counter++})`;
       }
       instanceDisplayName = chosenName;
-      safeCandidateId = sanitizeFolderName(chosenName);
     }
 
-    let candidateId = safeCandidateId;
+    // 实例原生标识必须严格为 ASCII（^[A-Za-z0-9_-]{1,128}$），防止中文/空格导致原生运行时拒绝
+    const baseId = normalizeInstanceIdentity(rawGivenName);
+    let candidateId = baseId;
     let counter = 2;
     const existingIds = new Set(instances.map(i => (i.installDir || i.id).toLowerCase()));
     while (existingIds.has(candidateId.toLowerCase())) {
-      candidateId = `${safeCandidateId} (${counter++})`;
+      candidateId = `${baseId}-${counter++}`;
     }
     const instanceId = candidateId;
     const operation = operations.begin(instanceId, "create");
@@ -1516,7 +1515,7 @@ function SillyClientLauncher() {
     try {
       const installDir = instanceId;
       pendingInstanceId = instanceId;
-      const resolvedCustomPath = exactInstallTarget(newInstanceDir, newInstancePathMode, instanceDisplayName);
+      const resolvedCustomPath = exactInstallTarget(newInstanceDir, newInstancePathMode, instanceId);
       let selectedVersion = newInstanceVersion;
       let selectedZipballUrl: string | undefined;
 

@@ -54,3 +54,13 @@ test("document-provider URIs cannot be disguised as executable install paths", (
   assert.throws(() => location.installationSelection({ path: "content://provider/tree/test" }));
   assert.throws(() => location.exactInstallTarget("content://provider/tree/test", "exact", "local-100"));
 });
+
+test("normalizeInstanceIdentity strictly produces ASCII characters satisfying ^[A-Za-z0-9_-]{1,128}$", () => {
+  const regex = /^[A-Za-z0-9_-]{1,128}$/;
+  assert.ok(regex.test(location.normalizeInstanceIdentity("")));
+  assert.ok(regex.test(location.normalizeInstanceIdentity("新实例")));
+  assert.ok(regex.test(location.normalizeInstanceIdentity("我的酒馆 (2)")));
+  assert.equal(location.normalizeInstanceIdentity("My Tavern"), "My-Tavern");
+  assert.equal(location.normalizeInstanceIdentity("test_instance-123"), "test_instance-123");
+  assert.ok(regex.test(location.normalizeInstanceIdentity("  ...---special###!!!$$$   ")));
+});
