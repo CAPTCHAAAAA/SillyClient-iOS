@@ -241,6 +241,26 @@ jobs:
             exit $E2E_STATUS
           fi
 
+      - name: Package the authentic iOS Simulator app for Sauce Labs / Appetize
+        if: always()
+        run: |
+          SIM_DIR="web/capacitor-ui/ios/App/build/derived/Build/Products/Debug-iphonesimulator"
+          if [ -d "$SIM_DIR/App.app" ]; then
+            cd "$SIM_DIR"
+            zip -qr "$GITHUB_WORKSPACE/SillyClient-iOS-Simulator.app.zip" App.app
+            cd "$GITHUB_WORKSPACE"
+            shasum -a 256 SillyClient-iOS-Simulator.app.zip > evidence/simulator-app-sha256.txt
+          fi
+
+      - name: Upload the iOS Simulator app archive
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SillyClient-iOS-Simulator-App
+          path: SillyClient-iOS-Simulator.app.zip
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload the unsigned build archive
         if: always()
         uses: actions/upload-artifact@v4
