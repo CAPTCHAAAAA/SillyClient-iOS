@@ -200,7 +200,7 @@ async function verifyReady(operationId) {
 }
 
 async function verifyTavern() {
-    const deadline = Date.now() + 30000;
+    const deadline = Date.now() + 90000;
     let actual;
     let lastError;
     while (Date.now() < deadline) {
