@@ -1,12 +1,12 @@
 # iOS Runtime And Instance Safety
 
 This is an experimental branch, not a verified iOS release.
-The hardening build retains version `1.10.0`; it does not change the public
+The hardening build advances to version `1.11.0`; it does not change the public
 Android/Windows/Main release, install a client, or publish a Release.
 The current feature-sync scope and remaining platform gaps are recorded in
 `IOS-FEATURE-PARITY.md`. On 2026-10-06 the user authorized local synchronization
 and the Xcode build/test flow. The reviewed frontend is now in this worktree;
-build 28 retains version 1.10.0. No Release or main-branch integration is authorized.
+build 29 advances to version 1.11.0. No Release or main-branch integration is authorized.
 
 ## Native Ownership
 

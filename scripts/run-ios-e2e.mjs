@@ -290,7 +290,7 @@ try {
         launch('--sillyclient-test');
         await waitForBridge();
         const version = await command('getAppVersion');
-        assert.equal(version.version, '1.10.0');
+        assert.equal(version.version, '1.11.0');
         const consoleStatus = await command(undefined, {}, 'console');
         assert.equal(consoleStatus.loggingEnabled, false, 'Capacitor payload logging must be disabled');
         recordStepTimestamp('01-native-bridge-ready');

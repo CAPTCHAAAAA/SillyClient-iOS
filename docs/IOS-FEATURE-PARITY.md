@@ -97,7 +97,7 @@ all prior uncommitted changes were backed up under the workspace's
 `Local/evidence/ios-xcode-feature-sync/baseline`. Local upstream tracking now
 points to `ios/feature/sillyclient-ios`, not the older `ios/main`.
 
-Build 28 retains version 1.10.0. CI now runs all frontend tests before building;
+Build 29 advances version to 1.11.0. CI now runs all frontend tests before building;
 the native harness declares 44 groups and the driver checks the same count.
 The new Xcode execution is pending at this source handoff, not proven by the
 historical 24-stage/33-group reports. Two new host CI checks prevent unasserted

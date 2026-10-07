@@ -17,7 +17,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 40
     env:
-      APP_VERSION: 1.10.0
+      APP_VERSION: 1.11.0
       SILLYCLIENT_TEST_TMP: /tmp/sillyclient-tests-${{ github.run_id }}
 
     steps:
@@ -265,8 +265,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: SillyClient-iOS-v1.10.0-unsigned-IPA
-          path: SillyClient-iOS-v1.10.0-unsigned.ipa
+          name: SillyClient-iOS-v1.11.0-unsigned-IPA
+          path: SillyClient-iOS-v1.11.0-unsigned.ipa
           if-no-files-found: warn
           retention-days: 14
 

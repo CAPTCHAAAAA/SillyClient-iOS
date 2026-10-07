@@ -25,7 +25,7 @@ export function isAppUpgrade(current: string, candidate: string, assetVerified: 
   const from = left.join(".");
   const to = right.join(".");
   if (RETIRED.has(to)) return false;
-  if (RETIRED.has(from) && to === "1.10.0") return true;
+  if (RETIRED.has(from) && (to === "1.10.0" || to === "1.11.0")) return true;
   for (let index = 0; index < 3; index += 1) {
     if (left[index] !== right[index]) return left[index] < right[index];
   }

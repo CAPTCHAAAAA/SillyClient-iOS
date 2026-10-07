@@ -18,7 +18,7 @@ private final class IOSPinnedDownload: NSObject, URLSessionDownloadDelegate {
     func run(_ url: URL) throws {
         var request = URLRequest(url: url)
         request.timeoutInterval = 45
-        request.setValue("SillyClient-iOS/1.10.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("SillyClient-iOS/1.11.0", forHTTPHeaderField: "User-Agent")
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForResource = 90
         configuration.urlCredentialStorage = nil

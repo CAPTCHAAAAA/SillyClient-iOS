@@ -57,7 +57,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         }
     }
     private func id(_ call: CAPPluginCall) throws -> String { try IOSInstanceStore.identity(call.getString("instanceId")) }
-    private var version: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.10.0" }
+    private var version: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.11.0" }
     @objc func getPlatform(_ call: CAPPluginCall) {
         call.resolve(["platform": "ios", "externalTakeoverSupported": false, "arbitraryRuntimeVersionsSupported": false])
     }
