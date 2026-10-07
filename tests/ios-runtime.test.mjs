@@ -230,11 +230,22 @@ test('actual loader worker reports fatal failure after readiness without exiting
         assert.equal(failure.type, 'failure');
         assert.equal(failure.message, 'fatal after readiness');
         const marker = path.join(f.directory, 'server-failed.json');
-        const deadline = Date.now() + 1000;
-        while (!fs.existsSync(marker) && Date.now() < deadline) {
-            await new Promise(resolve => setTimeout(resolve, 10));
+        const deadline = Date.now() + 2000;
+        let content;
+        while (Date.now() < deadline) {
+            try {
+                if (fs.existsSync(marker)) {
+                    const raw = fs.readFileSync(marker, 'utf8');
+                    if (raw.trim()) {
+                        content = JSON.parse(raw);
+                        break;
+                    }
+                }
+            } catch (_) {}
+            await new Promise(resolve => setTimeout(resolve, 20));
         }
-        assert.equal(JSON.parse(fs.readFileSync(marker)).message, failure.message);
+        assert.ok(content, 'server-failed.json marker was not written in time');
+        assert.equal(content.message, failure.message);
     } finally {
         try { if (worker) await worker.terminate(); }
         finally { process.chdir(originalCwd); }

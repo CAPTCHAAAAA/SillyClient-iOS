@@ -90,12 +90,12 @@ function reportRuntimeFailure(error) {
     if (startupFailed || (serviceReady && isMainThread)) return;
     startupFailed = true;
     const message = String(error?.message || error || 'Unknown startup failure').slice(0, 2000);
-    parentPort?.postMessage({ type: 'failure', message });
     try {
         fs.writeFileSync(path.join(statusDirectory, 'server-failed.json'), JSON.stringify({ message }));
     } catch (writeError) {
         console.log('[ios-loader] Could not write startup failure marker:', writeError.message);
     }
+    parentPort?.postMessage({ type: 'failure', message });
 }
 
 for (const name of ['server-ready.txt', 'server-failed.json']) {
