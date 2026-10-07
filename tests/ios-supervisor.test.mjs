@@ -181,12 +181,68 @@ test('runtime authorization rejects forged paths, replaced directory identities,
         assert.equal(result.success, false);
         assert.match(result.error, /directory was replaced/);
     }
+    for (const badRoot of ['relative/root', path.join(path.dirname(options.serverDirectory), 'nonexistent-root')]) {
+        fs.writeFileSync(path.join(f.control, 'locations.json'), JSON.stringify({ ...mapping, root: badRoot }));
+        const result = await f.command(options);
+        assert.equal(result.success, false);
+        assert.match(result.error, /Unsafe authorized runtime root/);
+    }
     fs.writeFileSync(path.join(f.control, 'locations.json'), 'x'.repeat(65537));
     const oversized = await f.command(options);
     assert.equal(oversized.success, false);
     assert.match(oversized.error, /authorization is invalid/);
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.control, 'status.json'))).state, 'idle');
     await assert.rejects(fetch(`http://127.0.0.1:${options.port}/`));
+});
+
+test('runtime authorization accepts Darwin /private canonical path equivalence and rejects symlink traversal', async t => {
+    const f = await fixture(t, { authorization: true });
+    const port = await freePort();
+    const options = { action: 'start', instanceId: 'darwin-root', operationId: 'darwin-operation', port,
+        serverDirectory: fs.realpathSync(f.server), dataDirectory: path.join(fs.realpathSync(f.server), 'data'),
+        configPath: path.join(fs.realpathSync(f.server), 'config.yaml') };
+    const mapping = f.authorize(options);
+
+    if (mapping.root.startsWith('/private/')) {
+        const strippedRoot = mapping.root.slice('/private'.length);
+        const strippedServer = mapping.serverDirectory.slice('/private'.length);
+        const strippedOptions = {
+            ...options,
+            serverDirectory: strippedServer,
+            dataDirectory: path.join(strippedServer, 'data'),
+            configPath: path.join(strippedServer, 'config.yaml'),
+        };
+        fs.writeFileSync(path.join(f.control, 'locations.json'), JSON.stringify({
+            ...mapping,
+            root: strippedRoot,
+            serverDirectory: strippedServer,
+            dataDirectory: strippedOptions.dataDirectory,
+            configPath: strippedOptions.configPath,
+        }));
+        const ok = await f.command(strippedOptions);
+        assert.equal(ok.success, true);
+        assert.equal(ok.ready, true);
+        assert.equal((await f.command({ action: 'stop', instanceId: options.instanceId, operationId: options.operationId })).success, true);
+    }
+
+    const symlinkEscape = path.join(path.dirname(options.serverDirectory), 'symlink-escape');
+    try {
+        fs.symlinkSync(path.dirname(options.serverDirectory), symlinkEscape, 'junction');
+        const rootStat = fs.lstatSync(mapping.root, { bigint: true });
+        fs.writeFileSync(path.join(f.control, 'locations.json'), JSON.stringify({
+            ...mapping,
+            root: symlinkEscape,
+            rootDevice: String(BigInt.asUintN(32, rootStat.dev)),
+            rootInode: String(rootStat.ino),
+        }));
+        const result = await f.command(options);
+        assert.equal(result.success, false);
+        assert.match(result.error, /(?:Unsafe authorized runtime root|Authorized runtime directory was replaced)/);
+    } catch (e) {
+        if (e.code !== 'EPERM') throw e;
+    } finally {
+        try { fs.unlinkSync(symlinkEscape); } catch {}
+    }
 });
 
 test('embedded supervisor really starts, stops, and restarts an HTTP worker', async t => {

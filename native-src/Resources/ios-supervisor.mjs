@@ -198,7 +198,15 @@ function authorizedLocation(request) {
     if (location.revision !== 1 || location.instanceId !== request.instanceId
         || location.operationId !== request.operationId) throw new Error('Runtime location belongs to another operation');
     const root = location.root;
-    if (typeof root !== 'string' || !path.isAbsolute(root) || fs.realpathSync(root) !== root) {
+    const isSafeRoot = r => {
+        if (typeof r !== 'string' || !path.isAbsolute(r)) return false;
+        let real;
+        try { real = fs.realpathSync(r); } catch { return false; }
+        if (real === r) return true;
+        const stripPrivate = s => (s.startsWith('/private/') ? s.slice('/private'.length) : s);
+        return stripPrivate(real) === stripPrivate(r);
+    };
+    if (!isSafeRoot(root)) {
         throw new Error('Unsafe authorized runtime root');
     }
     const identity = (file, device, inode) => {
