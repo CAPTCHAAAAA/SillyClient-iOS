@@ -226,16 +226,18 @@ test('runtime authorization accepts Darwin /private canonical path equivalence a
     }
 
     const symlinkEscape = path.join(path.dirname(options.serverDirectory), 'symlink-escape');
+    const symlinkOptions = { ...options, operationId: 'symlink-escape-operation' };
     try {
         fs.symlinkSync(path.dirname(options.serverDirectory), symlinkEscape, 'junction');
         const rootStat = fs.lstatSync(mapping.root, { bigint: true });
         fs.writeFileSync(path.join(f.control, 'locations.json'), JSON.stringify({
             ...mapping,
+            operationId: symlinkOptions.operationId,
             root: symlinkEscape,
             rootDevice: String(BigInt.asUintN(32, rootStat.dev)),
             rootInode: String(rootStat.ino),
         }));
-        const result = await f.command(options);
+        const result = await f.command(symlinkOptions);
         assert.equal(result.success, false);
         assert.match(result.error, /(?:Unsafe authorized runtime root|Authorized runtime directory was replaced)/);
     } catch (e) {
