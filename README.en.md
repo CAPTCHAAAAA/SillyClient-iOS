@@ -2,9 +2,9 @@
   <img src="./docs/sillyclient-logo.svg" width="96" height="96" alt="SillyClient logo">
 </p>
 
-<h1 align="center">SillyClient</h1>
+<h1 align="center">SillyClient iOS</h1>
 
-<p align="center">A SillyTavern instance manager for Android and Windows</p>
+<p align="center">A dedicated SillyTavern client and instance manager for iOS (No-Jailbreak / NodeMobile / Full-Bleed / Chameleon)</p>
 
 <p align="center">
   <a href="./README.md"><kbd>简体中文</kbd></a>
@@ -16,90 +16,64 @@
   ·
   <a href="https://github.com/CAPTCHAAAAA/SillyClient/releases">Downloads</a>
   ·
+  <a href="https://github.com/CAPTCHAAAAA/SillyClient">Main repo</a>
+  ·
   <a href="https://github.com/CAPTCHAAAAA/SillyClient-Android">Android source</a>
   ·
   <a href="https://github.com/CAPTCHAAAAA/SillyClient-Windows">Windows source</a>
 </p>
 
-SillyClient installs, runs, and manages SillyTavern instances. It can create an instance from a GitHub release or a local archive, or register an existing remote server. Downloads, setup progress, ports, configuration, and runtime logs are managed from one console.
-
-The Android package includes an arm64 Bionic build of Node.js. The Windows package includes a fixed Windows x64 build of Node.js. At runtime, SillyClient does not require Termux or use Node.js from the system `PATH`.
-
-## Scope
-
-SillyClient is not a fork of SillyTavern. It does not provide models, API services, accounts, or access credentials. For a local instance, the client retrieves the selected SillyTavern version and prepares its runtime on the device. A remote instance stores only the address of an existing service and does not install another local copy.
-
-Installers are published on the main repository's [Releases](https://github.com/CAPTCHAAAAA/SillyClient/releases) page.
+SillyClient iOS is a modern SillyTavern client designed specifically for iPhone and iPad. Powered by the embedded NodeMobile runtime, it executes Node.js 22 and SillyTavern natively within the standard iOS application sandbox without requiring jailbreak.
 
 ## Features
 
-- Create SillyTavern instances from GitHub releases or local zip archives
-- Report download, extraction, and dependency installation progress, then verify that an instance can run before marking setup as complete
-- Manage multiple local instances and connect to existing remote SillyTavern services
-- Configure ports and instance settings, with access to runtime logs and terminal output
-- Import, export, and remove instance data
-- Move between the management console and the SillyTavern reader without interrupting the background service
+- **Jailbreak-Free Local Execution**: Hosted natively within the iOS sandbox using NodeMobile bridge and Darwin process controls
+- **Comprehensive Instance Management**: Download from GitHub Releases or import from local ZIPs, with custom port configuration
+- **Dual WebView Architecture**: Smooth switching between Capacitor management console and full-bleed SillyTavern WKWebView without interrupting background service
+- **Chameleon Immersive Visuals**: Automatically samples SillyTavern theme colors and harmonizes with iOS status bar and notch safe areas
+- **Sandbox Security & Canonical Paths**: Full compatibility with Darwin `/private/var` symlinks and Documents directory boundaries
+- **Data Protection**: Full lossless import and export of user data, character cards, and presets
 
-## Runtime architecture
-
-The shared React console presents instance configuration, state, and logs. Platform code owns the file system, downloads, archive extraction, process lifecycle, port checks, and window management.
+## Architecture
 
 ```mermaid
 flowchart LR
-    UI["React console"] --> Contract["Platform contract"]
-    Contract --> Android["Android / Kotlin"]
-    Contract --> Windows["Windows / Electron"]
-    Android --> ARuntime["Bundled Bionic Node.js"]
-    Windows --> WRuntime["Bundled Windows Node.js"]
-    ARuntime --> Server["SillyTavern instance"]
-    WRuntime --> Server
-    Android --> AView["Native WebView"]
-    Windows --> WView["Separate Electron window"]
+    UI["React Console (Capacitor)"] --> Contract["Platform Bridge (TarvenEnvPlugin)"]
+    Contract --> Host["Swift Host (iOS Sandbox)"]
+    Host --> NodeRunner["NodeMobile (Node.js Runtime)"]
+    NodeRunner --> Server["SillyTavern Instance"]
+    Host --> NativeView["Dedicated Full-Bleed WKWebView"]
 ```
 
-The management console and SillyTavern run in separate windows. Closing the reader returns to the console without stopping the instance; stopping an instance is an explicit console action. Android uses two native WebViews and handles immersive display, `DisplayCutout`, and vendor-specific window behavior. On Windows, Electron manages the separate application window and bundled runtime.
+## Environment
 
-## Supported platforms
+- macOS & Xcode 16+
+- iOS 15.0+ devices (arm64) or CoreSimulator
+- Node.js 22+ & pnpm 11+
+- CocoaPods
 
-| Platform | Implementation | Requirements |
-| --- | --- | --- |
-| Android | Kotlin, Capacitor 7, native WebView, arm64 Bionic Node.js | Android 8.0+ (API 26), arm64-v8a |
-| Windows | Electron 33, TypeScript, Node.js 22.16.0 | Windows 10 or 11, x64 |
+## Build & Run
 
-## Repositories
+1. Build frontend console assets:
+```bash
+cd web/capacitor-ui
+pnpm install --frozen-lockfile
+pnpm run build
+cd ../..
+```
 
-SillyClient is maintained in three independent repositories without Git submodules:
+2. Sync Capacitor iOS native project:
+```bash
+npx cap sync ios
+```
 
-| Repository | Responsibility | Default branch |
-| --- | --- | --- |
-| [SillyClient](https://github.com/CAPTCHAAAAA/SillyClient) | GitHub Pages, public documentation, releases, and installers | `main` |
-| [SillyClient-Android](https://github.com/CAPTCHAAAAA/SillyClient-Android) | Frontend source copy, Kotlin host, and Android runtime | `main` |
-| [SillyClient-Windows](https://github.com/CAPTCHAAAAA/SillyClient-Windows) | Frontend source copy, Electron host, Windows runtime, and installer | `main` |
+3. Open in Xcode for signing and testing:
+```bash
+open ios/App/App.xcworkspace
+```
 
-The main repository keeps the unadapted frontend baseline under `web/capacitor-ui/` and does not build platform artifacts. Android and Windows repositories keep their platform-adapted frontend source under the same path and own their builds. The following directories are generated outputs and should not be edited as source:
-
-| Generated directory | Purpose |
-| --- | --- |
-| Android `app/src/main/assets/public/` | Console bundled in the APK |
-| Windows `frontend-dist/` | Electron packaging input |
-| Main repository `docs/app/` | Interactive GitHub Pages demo |
-
-The former `SillyClient-Frontend` repository is archived and is no longer part of the build.
-
-## Development documentation
-
-- [Project architecture](./docs/ARCHITECTURE.md)
-- [Pages directory](./docs/README.md)
-- [Pages maintenance guide](./docs/PAGES-MAINTENANCE.md)
-- [Contributing](./CONTRIBUTING.md)
-- [Release process](./release/RELEASE-GUIDE.md)
-- [Android build instructions](https://github.com/CAPTCHAAAAA/SillyClient-Android#构建)
-- [Windows build instructions](https://github.com/CAPTCHAAAAA/SillyClient-Windows#开发与打包)
-
-## Relationship to SillyTavern
-
-SillyClient is an independently maintained community project and is not endorsed by SillyTavern. The SillyTavern source code, name, and releases are maintained by the [SillyTavern](https://github.com/SillyTavern/SillyTavern) project. Use and redistribution of upstream components remain subject to the upstream license terms.
+Build outputs are unsigned IPAs that can be deployed via AltStore, TrollStore, SideStore, or Xcode.
 
 ## License
 
-[MIT](./LICENSE)
+This project is licensed under the MIT License.

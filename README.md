@@ -2,9 +2,9 @@
   <img src="./docs/sillyclient-logo.svg" width="96" height="96" alt="SillyClient 标志">
 </p>
 
-<h1 align="center">SillyClient</h1>
+<h1 align="center">SillyClient iOS</h1>
 
-<p align="center">面向 Android 与 Windows 的 SillyTavern 实例管理客户端</p>
+<p align="center">面向 iOS 平台的 SillyTavern 本地运行与实例管理客户端（免越狱 / NodeMobile / 全沉浸 / 变色龙）</p>
 
 <p align="center">
   <a href="./README.md"><kbd>简体中文</kbd></a>
@@ -16,90 +16,64 @@
   ·
   <a href="https://github.com/CAPTCHAAAAA/SillyClient/releases">下载安装包</a>
   ·
+  <a href="https://github.com/CAPTCHAAAAA/SillyClient">主仓库</a>
+  ·
   <a href="https://github.com/CAPTCHAAAAA/SillyClient-Android">Android 源码</a>
   ·
   <a href="https://github.com/CAPTCHAAAAA/SillyClient-Windows">Windows 源码</a>
 </p>
 
-SillyClient 用于安装、运行和管理 SillyTavern 实例。客户端可从 GitHub Release 或本地压缩包创建实例，也可登记已有的远程服务地址。下载、安装、端口、配置与运行日志统一由控制台管理。
+SillyClient iOS 端是专为 iPhone 与 iPad 打造的现代化 SillyTavern 启动器。应用内置 NodeMobile 运行时，在 iOS 沙盒内原生运行 SillyTavern 实例，无需越狱即可享受完整的本地酒馆体验。
 
-Android 安装包内置 arm64 Bionic Node.js；Windows 安装包内置固定版本的 Windows x64 Node.js。客户端运行时不依赖 Termux，也不读取系统 `PATH` 中的 Node.js。
+## 特性
 
-## 项目边界
+- **免越狱本地运行**：通过 NodeMobile 引擎在 iOS 沙盒内原生托管 Node.js 进程与酒馆服务
+- **多实例生命周期**：支持从 GitHub Release 下载或从本地 ZIP 导入实例，支持版本管理与独立端口
+- **双 WebView 架构**：Capacitor 现代管理控制台与独立全沉浸 SillyTavern 交互视图无缝切换，手势滑动返回不中断后台服务
+- **变色龙全沉浸视觉**：动态提取酒馆背景色并与 iOS 状态栏/刘海屏安全区融合，提供沉浸式全屏体验
+- **沙盒安全与规范化路径**：原生适配 Darwin `/private/var` 符号链接与 Documents 安全目录规范，杜绝路径逃逸
+- **数据保全**：支持无损导入导出用户数据、角色卡与预设配置
 
-SillyClient 不是 SillyTavern 的分支，不提供模型、API 服务、账户或访问凭据。创建本地实例时，客户端获取用户指定的 SillyTavern 版本并在设备上准备运行环境；远程实例仅保存服务地址，不会在本机重复安装。
-
-安装包统一发布在主仓库的 [Releases](https://github.com/CAPTCHAAAAA/SillyClient/releases) 页面。
-
-## 功能
-
-- 从 GitHub Release 或本地 zip 创建 SillyTavern 实例
-- 显示下载、解压和依赖安装进度，通过可运行性检查后再完成创建
-- 管理多个本地实例，并连接已有的远程 SillyTavern 服务
-- 设置端口与实例配置，查看运行日志和终端输出
-- 导入、导出和清理实例数据
-- 在控制台与 SillyTavern 阅读窗口之间切换，不中断后台服务
-
-## 运行结构
-
-React 控制台负责实例配置、状态和日志展示。平台层负责文件系统、下载、解压、进程生命周期、端口检测和窗口管理。
+## 架构
 
 ```mermaid
 flowchart LR
-    UI["React 控制台"] --> Contract["平台接口"]
-    Contract --> Android["Android / Kotlin"]
-    Contract --> Windows["Windows / Electron"]
-    Android --> ARuntime["内置 Bionic Node.js"]
-    Windows --> WRuntime["内置 Windows Node.js"]
-    ARuntime --> Server["SillyTavern 实例"]
-    WRuntime --> Server
-    Android --> AView["原生 WebView"]
-    Windows --> WView["独立 Electron 窗口"]
+    UI["React 控制台 (Capacitor)"] --> Contract["平台接口 (TarvenEnvPlugin)"]
+    Contract --> Host["Swift 宿主 (iOS 沙盒)"]
+    Host --> NodeRunner["NodeMobile (Node.js 运行时)"]
+    NodeRunner --> Server["SillyTavern 实例"]
+    Host --> NativeView["独立全沉浸 WKWebView"]
 ```
 
-控制台和 SillyTavern 使用不同窗口。关闭阅读窗口只会返回控制台，不会停止实例；停止操作由控制台显式执行。Android 使用两个原生 WebView，并处理沉浸式显示、DisplayCutout 与厂商窗口行为。Windows 由 Electron 管理独立窗口和内置运行时。
+## 环境
 
-## 平台支持
+- macOS 与 Xcode 16+
+- iOS 15.0+ 设备（arm64）或 CoreSimulator 模拟器
+- Node.js 22+ 与 pnpm 11+
+- CocoaPods
 
-| 平台 | 实现 | 系统要求 |
-| --- | --- | --- |
-| Android | Kotlin、Capacitor 7、原生 WebView、arm64 Bionic Node.js | Android 8.0+（API 26），arm64-v8a |
-| Windows | Electron 33、TypeScript、Node.js 22.16.0 | Windows 10 / 11，x64 |
+## 构建与运行
 
-## 仓库结构
+1. 构建前端控制台静态资源：
+```bash
+cd web/capacitor-ui
+pnpm install --frozen-lockfile
+pnpm run build
+cd ../..
+```
 
-SillyClient 由三个独立仓库组成，不使用 Git submodule：
+2. 同步 Capacitor 原生工程：
+```bash
+npx cap sync ios
+```
 
-| 仓库 | 职责 | 默认分支 |
-| --- | --- | --- |
-| [SillyClient](https://github.com/CAPTCHAAAAA/SillyClient) | 未适配基线前端源码、GitHub Pages、公共文档、Release 与安装包 | `main` |
-| [SillyClient-Android](https://github.com/CAPTCHAAAAA/SillyClient-Android) | Android 适配前端源码、Kotlin 宿主和 Android 运行时 | `main` |
-| [SillyClient-Windows](https://github.com/CAPTCHAAAAA/SillyClient-Windows) | Windows 适配前端源码、Electron 宿主、Windows 运行时和安装器 | `main` |
+3. 打开 Xcode 进行签名与设备调试：
+```bash
+open ios/App/App.xcworkspace
+```
 
-主仓库保留未适配基线前端源码 `web/capacitor-ui/`，不参与平台构建；Android 与 Windows 仓库分别保存对应平台适配后的前端源码并负责构建，方便按平台差异维护。以下目录是构建产物，不作为功能修改入口：
-
-| 生成目录 | 用途 |
-| --- | --- |
-| Android `app/src/main/assets/public/` | APK 内置控制台 |
-| Windows `frontend-dist/` | Electron 打包输入 |
-| 主仓库 `docs/app/` | GitHub Pages 交互演示 |
-
-旧 `SillyClient-Frontend` 仓库已经归档，不再参与构建。
-
-## 开发文档
-
-- [项目架构](./docs/ARCHITECTURE.md)
-- [Pages 目录说明](./docs/README.md)
-- [Pages 维护手册](./docs/PAGES-MAINTENANCE.md)
-- [参与开发](./CONTRIBUTING.md)
-- [发布流程](./release/RELEASE-GUIDE.md)
-- [Android 构建说明](https://github.com/CAPTCHAAAAA/SillyClient-Android#构建)
-- [Windows 构建说明](https://github.com/CAPTCHAAAAA/SillyClient-Windows#开发与打包)
-
-## 与 SillyTavern 的关系
-
-SillyClient 是独立维护的社区项目，未获得 SillyTavern 官方背书。SillyTavern 的源码、名称和发布由 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 项目维护。使用或分发相关组件时，应同时遵守上游项目的许可条款。
+打包产物为未签名 IPA，可通过 AltStore、TrollStore、SideStore 或 Xcode 直接部署到 iOS 设备上运行。
 
 ## 许可证
 
-[MIT](./LICENSE)
+本项目基于 MIT 许可证开源。
