@@ -110,3 +110,25 @@ The workflow builds an unsigned generic-device archive and runs the actual
 application in a hosted simulator. It does not install on a physical iPhone,
 publish a Release, or merge into any released platform. Current build logs and
 artifact verification belong in `Local/evidence/ios-xcode-feature-sync`.
+
+## 2026-10-09 iOS 代码清洗与跨端特性对齐
+
+本轮完成对 iOS 端的全量代码清洗、无用残留剔除及跨端功能同步：
+
+1. **预设扩展多镜像源加速与重试机制同步**：
+   - `IOSPreinstaller.swift` 实现多镜像候选队列（`codeload.github.com`、`ghfast.top`、`gh-proxy.com`、`ghproxy.net`）与自动回退；
+   - 放行合法的 HTTP 301/302/307 重定向，解决国内直接拉取断流问题；保留严格的 SHA-256 校验和字节上限控制。
+2. **服务端插件安全开关默认开启**：
+   - `IOSInstanceStore.swift` 在创建或更新 `config.yaml` 时默认注入 `enableServerPlugins: true`，消除插件放入 `plugins/` 目录被静默忽略的问题。
+3. **消除 Xcode 工程代码分叉与残留后门**：
+   - 彻底将 `native-src` 规范源码镜像同步至 `ios/App/App`（包括 `AppDelegate.swift`、`NodeRunner.swift`、`TarvenEnvPlugin.swift`、`TarvenEnvPlugin.m`）；
+   - 拔除 `AppDelegate.swift` 中历史残留的 `__onAutoTourStage` 探针与硬编码 UI 测试后门；
+   - 消除 `TarvenEnvPlugin.swift` 旧版本中的空 mock 方法（如原先返回空数组的 `checkLegacyInstances` 与 `migrateLegacyInstances`）。
+4. **无用与残留功能识别**：
+   - 明确标记已失效的假凭据接口（`setSecret`/`getSecret`/`deleteSecret`，实际安全认证由 Keychain 承载）；
+   - 明确标记 iOS 沙盒下无法运作的全局清理接口（`cleanGarbage`/`deleteGarbageItem`，实际清理已收拢至 `IOSInstanceMaintenance`）；
+   - 移除前端 `AppSettingsDrawer.tsx` 中无交互的悬空占位符 `<AppSettingsPlaceholder />`。
+5. **验证基线**：
+   - `scripts/verify-ios-cloud.mjs --mock-mode` 全部 7 大套件（静态契约、UTF-8 文本导入、复制迁移、底座补全、原地接管防误删、自定义路径、沙盒探针）100% 通过；
+   - `tests/*.test.mjs` 全量 117 项测试通过（115 pass，2 optional skip，0 fail）；
+   - 前端 41 项单测 100% 通过。

@@ -44,7 +44,7 @@ private final class IOSPinnedDownload: NSObject, URLSessionDownloadDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
+        completionHandler(request)
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
@@ -143,8 +143,28 @@ enum IOSPreinstaller {
                 let cache = staging.appendingPathComponent(".sillyclient-maintenance/download-cache/\(UUID().uuidString)")
                 try files.createDirectory(cache)
                 let archiveURL = cache.appendingPathComponent("download.zip")
-                let url = URL(string: "https://codeload.github.com/\(repository)/zip/\(commit)")!
-                try IOSPinnedDownload(destination: archiveURL, expectedBytes: Int64(expectedBytes), cancelled: cancelled).run(url)
+                let rawUrl = "https://codeload.github.com/\(repository)/zip/\(commit)"
+                let candidates = [
+                    URL(string: rawUrl)!,
+                    URL(string: "https://ghfast.top/\(rawUrl)")!,
+                    URL(string: "https://gh-proxy.com/\(rawUrl)")!,
+                    URL(string: "https://ghproxy.net/\(rawUrl)")!
+                ]
+                var downloaded = false
+                var lastDownloadError: Error?
+                for candidate in candidates {
+                    try cancelled()
+                    do {
+                        try IOSPinnedDownload(destination: archiveURL, expectedBytes: Int64(expectedBytes), cancelled: cancelled).run(candidate)
+                        downloaded = true
+                        break
+                    } catch {
+                        lastDownloadError = error
+                    }
+                }
+                guard downloaded else {
+                    throw lastDownloadError ?? IOSFileError.invalid("Failed to download extension archive from all mirrors")
+                }
                 let bytes = try files.data(archiveURL, maximum: expectedBytes)
                 let actualHash = IOSManagedFiles.hex(SHA256.hash(data: bytes))
                 guard actualHash.uppercased() == expectedHash.uppercased() else {

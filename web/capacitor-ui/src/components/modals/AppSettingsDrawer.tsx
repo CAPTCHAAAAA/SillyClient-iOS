@@ -56,13 +56,6 @@ function AppSettingsRow({
   );
 }
 
-function AppSettingsPlaceholder() {
-  return (
-    <div className="app-settings-row is-pending" aria-disabled="true">
-      <span className="app-settings-pending">敬请期待</span>
-    </div>
-  );
-}
 
 function AppSettingsLinkRow({
   label,
@@ -320,7 +313,6 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                 desc="再次查看 SillyClient 的使用说明"
                 onClick={replayOnboarding}
               />
-              <AppSettingsPlaceholder />
             </div>
           </div>
 
@@ -405,7 +397,6 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                   清除
                 </AppSettingsAction>
               </AppSettingsRow>
-              <AppSettingsPlaceholder />
             </div>
           </div>
 

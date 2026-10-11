@@ -378,6 +378,7 @@ final class IOSInstanceStore {
         value["browserLaunch"] = browser
         if value["listen"] == nil { value["listen"] = false }
         if value["protocol"] == nil { value["protocol"] = ["ipv4": true, "ipv6": false] }
+        if value["enableServerPlugins"] == nil { value["enableServerPlugins"] = true }
         try files.write(Data(Yams.dump(object: value).utf8), to: path)
     }
 
