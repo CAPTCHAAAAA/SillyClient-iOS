@@ -32,7 +32,9 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             "applyInstanceMaintenance", "listInstanceMaintenanceRecovery", "restoreInstanceMaintenance",
             "checkLegacyInstances", "migrateLegacyInstances", "renameInstance", "relocateInstance",
             "setInstancePassword", "verifyInstancePassword", "hasInstancePassword",
-            "clearInstancePassword", "listInstancePasswordStatus"
+            "clearInstancePassword", "listInstancePasswordStatus",
+            "getAppSettings", "setInstancesRoot", "exportInstance",
+            "inspectImportArchive", "importInstanceData"
         ]
         #if DEBUG
         names.append("dismissPickerForTesting")
@@ -703,6 +705,81 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                 throw IOSFileError.invalid("Relocation paths must be absolute local path strings")
             }
             return try self.store.relocate(instanceId: id, targetPath: targetPath, installPath: call.getString("installPath"))
+        }
+    }
+    private var defaultInstancesRoot: String {
+        store.documents.appendingPathComponent("instances").path
+    }
+    private var instancesRoot: String {
+        if let configured = UserDefaults.standard.string(forKey: "configuredInstancesRoot"), !configured.isEmpty {
+            return configured
+        }
+        return defaultInstancesRoot
+    }
+    @objc func getAppSettings(_ call: CAPPluginCall) {
+        let configured = UserDefaults.standard.string(forKey: "configuredInstancesRoot")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var result: [String: Any] = [
+            "instancesRoot": instancesRoot,
+            "defaultInstancesRoot": defaultInstancesRoot
+        ]
+        if let conf = configured, !conf.isEmpty {
+            result["configuredInstancesRoot"] = conf
+        }
+        call.resolve(result)
+    }
+    @objc func setInstancesRoot(_ call: CAPPluginCall) {
+        let raw = call.getString("path")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let path = raw, !path.isEmpty {
+            UserDefaults.standard.set(path, forKey: "configuredInstancesRoot")
+            call.resolve(["instancesRoot": path, "configured": true])
+        } else {
+            UserDefaults.standard.removeObject(forKey: "configuredInstancesRoot")
+            call.resolve(["instancesRoot": defaultInstancesRoot, "configured": false])
+        }
+    }
+    @objc func inspectImportArchive(_ call: CAPPluginCall) {
+        perform(call) {
+            guard let archivePath = call.getString("archivePath"), !archivePath.isEmpty else {
+                throw IOSFileError.invalid("Archive path is required")
+            }
+            let summary = try IOSSafeArchive.inspectArchive(URL(fileURLWithPath: archivePath))
+            return summary.dictionary
+        }
+    }
+    @objc func importInstanceData(_ call: CAPPluginCall) {
+        perform(call) {
+            let instanceId = try self.id(call)
+            guard let archivePath = call.getString("archivePath"), !archivePath.isEmpty else {
+                throw IOSFileError.invalid("Archive path is required")
+            }
+            let running = NodeRunner.shared.status["instanceId"] as? String
+            guard running != instanceId else {
+                throw IOSFileError.invalid("实例正在运行，请先停止实例后再导入数据")
+            }
+            let location = try self.store.location(instanceId, installPath: call.getString("installPath"), requireExisting: true)
+            let includeOptional = call.getBool("includeOptional") ?? false
+            let outcome = try IOSSafeArchive.importArchiveData(URL(fileURLWithPath: archivePath), targetDir: location.directory, includeOptional: includeOptional)
+            return ["imported": outcome.imported, "bytes": outcome.bytes, "skipped": outcome.skipped]
+        }
+    }
+    @objc func exportInstance(_ call: CAPPluginCall) {
+        perform(call) {
+            let instanceId = try self.id(call)
+            let location = try self.store.location(instanceId, installPath: call.getString("installPath"), requireExisting: true)
+            let directory = location.directory
+            let destinationURL: URL
+            if let targetZipPath = call.getString("targetZipPath"), !targetZipPath.isEmpty {
+                destinationURL = URL(fileURLWithPath: targetZipPath)
+            } else {
+                let exportsDir = self.store.documents.appendingPathComponent("Exports")
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyyMMdd-HHmmss"
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                let stamp = formatter.string(from: Date())
+                destinationURL = exportsDir.appendingPathComponent("\(directory.lastPathComponent)-\(stamp).zip")
+            }
+            let bytes = try IOSSafeArchive.exportInstanceDirectory(directory, destinationURL: destinationURL)
+            return ["path": destinationURL.path, "bytes": bytes]
         }
     }
     #if DEBUG

@@ -14,7 +14,8 @@ public final class IOSDebugHarness {
         "exitImmersive", "closeTavern", "reloadTavern", "setPullToRefresh", "openExternalUrl",
         "scanInstanceMaintenance", "applyInstanceMaintenance", "listInstanceMaintenanceRecovery",
         "restoreInstanceMaintenance", "migrateInstance", "uninstallInstance", "getLogs",
-        "checkLegacyInstances", "migrateLegacyInstances", "renameInstance", "relocateInstance"
+        "checkLegacyInstances", "migrateLegacyInstances", "renameInstance", "relocateInstance",
+        "getAppSettings", "setInstancesRoot", "exportInstance", "inspectImportArchive", "importInstanceData"
     ]
 
     static let bridgeInvocationScript = """

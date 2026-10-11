@@ -54,6 +54,11 @@ CAP_PLUGIN(TarvenEnvPlugin, "TarvenEnv",
     CAP_PLUGIN_METHOD(hasInstancePassword, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(clearInstancePassword, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(listInstancePasswordStatus, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(getAppSettings, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(setInstancesRoot, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(exportInstance, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(inspectImportArchive, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(importInstanceData, CAPPluginReturnPromise);
 #if DEBUG
     CAP_PLUGIN_METHOD(dismissPickerForTesting, CAPPluginReturnPromise);
 #endif

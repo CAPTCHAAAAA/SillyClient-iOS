@@ -312,6 +312,8 @@ export const ManageInstanceModal: React.FC<ManageInstanceModalProps> = ({
 
   const launchRef = useRef<HTMLDivElement>(null);
   const storageRef = useRef<HTMLDivElement>(null);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [importStatus, setImportStatus] = useState<string | null>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
   const aboutRef = useRef<HTMLDivElement>(null);
   const [manageTabHeight, setManageTabHeight] = useState<number | null>(null);
@@ -1223,13 +1225,128 @@ export const ManageInstanceModal: React.FC<ManageInstanceModalProps> = ({
                       重命名
                     </button>
                   </div>
+                  {mp.type === "local" && (
+                    <div
+                      className={cn(
+                        "flex items-center justify-between gap-4 rounded-xl px-4 py-3",
+                        isLight ? "bg-black/[0.025]" : "bg-white/[0.025]"
+                      )}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div
+                          className={cn(
+                            "text-xs font-medium",
+                            isLight ? "text-[#1a1625]/70" : "text-white/70"
+                          )}
+                        >
+                          导出实例（ZIP）
+                        </div>
+                        <div
+                          className={cn(
+                            "mt-1 truncate text-[10px]",
+                            isLight ? "text-[#1a1625]/30" : "text-white/30"
+                          )}
+                        >
+                          {exportStatus || "打包到应用导出目录，随时可在文件 App 查看"}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={exportStatus === "正在打包…"}
+                        onClick={async () => {
+                          setExportStatus("正在打包…");
+                          try {
+                            const res = await TarvenEnv.exportInstance({
+                              instanceId: mp.installDir || mp.id,
+                              installPath: mp.installPath,
+                            });
+                            const name = res.path.split(/[/\\\\]/).pop() || res.path;
+                            setExportStatus(`已导出：${name}`);
+                          } catch (error) {
+                            setExportStatus(error instanceof Error ? error.message : "导出失败，请重试");
+                          }
+                        }}
+                        className={cn(
+                          "motion-control h-8 flex-shrink-0 whitespace-nowrap rounded-xl px-3 text-[11px] font-medium disabled:opacity-50",
+                          isLight
+                            ? "bg-black/[0.06] text-[#1a1625]/60 hover:bg-black/[0.09]"
+                            : "bg-white/[0.07] text-white/60 hover:bg-white/[0.11]"
+                        )}
+                      >
+                        导出
+                      </button>
+                    </div>
+                  )}
+                  {mp.type === "local" && (
+                    <div
+                      className={cn(
+                        "flex items-center justify-between gap-4 rounded-xl px-4 py-3",
+                        isLight ? "bg-black/[0.025]" : "bg-white/[0.025]"
+                      )}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div
+                          className={cn(
+                            "text-xs font-medium",
+                            isLight ? "text-[#1a1625]/70" : "text-white/70"
+                          )}
+                        >
+                          导入数据（ZIP）
+                        </div>
+                        <div
+                          className={cn(
+                            "mt-1 truncate text-[10px]",
+                            isLight ? "text-[#1a1625]/30" : "text-white/30"
+                          )}
+                        >
+                          {importStatus || "从旧酒馆备份导入聊天、角色与扩展（不导入依赖与程序文件，不含 secrets.json）"}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={importStatus === "正在导入…"}
+                        onClick={async () => {
+                          try {
+                            setImportStatus(null);
+                            const picked = await TarvenEnv.pickZipFile();
+                            if (!picked?.path) return;
+                            const summary = await TarvenEnv.inspectImportArchive({ archivePath: picked.path });
+                            if (!summary.importable) {
+                              setImportStatus("该压缩包里没有可导入的实例数据（需要 data/ 或第三方扩展）");
+                              return;
+                            }
+                            setImportStatus(
+                              `正在导入…（${summary.importEntries} 项 / ${(summary.importBytes / 1048576).toFixed(1)} MB，忽略 ${summary.skippedEntries} 项依赖与程序文件）`
+                            );
+                            const res = await TarvenEnv.importInstanceData({
+                              instanceId: mp.installDir || mp.id,
+                              installPath: mp.installPath,
+                              archivePath: picked.path,
+                              includeOptional: false,
+                            });
+                            setImportStatus(`已导入 ${res.imported} 项（忽略 ${res.skipped} 项依赖与程序文件）`);
+                          } catch (error) {
+                            setImportStatus(error instanceof Error ? error.message : "导入失败，请重试");
+                          }
+                        }}
+                        className={cn(
+                          "motion-control h-8 flex-shrink-0 whitespace-nowrap rounded-xl px-3 text-[11px] font-medium disabled:opacity-50",
+                          isLight
+                            ? "bg-black/[0.06] text-[#1a1625]/60 hover:bg-black/[0.09]"
+                            : "bg-white/[0.07] text-white/60 hover:bg-white/[0.11]"
+                        )}
+                      >
+                        导入
+                      </button>
+                    </div>
+                  )}
                   <div
                     className={cn(
                       "flex items-center justify-between gap-4 rounded-xl px-4 py-3",
                       isLight ? "bg-black/[0.025]" : "bg-white/[0.025]"
                     )}
                   >
-                    <div className="min-w-0">
+                    <div className="min-w-0 flex-1">
                       <div
                         className={cn(
                           "text-xs font-medium",
@@ -1254,7 +1371,7 @@ export const ManageInstanceModal: React.FC<ManageInstanceModalProps> = ({
                         onTriggerDelete(mp);
                       }}
                       className={cn(
-                        "motion-control h-8 rounded-xl px-3 text-[11px] font-medium",
+                        "motion-control h-8 flex-shrink-0 whitespace-nowrap rounded-xl px-3 text-[11px] font-medium",
                         isLight
                           ? "bg-red-900/[0.07] text-red-900/60 hover:bg-red-900/[0.11]"
                           : "bg-red-400/[0.08] text-red-300/60 hover:bg-red-400/[0.13]"

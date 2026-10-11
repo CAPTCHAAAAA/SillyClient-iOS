@@ -13,6 +13,7 @@ import type { InstanceRelocationResult } from "../../capacitor-plugin";
 import { exactInstallTarget, installationSelection } from "../../lib/install-location";
 import { requireRelocationResult } from "../../lib/instance-location-state";
 import type { TavernInstance } from "../../types";
+import { humanizeNativeError } from "../../lib/native-errors";
 
 export interface RelocateInstanceModalProps {
   instance: TavernInstance | null;
@@ -410,7 +411,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
               {errorMsg && (
                 <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                  <span>{errorMsg}</span>
+                  <span>{humanizeNativeError(errorMsg)}</span>
                 </div>
               )}
 
