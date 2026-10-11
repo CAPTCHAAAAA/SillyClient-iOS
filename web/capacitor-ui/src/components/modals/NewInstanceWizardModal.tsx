@@ -232,16 +232,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
             type="button"
             aria-pressed={newInstanceMode === "local"}
             onClick={() => switchInstanceMode("local")}
-            className={cn(
-              "ios-choice-control motion-control flex-1 h-9 rounded-xl text-xs font-medium border transition-colors duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
-              newInstanceMode === "local"
-                ? isLight
-                  ? "bg-[#1a1625]/8 border-[#1a1625]/15 text-[#1a1625]"
-                  : "bg-white/10 border-white/15 text-white"
-                : isLight
-                ? "bg-transparent border-black/[0.06] text-[#1a1625]/35 hover:border-black/12 hover:text-[#1a1625]/55"
-                : "bg-transparent border-white/[0.06] text-white/35 hover:border-white/12 hover:text-white/55"
-            )}
+            className="ios-choice-control py-2 text-xs font-medium border flex items-center justify-center gap-1.5 transition-colors duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
           >
             本地酒馆
           </button>
@@ -249,16 +240,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
             type="button"
             aria-pressed={newInstanceMode === "remote"}
             onClick={() => switchInstanceMode("remote")}
-            className={cn(
-              "ios-choice-control motion-control flex-1 h-9 rounded-xl text-xs font-medium border transition-colors duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
-              newInstanceMode === "remote"
-                ? isLight
-                  ? "bg-[#1a1625]/8 border-[#1a1625]/15 text-[#1a1625]"
-                  : "bg-white/10 border-white/15 text-white"
-                : isLight
-                ? "bg-transparent border-black/[0.06] text-[#1a1625]/35 hover:border-black/12 hover:text-[#1a1625]/55"
-                : "bg-transparent border-white/[0.06] text-white/35 hover:border-white/12 hover:text-white/55"
-            )}
+            className="ios-choice-control py-2 text-xs font-medium border flex items-center justify-center gap-1.5 transition-colors duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
           >
             远程酒馆
           </button>
