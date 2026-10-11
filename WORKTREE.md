@@ -1,0 +1,49 @@
+# SillyClient 工作树规约：iOS 主力发布加固与 NodeMobile 运行时守护 (Release Hardening iOS)
+
+> **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
+
+---
+
+## 1. 职责与范围边界 (Scope & Boundaries)
+
+- **所属仓库**: `SillyClient_iOS`
+- **标识分支**: `lts/ios-release-hardening`
+- **授权修改范围**:
+  - `native-src/` 与 `ios/App/App/`：Swift 原生宿主、Capacitor 插件桥接、NodeMobile 进程监管、Documents 沙盒管理；
+  - `web/capacitor-ui/`：iOS 适配前端与纯净界面布局；
+  - `scripts/`：云真机探针、模拟器自动化、E2E 测试脚本；
+  - iOS 编译、IPA 构建与发布打包流程。
+- **严禁事项 (Forbidden Boundaries)**:
+  - 严禁在 Xcode 工程与 `native-src` 之间制造代码分叉，任何原生改动必须严格双向同步；
+  - 严禁引入不安全的非沙盒私有 API 或引入未授权付费模型接口；
+  - 严禁擅改已冻结的原地接管（Takeover）防误删和 Keychain 凭据安全契约。
+
+---
+
+## 2. 核心架构契约 (Invariants & Constraints)
+
+1. **单嵌入式 NodeMobile 进程模型**：遵循 `IOS-RUNTIME.md`，多实例共享一个宿主生命周期，单 Worker 执行；
+2. **Documents 安全沙盒契约**：所有实例物理路径严格约束在合法作用域内，支持 Security-Scoped Bookmark 持久化授权；
+3. **原生与 Xcode 工程 100% 镜像一致性**：`native-src` 与 `ios/App/App` 保持完全同步；
+4. **全套自动化测试网全绿**：117 项 Node 测试、41 项前端单测与 `verify-ios-cloud.mjs` 全部 7 大套件 100% 通过。
+
+---
+
+## 3. 本树推进与改动记录 (Worktree Activity Log)
+
+| 日期 | 操作人 / 提交 | 改动摘要与内部验证结果 | 状态 |
+| :--- | :--- | :--- | :---: |
+| 2026-10-09 | Agent (4ae7b82) | 预设扩展多镜像源加速与重试机制、config.yaml 默认开启服务端插件、全面清洗 Xcode 镜像分叉与测试后门、拔除悬空占位符 | 已提交 |
+| 2026-10-11 | Agent | 严格遵循 LTS 规约设立独立工作树 `release-hardening-ios`，分支对齐至 `lts/ios-release-hardening`，完成依赖 Junction 挂载与全量测试验证 | 长期加固 |
+
+---
+
+## 4. 交付与推送门禁 (Milestone & Delivery Gate)
+
+- **本地门禁**:
+  1. `node scripts/verify-ios-cloud.mjs --mock-mode` 7 大套件 100% PASS；
+  2. `node --test tests/*.test.mjs` 117 项全量通过（115 pass, 2 optional skip, 0 fail）；
+  3. `node --test web/capacitor-ui/tests/*.test.cjs` 41 项单测 100% PASS。
+- **中央登记协议**:
+  - 本树过程记录就地沉淀在上方第 3 节；
+  - **当且仅当向远端分支执行 `git push` 或产出正式 IPA 时**，才向 `Local/docs/CURRENT_STATE.md` 与 `.worktrees/README.md` 登记事实索引。
