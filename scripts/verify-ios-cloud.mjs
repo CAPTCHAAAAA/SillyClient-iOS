@@ -218,6 +218,18 @@ function verifyStaticContracts() {
     fail('Swift 实现: uninstallInstance 缺少 isTakeover 原地接管安全保护');
   }
 
+  // 3.5. 实例存储路径与 ZIP 导入导出方法
+  for (const name of ['getAppSettings', 'setInstancesRoot', 'exportInstance', 'inspectImportArchive', 'importInstanceData']) {
+    const hasTS = tsContent.includes(name);
+    const hasObjC = objcContent.includes(`CAP_PLUGIN_METHOD(${name},`);
+    const hasSwift = swiftContent.includes(`"${name}"`) && swiftContent.includes(`@objc func ${name}(_ call: CAPPluginCall)`);
+    if (hasTS && hasObjC && hasSwift) {
+      pass(`契约与实现: ${name} (TS + ObjC + Swift) 三端对齐`);
+    } else {
+      fail(`契约或实现缺失: ${name}`, `TS: ${hasTS}, ObjC: ${hasObjC}, Swift: ${hasSwift}`);
+    }
+  }
+
   // 4. Xcode App/App 目录镜像同步校验
   const xcodeObjc = path.join(REPO_ROOT, 'ios/App/App/TarvenEnvPlugin.m');
   const xcodeSwift = path.join(REPO_ROOT, 'ios/App/App/TarvenEnvPlugin.swift');

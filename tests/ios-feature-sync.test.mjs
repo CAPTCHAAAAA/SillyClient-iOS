@@ -132,3 +132,15 @@ test('uninstall clears only the canonical returned identity and preserves locks 
     assert.match(fixtures, /takeoverResult\["instanceId"\] as\? String == "scan-kept"/);
     assert.match(fixtures, /aliasResult\["instanceId"\] as\? String == "kept"/);
 });
+
+test('iOS parity bridge exports instances-root, zip-import, and zip-export methods', () => {
+    const swift = read('native-src/TarvenEnvPlugin.swift');
+    const objc = read('native-src/TarvenEnvPlugin.m');
+    for (const name of ['getAppSettings', 'setInstancesRoot', 'exportInstance',
+        'inspectImportArchive', 'importInstanceData']) {
+        assert.ok(swift.includes(`"${name}"`), `Missing Swift method registration: ${name}`);
+        assert.ok(swift.includes(`@objc func ${name}(`), `Missing method: ${name}`);
+        assert.ok(objc.includes(`CAP_PLUGIN_METHOD(${name},`), `Missing ObjC method registration: ${name}`);
+    }
+});
+
