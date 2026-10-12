@@ -356,7 +356,7 @@ enum IOSSafeArchive {
             let resourceValues = try fileURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
             if resourceValues.isDirectory == true {
                 // uncompressedSize 必须显式 Int64：ZIPFoundation 0.9.19 同时存在 Int64 与已弃用 UInt32 重载，字面量 0 会触发歧义编译错误。
-                try archive.addEntry(with: "\(relative)/", type: .directory, uncompressedSize: Int64(0), compressionMethod: .none, provider: { (_: UInt64, _: Int) in Data() })
+                try archive.addEntry(with: "\(relative)/", type: .directory, uncompressedSize: Int64(0), compressionMethod: .none, provider: { _, _ in Data() })
             } else if resourceValues.isRegularFile == true {
                 let data = try Data(contentsOf: fileURL)
                 try archive.addEntry(with: relative, type: .file, uncompressedSize: Int64(data.count),
