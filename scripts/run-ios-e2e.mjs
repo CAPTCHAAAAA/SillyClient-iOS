@@ -318,7 +318,7 @@ try {
         assert.equal(selected.installPathMode, 'root');
         assert.equal(selected.persistentAuthorization, true);
         const result = await command('provisionAndStart', { instanceId, port, operationId: firstOperation,
-            installPath: installationRoot, installPathMode: 'root' }, 'call', 120000);
+            installPath: installationRoot, installPathMode: 'root', createIntent: true }, 'call', 120000);
         assert.equal(result.ready, true);
         assert.equal(result.instanceId, instanceId);
         assert.equal(result.operationId, firstOperation);
