@@ -106,14 +106,14 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({
           >
             <div className="flex items-center justify-between mb-1.5">
               <span className={cn("text-[13px] font-semibold tracking-tight", isLight ? "text-[#1a1625]/90" : "text-white/90")}>
-                新功能：实例维护与隔离恢复
+                新保护：实例启动防误装
               </span>
               <span className={cn("text-[10px] font-mono", isLight ? "text-[#1a1625]/35" : "text-white/30")}>
                 01
               </span>
             </div>
             <div className={cn("text-[11.5px] leading-relaxed", isLight ? "text-[#1a1625]/65" : "text-white/65")}>
-              按实例扫描疑似未完成扩展、失效禁用记录及归属已核验的下载缓存。疑似扩展默认不选，隔离内容保留恢复记录。
+              实例文件夹丢失或被移动时，启动不再静默全新安装顶替你的数据，而是明确提示并引导恢复。创建本地实例必须显式选择安装文件夹，存放位置完全由你指定。
             </div>
           </div>
 
@@ -126,14 +126,14 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({
           >
             <div className="flex items-center justify-between mb-1.5">
               <span className={cn("text-[13px] font-semibold tracking-tight", isLight ? "text-[#1a1625]/90" : "text-white/90")}>
-                新更新：可选预设安装与受控外链
+                新功能：实例导出 ZIP 备份
               </span>
               <span className={cn("text-[10px] font-mono", isLight ? "text-[#1a1625]/35" : "text-white/30")}>
                 02
               </span>
             </div>
             <div className={cn("text-[11.5px] leading-relaxed", isLight ? "text-[#1a1625]/65" : "text-white/65")}>
-              创建本地实例或复制迁移时可选择主题与扩展，默认关闭。项目与更新页面在系统浏览器打开，不替换当前酒馆。
+              「实例管理 → 存储路径」新增导出实例：一键把聊天、角色、扩展与配置打包成 ZIP（不含依赖与程序文件），存入「文件」App 的 SillyClient/Exports 文件夹，随时带走或转移。
             </div>
           </div>
 
@@ -146,14 +146,14 @@ export const WhatsNewModal: React.FC<WhatsNewModalProps> = ({
           >
             <div className="flex items-center justify-between mb-1.5">
               <span className={cn("text-[13px] font-semibold tracking-tight", isLight ? "text-[#1a1625]/90" : "text-white/90")}>
-                新优化：任务取消与运行时保护
+                新优化：旧实例迁移逐项容错
               </span>
               <span className={cn("text-[10px] font-mono", isLight ? "text-[#1a1625]/35" : "text-white/30")}>
                 03
               </span>
             </div>
             <div className={cn("text-[11.5px] leading-relaxed", isLight ? "text-[#1a1625]/65" : "text-white/65")}>
-              取消与切换实例后拒绝旧任务回包，日志按实例限制容量。维护在停止运行后执行，文件变化或恢复冲突时保留现有内容。
+              检测到旧版存储位置的实例时会弹出迁移向导：多个实例逐项独立迁移，单个失败不影响其余，失败原因当场明示并可直接重试，完成后卡片自动指向新位置。
             </div>
           </div>
 

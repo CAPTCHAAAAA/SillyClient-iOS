@@ -30,7 +30,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             "setPullToRefresh", "uninstallInstance", "cleanGarbage", "deleteGarbageItem", "openFilesApp",
             "setSecret", "getSecret", "deleteSecret", "checkUpdate", "scanInstanceMaintenance",
             "applyInstanceMaintenance", "listInstanceMaintenanceRecovery", "restoreInstanceMaintenance",
-            "checkLegacyInstances", "migrateLegacyInstances", "renameInstance", "relocateInstance",
+            "checkLegacyInstances", "renameInstance", "relocateInstance",
             "setInstancePassword", "verifyInstancePassword", "hasInstancePassword",
             "clearInstancePassword", "listInstancePasswordStatus",
             "getAppSettings", "setInstancesRoot", "exportInstance",
@@ -155,7 +155,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                         let directory = try self.store.prepare(instance: instance, operation: operation,
                             version: call.getString("version"), localZip: call.getString("localZipPath"),
                             installPath: call.getString("installPath"), installPathMode: call.getString("installPathMode"), port: port, config: call.getObject("config"),
-                            preinstall: call.getObject("preinstall"), companion: call.getObject("companionPreset"))
+                            preinstall: call.getObject("preinstall"), companion: call.getObject("companionPreset"),
+                            createIntent: call.getBool("createIntent") ?? false)
                         NodeRunner.shared.startPrepared(instance: instance, operation: operation, server: directory,
                             data: directory.appendingPathComponent("data"), config: directory.appendingPathComponent("config.yaml"),
                             location: location, port: port, ipv4: try self.store.ipv4(directory)) { result in
@@ -677,15 +678,6 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     @objc func checkLegacyInstances(_ call: CAPPluginCall) {
         perform(call) { ["instances": try self.store.legacyInstances()] }
     }
-    @objc func migrateLegacyInstances(_ call: CAPPluginCall) {
-        perform(call) {
-            let selection = call.getArray("instanceIds") as? [String]
-            guard call.options["instanceIds"] == nil || selection != nil else {
-                throw IOSFileError.invalid("Legacy migration requires an array of instance identities")
-            }
-            return try self.store.migrateLegacyInstances(instanceIds: selection)
-        }
-    }
     @objc func renameInstance(_ call: CAPPluginCall) {
         perform(call) {
             let id = try self.id(call)
@@ -707,21 +699,9 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             return try self.store.relocate(instanceId: id, targetPath: targetPath, installPath: call.getString("installPath"))
         }
     }
-    private var defaultInstancesRoot: String {
-        store.documents.appendingPathComponent("instances").path
-    }
-    private var instancesRoot: String {
-        if let configured = UserDefaults.standard.string(forKey: "configuredInstancesRoot"), !configured.isEmpty {
-            return configured
-        }
-        return defaultInstancesRoot
-    }
     @objc func getAppSettings(_ call: CAPPluginCall) {
         let configured = UserDefaults.standard.string(forKey: "configuredInstancesRoot")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var result: [String: Any] = [
-            "instancesRoot": instancesRoot,
-            "defaultInstancesRoot": defaultInstancesRoot
-        ]
+        var result: [String: Any] = [:]
         if let conf = configured, !conf.isEmpty {
             result["configuredInstancesRoot"] = conf
         }
@@ -734,7 +714,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             call.resolve(["instancesRoot": path, "configured": true])
         } else {
             UserDefaults.standard.removeObject(forKey: "configuredInstancesRoot")
-            call.resolve(["instancesRoot": defaultInstancesRoot, "configured": false])
+            call.resolve(["instancesRoot": NSNull(), "configured": false])
         }
     }
     @objc func inspectImportArchive(_ call: CAPPluginCall) {
@@ -765,6 +745,10 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     @objc func exportInstance(_ call: CAPPluginCall) {
         perform(call) {
             let instanceId = try self.id(call)
+            let running = NodeRunner.shared.status["instanceId"] as? String
+            guard running != instanceId else {
+                throw IOSFileError.invalid("实例正在运行，请先停止实例后再导出数据")
+            }
             let location = try self.store.location(instanceId, installPath: call.getString("installPath"), requireExisting: true)
             let directory = location.directory
             let destinationURL: URL

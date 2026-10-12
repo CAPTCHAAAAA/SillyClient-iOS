@@ -23,7 +23,7 @@ const port = 8000;
 const origin = `http://127.0.0.1:${port}`;
 const firstOperation = `simulator-${randomUUID()}`;
 const secondOperation = `simulator-${randomUUID()}`;
-const nativeFixtureGroups = 44;
+const nativeFixtureGroups = 45;
 const simctl = (...args) => execFileSync('xcrun', ['simctl', ...args], {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120000,
 });
@@ -290,7 +290,7 @@ try {
         launch('--sillyclient-test');
         await waitForBridge();
         const version = await command('getAppVersion');
-        assert.equal(version.version, '1.12.1');
+        assert.equal(version.version, '1.13.0');
         const consoleStatus = await command(undefined, {}, 'console');
         assert.equal(consoleStatus.loggingEnabled, false, 'Capacitor payload logging must be disabled');
         recordStepTimestamp('01-native-bridge-ready');

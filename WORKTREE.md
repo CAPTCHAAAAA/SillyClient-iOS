@@ -37,6 +37,7 @@
 | 2026-10-11 | Agent | 严格遵循 LTS 规约设立独立工作树 `release-hardening-ios`，分支对齐至 `lts/ios-release-hardening`，完成依赖 Junction 挂载与全量测试验证 | 长期加固 |
 | 2026-10-11 | Agent | 跨端通用前端 1.12.0 基准对齐（竖版 687×843 锁定缩放、连体沟槽轨、向导溶变遮罩、密码状态作废）、版本号升级至 1.12.0（Build 30）、41 项前端单测 + 116 项运行时测试 + verify-ios-cloud 7 大套件 100% 全绿 | 已提交 |
 | 2026-10-12 | Agent | 跨端通用前端 1.12.1 基准同步（3张透明镂空封面资产引入、管理菜单卡片取消毛边遮罩改由容器 overflow 裁圆角、引入动态透明度感知 ManageInstanceCard 与背景色衬底）、版本号升级至 1.12.1（Build 31）、41 项前端单测 + 116 项运行时测试 + verify-ios-cloud 7 大套件 100% 全绿 | 待合流发布 |
+| 2026-10-12 | Agent | 同步双端 1.13.0 契约：①安装源=创建意图铁律（createIntent 全链路：前端卡片剥离一次性安装源 + doLaunch 闸门 + 原生 prepare 拒静默重装顶替）；②迁移向导逐项容错（onFailure 不阻断）与标记语义修正（空结果写标记/异常与稍后再试不写）；③向导预填已登记存储根 + 安装目录必选拦截 + 创建成功登记存储根；④打通导出实例 ZIP 链路（存储路径页签新增导出行 + 原生运行态守卫）；⑤无默认路径契约对齐 Windows（getAppSettings 精简、AppSettingsDrawer 去默认档）；⑥拔除死代码：migrateLegacyInstances 四端全移除、3 份零引用 ios-loader.js 拷贝、IOSDebugHarness 白名单同步；版本升级 1.13.0（Build 32）、42 项前端单测 + 116 项运行时测试 + verify-ios-cloud 7 大套件 100% 全绿 | 待推送 |
 
 ---
 

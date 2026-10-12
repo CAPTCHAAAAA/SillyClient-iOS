@@ -170,6 +170,11 @@ export interface TarvenEnvPlugin {
     instanceId: string
     operationId?: string
     version: string
+    /**
+     * 创建意图仅创建向导声明为 true，且安装源只允许在创建时携带。
+     * 启动既有实例绝不携带——后端据此在实例目录丢失/损坏时拒绝静默全新安装顶替用户数据。
+     */
+    createIntent?: boolean
     zipballUrl?: string
     localZipPath?: string
     /** Complete native installation path; unsupported locations fail without fallback. */
@@ -195,11 +200,11 @@ export interface TarvenEnvPlugin {
   /** 拉取 GitHub SillyTavern releases 列表。 */
   fetchReleases(): Promise<{ releases: GithubRelease[]; warning?: string }>
 
-  /** 读取应用级设置；instancesRoot 为当前默认实例存储根（实例是其直接子目录）。 */
-  getAppSettings(): Promise<{ instancesRoot: string; defaultInstancesRoot: string; configuredInstancesRoot?: string }>
+  /** 读取应用级设置；configuredInstancesRoot 为用户显式登记的实例存储根（无默认路径，未配置时缺省）。 */
+  getAppSettings(): Promise<{ configuredInstancesRoot?: string }>
 
-  /** 设置或恢复默认实例存储根；path 留空恢复出厂默认。仅影响之后创建的实例。 */
-  setInstancesRoot(options?: { path?: string }): Promise<{ instancesRoot: string; configured: boolean }>
+  /** 登记实例存储根（来自用户显式选择的文件夹）；path 留空时清除配置。仅影响之后创建的实例。 */
+  setInstancesRoot(options?: { path?: string }): Promise<{ instancesRoot: string | null; configured: boolean }>
 
   /** Installation selectors return an executable root; source selectors may return document URIs. */
   pickDirectory(options?: { purpose?: "installation" | "source" }): Promise<{
@@ -315,14 +320,6 @@ export interface TarvenEnvPlugin {
     targetPath?: string
     installPath?: string
   }): Promise<InstanceRelocationResult>
-
-  /** 一键批量无损迁移旧路径实例至当前客户端默认实例目录 */
-  migrateLegacyInstances(options?: {
-    instanceIds?: string[]
-  }): Promise<{
-    success: boolean
-    results: InstanceRelocationResult[]
-  }>
 
   /** 重命名实例并同步修改底层物理存储文件夹与注册表 */
   renameInstance(options: {

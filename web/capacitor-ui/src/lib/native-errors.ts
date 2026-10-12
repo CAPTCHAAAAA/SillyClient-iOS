@@ -6,6 +6,10 @@
  */
 const NATIVE_ERROR_HINTS: Array<[RegExp, string]> = [
   [
+    /instance directory is missing/i,
+    "实例文件夹已丢失或被移动，启动已停止以保护数据。若你曾移动该文件夹，请移回原位置；否则请新建实例并通过「实例管理 → 存储路径 → 导入数据（ZIP）」恢复备份",
+  ],
+  [
     /Default installations must be direct children of the instance root/i,
     "该位置在实例存放文件夹的子文件夹里；请选择存放文件夹本身，或实例之外的文件夹",
   ],

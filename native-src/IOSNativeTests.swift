@@ -142,18 +142,35 @@ enum IOSNativeTests {
             try require(!files.exists(source.appendingPathComponent(store.ownershipName)), "Rollback left a new ownership receipt")
             try require(files.data(store.registryURL) == before, "Failed commit changed the registry")
         }
-        test("Legacy migration enumerates real instances and reports partial failure without losing committed results") { root, files in
+        test("Legacy migration enumerates real instances and per-item relocation tolerates individual failure") { root, files in
             let (store, source) = try relocationFixture(root, files: files, id: "default", relative: "SillyTavern")
             let candidates = try store.legacyInstances()
             try require(candidates.count == 1 && candidates[0]["currentPath"] as? String == source.path, "Legacy detection returned a stub")
-            let result = try store.migrateLegacyInstances(instanceIds: ["default", "missing"])
-            let results = result["results"] as? [[String: Any]] ?? []
-            try require(result["success"] as? Bool == false && results.count == 2, "Partial failure was reported as total success")
-            try require(results[0]["success"] as? Bool == true && results[1]["success"] as? Bool == false, "Committed item or failure details were lost")
+            // 逐项迁移（前端迁移向导同款路径）：成功项落地新位置，未知项当场失败且不影响已提交项。
+            let migrated = try store.relocate(instanceId: "default", targetPath: nil)
+            try require(migrated["success"] as? Bool == true, "Legacy per-item relocation failed")
+            try rejects("Relocating an unknown instance was accepted") { _ = try store.relocate(instanceId: "missing", targetPath: nil) }
             try require(store.directory("default").path == root.appendingPathComponent("instances/default").path,
                         "Legacy migration did not change the registered physical path")
             try require(store.legacyInstances().isEmpty, "Migrated instance was offered again")
-            try rejects("Duplicated migration selection was accepted") { _ = try store.migrateLegacyInstances(instanceIds: ["default", "default"]) }
+        }
+        test("Launching a missing instance without creation intent refuses a silent reinstall") { root, files in
+            let store = IOSInstanceStore(root: root)
+            let id = "missing-runtime"
+            let operation = UUID().uuidString
+            try NodeRunner.shared.reserve(instance: id, operation: operation)
+            defer {
+                let stopped = DispatchSemaphore(value: 0)
+                NodeRunner.shared.stop(instance: id, operation: operation) { _ in stopped.signal() }
+                _ = stopped.wait(timeout: .now() + 5)
+            }
+            // 安装源=创建意图铁律：目录丢失时启动必须报错保护现场，严禁静默重装顶替用户数据。
+            try rejects("Launch without creation intent silently reinstalled a missing instance") {
+                _ = try store.prepare(instance: id, operation: operation, version: "stable", localZip: nil,
+                                      installPath: nil, installPathMode: nil, port: 8124, config: nil,
+                                      preinstall: nil, companion: nil)
+            }
+            try require(!files.exists(root.appendingPathComponent("instances/\(id)")), "Rejected launch still created a runtime directory")
         }
         test("Relocation across approved authorities keeps leases and refreshes the destination registration") { root, files in
             let documents = root.appendingPathComponent("documents")
@@ -306,7 +323,8 @@ enum IOSNativeTests {
                 let actual = try store.prepare(instance: id, operation: operation, version: "stable", localZip: nil,
                     installPath: path, installPathMode: mode, port: 8123, config: nil,
                     preinstall: persistedSelections ? ["revision": 1, "extensionIds": ["already-created"]] : nil,
-                    companion: persistedSelections ? ["bundleId": "sc-bordeaux", "revision": 1] : nil)
+                    companion: persistedSelections ? ["bundleId": "sc-bordeaux", "revision": 1] : nil,
+                    createIntent: true)
                 try require(actual.path == target.path, "Preparation used the default directory")
             }
             try prepare("root", path: selected.path)

@@ -139,46 +139,33 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
     "general" | "data" | "maintenance"
   >("general");
 
-  // 默认实例存储路径：实例始终是该根的直接子目录；仅影响之后创建的实例。
-  const [instancesRoot, setInstancesRoot] = useState<string | null>(null);
+  // 实例存储根（无默认路径模型）：仅来自用户显式登记的文件夹；仅影响之后创建的实例。
   const [configuredInstancesRoot, setConfiguredInstancesRoot] = useState<string | null>(null);
+  const [instancesRootLoaded, setInstancesRootLoaded] = useState(false);
   useEffect(() => {
-    if (!isOpen || instancesRoot !== null) return;
+    if (!isOpen || instancesRootLoaded) return;
     TarvenEnv.getAppSettings()
       .then(settings => {
-        setInstancesRoot(settings.instancesRoot);
         setConfiguredInstancesRoot(settings.configuredInstancesRoot ?? null);
+        setInstancesRootLoaded(true);
       })
-      .catch(() => setInstancesRoot(""));
-  }, [isOpen, instancesRoot]);
+      .catch(() => setInstancesRootLoaded(true));
+  }, [isOpen, instancesRootLoaded]);
 
   const chooseInstancesRoot = async () => {
     try {
       const picked = await TarvenEnv.pickDirectory({ purpose: "installation" });
       if (!picked?.path) return;
       const result = await TarvenEnv.setInstancesRoot({ path: picked.path });
-      setInstancesRoot(result.instancesRoot);
       setConfiguredInstancesRoot(result.configured ? result.instancesRoot : null);
     } catch {
       /* 用户取消或授权中断：保持现有路径不变 */
     }
   };
 
-  const resetInstancesRoot = async () => {
-    try {
-      const result = await TarvenEnv.setInstancesRoot({});
-      setInstancesRoot(result.instancesRoot);
-      setConfiguredInstancesRoot(null);
-    } catch {
-      /* 保持现有路径不变 */
-    }
-  };
-
-  const displayInstancesRoot = instancesRoot === null
+  const displayInstancesRoot = !instancesRootLoaded
     ? "读取中…"
-    : instancesRoot === ""
-      ? "暂不可用"
-      : instancesRoot;
+    : configuredInstancesRoot ?? "未设置 · 创建或迁移实例时需显式选择文件夹";
 
   const generalRef = useRef<HTMLDivElement>(null);
   const dataRef = useRef<HTMLDivElement>(null);
@@ -216,7 +203,7 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
     pullToRefresh,
     contentOpenMode,
     instances.length,
-    instancesRoot,
+    configuredInstancesRoot,
     appUpdateState,
     appUpdateInfo,
   ]);
@@ -372,8 +359,10 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
           >
             <div className="app-settings-list space-y-1">
               <AppSettingsRow
-                label="默认实例存储路径"
-                desc={`${displayInstancesRoot} · 实例以此处一级子目录存放`}
+                label="实例存储位置"
+                desc={configuredInstancesRoot
+                  ? `${displayInstancesRoot} · 之后创建的实例默认存放于该文件夹的一级子目录`
+                  : displayInstancesRoot}
               >
                 <div className="app-settings-actions">
                   <AppSettingsAction
@@ -381,13 +370,6 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                   >
                     更改
                   </AppSettingsAction>
-                  {configuredInstancesRoot !== null && (
-                    <AppSettingsAction
-                      onClick={() => { void resetInstancesRoot(); }}
-                    >
-                      默认
-                    </AppSettingsAction>
-                  )}
                 </div>
               </AppSettingsRow>
               <AppSettingsRow

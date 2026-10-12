@@ -14,7 +14,7 @@ public final class IOSDebugHarness {
         "exitImmersive", "closeTavern", "reloadTavern", "setPullToRefresh", "openExternalUrl",
         "scanInstanceMaintenance", "applyInstanceMaintenance", "listInstanceMaintenanceRecovery",
         "restoreInstanceMaintenance", "migrateInstance", "uninstallInstance", "getLogs",
-        "checkLegacyInstances", "migrateLegacyInstances", "renameInstance", "relocateInstance",
+        "checkLegacyInstances", "renameInstance", "relocateInstance",
         "getAppSettings", "setInstancesRoot", "exportInstance", "inspectImportArchive", "importInstanceData"
     ]
 

@@ -18,7 +18,8 @@ import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
 import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId } from "@/capacitor-plugin";
-import { exactInstallTarget, installationSelection, normalizeInstanceIdentity, sanitizeFolderName } from "@/lib/install-location";
+import { cleanInstallPath, exactInstallTarget, installationSelection, normalizeInstanceIdentity, sanitizeFolderName } from "@/lib/install-location";
+import { humanizeNativeError } from "@/lib/native-errors";
 import { normalizeStoredInstances, serializeInstanceRecords, parseInstanceBackup, type StoredInstance } from "@/lib/instance-persistence";
 import { GLOBAL_LOG_KEY, instanceLogs, type LogLine } from "@/lib/log-store";
 import { OperationCoordinator, OperationCancelledError, type OperationContext } from "@/lib/operation-coordinator";
@@ -99,12 +100,21 @@ function loadInstances(): TavernInstance[] {
   try {
     const raw = localStorage.getItem(INSTANCES_KEY);
     if (raw) {
-      return normalizeStoredInstances(JSON.parse(raw), { resetStatus: true }).map(hydrateInstance);
+      return normalizeStoredInstances(JSON.parse(raw), { resetStatus: true })
+        .map(hydrateInstance)
+        .map(stripOneShotCreationParams);
     }
   } catch {
     /* ignore */
   }
   return [];
+}
+
+/** 安装源与预装项是一次性创建参数：旧版本持久化的卡片可能残留，读取时统一剥离，
+ *  防止启动链路携带安装源、在数据丢失时被静默重装顶替。 */
+function stripOneShotCreationParams(instance: TavernInstance): TavernInstance {
+  const { zipballUrl: _zipballUrl, localZipPath: _localZipPath, preinstall: _preinstall, companionPreset: _companionPreset, ...rest } = instance;
+  return rest;
 }
 
 function normalizeStoredCover(cover?: string) {
@@ -772,6 +782,20 @@ function SillyClientLauncher() {
     return () => { directoryPickerGeneration.current += 1; };
   }, [showNewInstancePanel, newInstanceMode]);
 
+  // 打开创建向导时预填已登记的实例存储根；未配置时保持为空，由用户必选。
+  useEffect(() => {
+    if (!showNewInstancePanel || newInstanceDir.trim()) return;
+    let cancelled = false;
+    TarvenEnv.getAppSettings()
+      .then((settings) => {
+        const configured = settings?.configuredInstancesRoot;
+        if (!cancelled && configured && !newInstanceDir.trim()) setNewInstanceDir(configured);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // 仅在向导打开瞬间预填一次；newInstanceDir 由守卫条件兜底，不列入依赖。
+  }, [showNewInstancePanel]);
+
   const handleSetNewInstanceDir = useCallback((value: string) => {
     const clean = value.replace(/^["']|["']$/g, "").trim();
     setNewInstanceDir(clean);
@@ -1006,17 +1030,19 @@ function SillyClientLauncher() {
   useEffect(() => () => { operations.cancel(); }, [operations]);
 
   // 配置并启动本地实例。创建流程只在确认服务可访问后写入卡片。
-  const doLaunch = useCallback(async (instance: TavernInstance, operation: OperationContext, enterWhenReady = true) => {
+  // createIntent 仅创建向导为 true：安装源与预装项只随创建下发，启动既有实例绝不携带，
+  // 后端据此在目录丢失/损坏时拒绝静默重装顶替用户数据。
+  const doLaunch = useCallback(async (instance: TavernInstance, operation: OperationContext, enterWhenReady = true, createIntent = false) => {
     operation.assertCurrent();
     const port = instance.port ?? 8000;
     const instanceId = instance.installDir || instance.id;
     const version = instance.version || "stable";
     const config = instance.config ?? DEFAULT_CONFIG;
-    const zipballUrl = instance.zipballUrl;
-    const localZipPath = instance.localZipPath;
+    const zipballUrl = createIntent ? instance.zipballUrl : undefined;
+    const localZipPath = createIntent ? instance.localZipPath : undefined;
     const installPath = instance.installPath;
-    const companionPreset = instance.companionPreset;
-    const preinstall = instance.preinstall;
+    const companionPreset = createIntent ? instance.companionPreset : undefined;
+    const preinstall = createIntent ? instance.preinstall : undefined;
 
     setLaunchProgress({ pct: 0, text: "初始化" });
     setLaunchError(null);
@@ -1066,8 +1092,8 @@ function SillyClientLauncher() {
 
       // 调用原生 provision
       const provisionResult = await operation.wait(TarvenEnv.provisionAndStart({
-        port, instanceId, operationId: operation.id, version, zipballUrl, localZipPath,
-        installPath, installPathMode: instance.installPathMode, companionPreset, preinstall, config,
+        port, instanceId, operationId: operation.id, version, createIntent,
+        zipballUrl, localZipPath, installPath, installPathMode: instance.installPathMode, companionPreset, preinstall, config,
       }));
       if (provisionResult?.ready === false) {
         throw new Error(errorMsg || "实例未能启动，请检查安装日志");
@@ -1199,7 +1225,7 @@ function SillyClientLauncher() {
       }
     } catch (err: any) {
       if (!operation.isCurrent || err instanceof OperationCancelledError) return;
-      const msg = err?.message || String(err);
+      const msg = humanizeNativeError(err?.message || String(err));
       setLaunchError(msg);
       setLaunchProgress(null);
       setLaunchLogs(prev => [...prev, { msg: `失败: ${msg}`, level: "error" }]);
@@ -1317,18 +1343,21 @@ function SillyClientLauncher() {
       return;
     }
 
-    const result = await doLaunch(instance, operation, false);
+    const result = await doLaunch(instance, operation, false, true);
     const info = await operation.wait(TarvenEnv.getInstanceInfo({
       instanceId: instance.installDir || instance.id,
       installPath: instance.installPathMode === "root" ? undefined : instance.installPath,
       port: result.port,
     }));
     if (!info.path) throw new Error("原生未确认实例的实际安装目录，创建未完成");
-    setLastLaunchParams({ ...instance, installPath: info.path, installPathMode: "exact", port: result.port });
+    // 安装源（zipballUrl/localZipPath）与预装项是一次性创建参数，绝不持久化到卡片：
+    // 后端以 createIntent 区分创建与启动意图，卡片残留安装源会导致数据丢失时被静默重装顶替。
+    const { zipballUrl: _zipballUrl, localZipPath: _localZipPath, preinstall: _preinstall, companionPreset: _companionPreset, ...persistedInstance } = instance;
+    setLastLaunchParams({ ...persistedInstance, installPath: info.path, installPathMode: "exact", port: result.port });
     setInstances(prev => prev.some(t => t.id === instance.id)
       ? prev
       : [...prev, {
-          ...instance,
+          ...persistedInstance,
           status: "running",
           port: result.port,
           version: info.version && info.version !== "unknown" ? normalizeStoredVersion(info.version) : instance.version,
@@ -1384,6 +1413,11 @@ function SillyClientLauncher() {
       candidateId = `${baseId}-${counter++}`;
     }
     const instanceId = candidateId;
+    // 安装目录必选拦截：无默认路径设计下，空路径会在后端静默落入默认落点。
+    if (newInstanceMode === "local" && !cleanInstallPath(newInstanceDir)) {
+      setNewInstanceError("请先点「浏览」选择实例安装目录（必选）");
+      return;
+    }
     const operation = operations.begin(instanceId, "create");
     setNewInstanceError(null);
     setIsCreatingInstance(true);
@@ -1527,6 +1561,10 @@ function SillyClientLauncher() {
       operationStarted = true;
 
       await provisionCreatedInstance(instance, operation);
+      // 登记存储根：之后创建/迁移/搬迁默认沿用用户这次选择的文件夹（无默认路径设计）。
+      if (newInstanceMode === "local" && newInstancePathMode === "root" && cleanInstallPath(newInstanceDir)) {
+        void TarvenEnv.setInstancesRoot({ path: cleanInstallPath(newInstanceDir) }).catch(() => {});
+      }
       setNewInstanceName("");
       setNewInstanceDir("");
       setNewInstancePathMode("exact");
@@ -1540,7 +1578,7 @@ function SillyClientLauncher() {
       setNewInstanceLocalZip(null);
     } catch (err: any) {
       if (!operation.isCurrent || err instanceof OperationCancelledError) return;
-      const message = err?.message || String(err);
+      const message = humanizeNativeError(err?.message || String(err));
       if (!operationStarted) {
         if (remoteCredentialsSaved && pendingInstanceId) {
           try { await operation.wait(TarvenEnv.clearRemoteBasicAuth({ instanceId: pendingInstanceId })); } catch {}
@@ -2020,12 +2058,25 @@ function SillyClientLauncher() {
     const generation = ++legacyCheckRef.current;
     try {
       const result = await TarvenEnv.checkLegacyInstances();
-      if (generation !== legacyCheckRef.current || !result.instances.length) return;
-      setLegacyMigrationList(result.instances);
-      setShowLegacyMigration(true);
-      setIsLegacyMigrationClosing(false);
-    } catch { /* Older hosts may not provide storage relocation. */ }
+      if (generation !== legacyCheckRef.current) return;
+      const found = result.instances || [];
+      if (found.length > 0) {
+        setLegacyMigrationList(found);
+        setShowLegacyMigration(true);
+        setIsLegacyMigrationClosing(false);
+      } else {
+        // 无待迁移实例：记录本版本标记长期静默，不再每次启动重复探测。
+        localStorage.setItem(LEGACY_MIGRATION_KEY, APP_VERSION);
+      }
+    } catch {
+      // 检测异常不写版本标记：下次启动重新检测，避免一次抖动永久跳过迁移。
+    }
   }, [isWeb, isWindows, isShowcase]);
+
+  const handleLegacyMigrationComplete = useCallback(() => {
+    // 弹窗仅在全部迁移成功时回调（部分失败会保留列表供重试）：全部迁成才写版本标记长期静默。
+    localStorage.setItem(LEGACY_MIGRATION_KEY, APP_VERSION);
+  }, []);
 
   const dismissOnboarding = useCallback(() => {
     localStorage.setItem(ONBOARDING_KEY, ONBOARDING_VERSION);
@@ -2039,7 +2090,7 @@ function SillyClientLauncher() {
 
   const dismissLegacyMigration = useCallback(() => {
     if (isLegacyMigrationBusy || isLegacyMigrationClosing) return;
-    localStorage.setItem(LEGACY_MIGRATION_KEY, APP_VERSION);
+    // 「稍后处理」不写版本标记：只要旧版实例仍未迁完，下次启动会再次提醒。
     setIsLegacyMigrationClosing(true);
     if (legacyCloseTimerRef.current) clearTimeout(legacyCloseTimerRef.current);
     legacyCloseTimerRef.current = setTimeout(() => {
@@ -3040,7 +3091,7 @@ function SillyClientLauncher() {
         isIOS={isIOS}
         onBusyChange={setIsLegacyMigrationBusy}
         onInstanceRelocated={handleInstanceRelocated}
-        onMigrationComplete={() => localStorage.setItem(LEGACY_MIGRATION_KEY, APP_VERSION)}
+        onMigrationComplete={handleLegacyMigrationComplete}
       />
 
       {/* 单实例存储路径迁移模态框 */}

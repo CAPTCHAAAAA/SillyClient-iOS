@@ -55,6 +55,20 @@ test("success false rejects a batch rather than displaying all complete", async 
   assert.equal(committed, false);
 });
 
+test("per-item onFailure keeps remaining instances migrating and reports reasons", async () => {
+  const items = ["a", "b", "c"].map(instanceId => ({ instanceId, currentPath: "/old/" + instanceId, targetPath: "/new/" + instanceId }));
+  const committed = [];
+  const failures = [];
+  await state.relocateLegacyItems(items, new Set(), async item => {
+    if (item.instanceId === "b") throw new Error("授权失效");
+    return result(item.instanceId);
+  }, (item, response) => committed.push(response.instanceId), () => {}, (item, message) => failures.push(`${item.instanceId}:${message}`));
+  assert.deepEqual(committed, ["a", "c"]);
+  assert.equal(failures.length, 1);
+  assert.ok(failures[0].startsWith("b:"));
+  assert.ok(failures[0].includes("授权失效"));
+});
+
 test("retained source metadata survives a committed item", async () => {
   let retained;
   await state.relocateLegacyItems([{ instanceId: "a" }], new Set(), async () => ({

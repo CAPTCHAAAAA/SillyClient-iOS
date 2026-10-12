@@ -748,6 +748,7 @@ export const ManageInstanceModal: React.FC<ManageInstanceModalProps> = ({
   }, [instance?.id, instance?.hasPassword]);
 
   const [importStatus, setImportStatus] = useState<string | null>(null);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
 
   useEffect(() => {
     setLocalAboutInfo(null);
@@ -1722,6 +1723,38 @@ export const ManageInstanceModal: React.FC<ManageInstanceModalProps> = ({
                         style={{ fontSize: 16 }}
                       >
                         导入数据
+                      </button>
+                    </ManageItem>
+                  )}
+                  {mp.type === "local" && (
+                    <ManageItem
+                      label="导出实例（ZIP）"
+                      desc={exportStatus || "把聊天、角色、扩展与配置打包为 ZIP 备份（不含依赖与程序文件），保存到「文件」App 的 SillyClient/Exports 文件夹"}
+                      isLight={isLight}
+                    >
+                      <button
+                        type="button"
+                        disabled={exportStatus === "正在导出…"}
+                        onClick={async () => {
+                          try {
+                            setExportStatus("正在导出…");
+                            const res = await TarvenEnv.exportInstance({
+                              instanceId: mp.installDir || mp.id,
+                              installPath: mp.installPath,
+                            });
+                            if (res.canceled) {
+                              setExportStatus(null);
+                              return;
+                            }
+                            setExportStatus(`已导出 ${(res.bytes / 1048576).toFixed(1)} MB 到「文件」App 的 SillyClient/Exports 文件夹`);
+                          } catch (error) {
+                            setExportStatus(error instanceof Error ? error.message : "导出失败，请重试");
+                          }
+                        }}
+                        className={manageCapsuleButtonClass(isLight)}
+                        style={{ fontSize: 16 }}
+                      >
+                        导出实例
                       </button>
                     </ManageItem>
                   )}

@@ -190,24 +190,4 @@ extension IOSInstanceStore {
                  "version": package["version"] as? String ?? "local"]]
     }
 
-    func migrateLegacyInstances(instanceIds: [String]?) throws -> [String: Any] {
-        let candidates = try legacyInstances()
-        let eligible = Set(candidates.compactMap { $0["instanceId"] as? String })
-        let requested = try (instanceIds ?? Array(eligible).sorted()).map { try Self.identity($0) }
-        guard requested.count <= 256, Set(requested).count == requested.count else {
-            throw IOSFileError.invalid("The legacy migration selection is invalid or duplicated")
-        }
-        var results: [[String: Any]] = []
-        for id in requested {
-            do {
-                guard eligible.contains(id) else { throw IOSFileError.invalid("The selected instance is not a legacy migration candidate") }
-                results.append(try relocate(instanceId: id, targetPath: nil))
-            } catch {
-                results.append(["success": false, "instanceId": id,
-                    "oldPath": candidates.first { $0["instanceId"] as? String == id }?["currentPath"] as? String ?? "",
-                    "newPath": "", "error": error.localizedDescription])
-            }
-        }
-        return ["success": results.allSatisfy { $0["success"] as? Bool == true }, "results": results]
-    }
 }

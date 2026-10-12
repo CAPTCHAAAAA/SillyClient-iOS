@@ -191,13 +191,11 @@ export const nativePreview: TarvenEnvPlugin = {
   },
   async getAppSettings() {
     record("getAppSettings", {});
-    const instancesRoot = syntheticRoot();
-    return { instancesRoot, defaultInstancesRoot: `${instancesRoot}-managed` };
+    return { configuredInstancesRoot: syntheticRoot() };
   },
   async setInstancesRoot(options) {
     record("setInstancesRoot", options ?? {});
-    const instancesRoot = options?.path || syntheticRoot();
-    return { instancesRoot, configured: Boolean(options?.path) };
+    return { instancesRoot: options?.path || null, configured: Boolean(options?.path) };
   },
   async pickDirectory(options) {
     record("pickDirectory", options);
@@ -396,17 +394,6 @@ export const nativePreview: TarvenEnvPlugin = {
       success: true, instanceId: options.instanceId, oldPath, newPath, unchanged: oldPath === newPath,
       ...(storageFixture.retainedSourceIds?.includes(options.instanceId) ? { retainedSourcePath: oldPath } : {}),
     };
-  },
-  async migrateLegacyInstances(options = {}) {
-    record("migrateLegacyInstances", options);
-    const { instances } = await nativePreview.checkLegacyInstances();
-    const results = [];
-    for (const instance of instances) {
-      if (!options.instanceIds || options.instanceIds.includes(instance.instanceId)) {
-        results.push(await nativePreview.relocateInstance({ instanceId: instance.instanceId, targetPath: instance.targetPath }));
-      }
-    }
-    return { success: results.every(result => result.success), results };
   },
   async renameInstance(options) {
     record("renameInstance", options);

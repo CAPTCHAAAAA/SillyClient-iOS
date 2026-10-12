@@ -255,7 +255,7 @@ final class IOSInstanceStore {
 
     func prepare(instance id: String, operation: String, version: String?, localZip: String?,
                  installPath: String?, installPathMode: String? = nil, port: Int, config: [String: Any]?,
-                 preinstall: [String: Any]?, companion: [String: Any]?) throws -> URL {
+                 preinstall: [String: Any]?, companion: [String: Any]?, createIntent: Bool = false) throws -> URL {
         guard (1...65535).contains(port) else { throw IOSFileError.invalid("Invalid port") }
         guard localZip == nil else {
             throw IOSFileError.invalid("Arbitrary server ZIP versions are unsupported; import their user data instead")
@@ -290,6 +290,11 @@ final class IOSInstanceStore {
                 try updateConfig(target, port: port, config: config, files: files)
             }
             return target
+        }
+        // 安装源=创建意图铁律：仅创建向导显式声明 createIntent 时才允许全新安装；
+        // 启动既有实例若目录丢失/损坏，必须报错保护现场，严禁静默重装顶替用户数据。
+        guard createIntent else {
+            throw IOSFileError.invalid("The instance directory is missing, so launch was stopped to protect existing data")
         }
         let source = try bundleRuntime()
         let sourceFiles = IOSManagedFiles(root: source)
