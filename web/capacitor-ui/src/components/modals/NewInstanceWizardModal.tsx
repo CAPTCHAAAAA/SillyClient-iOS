@@ -547,8 +547,8 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
             className={cn(
               "motion-control px-4 h-9 rounded-xl text-xs font-medium transition-colors disabled:opacity-40",
               isLight
-                ? "bg-[#1a1625] text-white hover:bg-[#1a1625]/90"
-                : "bg-white text-black hover:bg-white/90"
+                ? "bg-black/[0.07] border border-black/[0.08] text-[#1a1625]/70 hover:text-[#1a1625]"
+                : "bg-white/15 border border-white/15 text-white/70 hover:text-white"
             )}
           >
             {isCreatingInstance
