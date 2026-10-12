@@ -343,6 +343,29 @@ test('maintenance rejects terminal line controls before taking a recoverable sna
     assert.ok(add.indexOf('try IOSSafeArchive.relativePath(relative)') < add.indexOf('try files.snapshot'));
 });
 
+test('safe archive writes ZIP entries with explicit Int64 sizes to avoid overload ambiguity', () => {
+    // ZIPFoundation 0.9.19 has both Int64 and deprecated UInt32 addEntry overloads;
+    // a bare 0 literal fails to compile on Xcode with "ambiguous use of addEntry".
+    const archive = read('native-src/IOSSafeArchive.swift');
+    assert.doesNotMatch(archive, /uncompressedSize: 0[^\d)]/);
+    assert.match(archive, /uncompressedSize: Int64\(0\)/);
+    assert.match(archive, /uncompressedSize: Int64\(data\.count\)/);
+});
+
+test('creation intent gates fresh installs across the whole launch chain', () => {
+    // 安装源=创建意图铁律：TS 契约声明、前端剥离一次性安装源、原生桥透传、store 闸门缺一不可。
+    const ts = read('web/capacitor-ui/src/capacitor-plugin.ts');
+    assert.match(ts, /createIntent\?: boolean/);
+    const route = read('web/capacitor-ui/src/routes/index.tsx');
+    assert.match(route, /stripOneShotCreationParams/);
+    assert.match(route, /createIntent \? instance\.zipballUrl : undefined/);
+    const plugin = read('native-src/TarvenEnvPlugin.swift');
+    assert.match(plugin, /call\.getBool\("createIntent"\) \?\? false/);
+    const store = read('native-src/IOSInstanceStore.swift');
+    assert.match(store, /createIntent: Bool = false/);
+    assert.match(store, /guard createIntent else/);
+});
+
 test('copy migration routes flat user data to the actual default-user directory', () => {
     const store = read('native-src/IOSInstanceStore.swift');
     const destination = store.slice(store.indexOf('func migrationDataTarget('), store.indexOf('func migrate('));
