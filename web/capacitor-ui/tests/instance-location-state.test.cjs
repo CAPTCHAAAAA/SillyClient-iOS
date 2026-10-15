@@ -176,8 +176,9 @@ test("preview refuses native storage mutation while the runtime is busy", async 
 test("approved button palette, motion layers and inline async wiring remain present", () => {
   const read = filename => fs.readFileSync(path.join(__dirname, "../src", filename), "utf8");
   const running = read("components/instance/RunningConsoleCard.tsx");
-  assert.ok(running.includes("text-red-900/50 hover:text-red-900/80"));
-  assert.ok(running.includes("bg-white/20 border-white/15 text-white hover:bg-white/30"));
+  assert.ok(running.includes("flat-capsule"));
+  assert.ok(running.includes("text-red-900/55 hover:text-red-900/80"));
+  assert.ok(running.includes("text-red-300/70 hover:text-red-200"));
   const relocate = read("components/modals/RelocateInstanceModal.tsx");
   assert.ok(relocate.includes("LAYERS.DIALOG_SURFACE"));
   assert.ok(relocate.includes("motion-panel-stack"));

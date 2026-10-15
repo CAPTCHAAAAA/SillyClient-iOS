@@ -301,10 +301,10 @@ export const LegacyMigrationModal: React.FC<LegacyMigrationModalProps> = ({
             <button
               onClick={onClose}
               className={cn(
-                "motion-control px-6 h-9 rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 transition-all border",
+                "flat-capsule motion-control px-6 h-9 rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 border-0",
                 isLight
-                  ? "bg-black/[0.08] border-black/[0.10] text-[#1a1625] hover:bg-black/[0.14]"
-                  : "bg-white/20 border-white/15 text-white hover:bg-white/30"
+                  ? "text-[#1a1625]/70 hover:text-[#1a1625]"
+                  : "text-white/70 hover:text-white"
               )}
             >
               <CheckCircle2 className="w-3.5 h-3.5" />
@@ -317,10 +317,10 @@ export const LegacyMigrationModal: React.FC<LegacyMigrationModalProps> = ({
                   type="button"
                   onClick={onClose}
                   className={cn(
-                    "motion-control px-4 h-9 rounded-full text-xs font-medium transition-all border",
+                    "flat-capsule motion-control px-4 h-9 rounded-full text-xs font-medium border-0",
                     isLight
-                      ? "bg-black/[0.04] border-black/[0.06] text-[#1a1625]/60 hover:bg-black/[0.08]"
-                      : "bg-white/[0.08] border-white/[0.06] text-white/60 hover:bg-white/[0.14]"
+                      ? "text-[#1a1625]/60 hover:text-[#1a1625]"
+                      : "text-white/60 hover:text-white"
                   )}
                 >
                   稍后在管理面板迁移
@@ -331,10 +331,10 @@ export const LegacyMigrationModal: React.FC<LegacyMigrationModalProps> = ({
                 disabled={migrating || legacyInstances.length === 0}
                 onClick={handleStartMigration}
                 className={cn(
-                  "motion-control px-5 h-9 rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 transition-all border disabled:opacity-50",
+                  "flat-capsule motion-control px-5 h-9 rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 border-0 disabled:opacity-50",
                   isLight
-                    ? "bg-black/[0.08] border-black/[0.10] text-[#1a1625] hover:bg-black/[0.14] active:bg-black/[0.18]"
-                    : "bg-white/20 border-white/15 text-white hover:bg-white/30 active:bg-white/35"
+                    ? "text-[#1a1625]/70 hover:text-[#1a1625]"
+                    : "text-white/70 hover:text-white"
                 )}
               >
                 {migrating ? (

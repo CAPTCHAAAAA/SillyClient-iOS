@@ -178,7 +178,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
   return (
     <div
       className={cn(
-        "ios-task-surface fixed rounded-2xl flex flex-col overflow-hidden backdrop-blur-[40px] saturate-180",
+        "ios-task-surface reading-flat-surface fixed rounded-2xl flex flex-col overflow-hidden backdrop-blur-[40px] saturate-180",
         glassBg,
         isLight && "is-light",
         isClosing ? "animate-clone-panel-exit" : "animate-clone-panel"
@@ -299,10 +299,10 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
                   type="button"
                   onClick={onPickInstallFolder}
                   className={cn(
-                    "motion-control h-9 px-3 rounded-xl text-[11px] font-medium border flex-shrink-0 transition-colors",
+                    "flat-capsule motion-control h-9 px-3 rounded-full text-[11px] font-medium border-0 flex-shrink-0",
                     isLight
-                      ? "border-black/[0.08] text-[#1a1625]/50 hover:bg-black/[0.04]"
-                      : "border-white/[0.08] text-white/50 hover:bg-white/[0.04]"
+                      ? "text-[#1a1625]/60 hover:text-[#1a1625]"
+                      : "text-white/60 hover:text-white"
                   )}
                 >
                   浏览
@@ -545,10 +545,10 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
             onClick={createInstance}
             disabled={isCreatingInstance}
             className={cn(
-              "motion-control px-4 h-9 rounded-xl text-xs font-medium transition-colors disabled:opacity-40",
+              "flat-capsule motion-control px-4 h-9 rounded-full text-xs font-semibold border-0 disabled:opacity-40",
               isLight
-                ? "bg-black/[0.07] border border-black/[0.08] text-[#1a1625]/70 hover:text-[#1a1625]"
-                : "bg-white/15 border border-white/15 text-white/70 hover:text-white"
+                ? "text-[#1a1625]/70 hover:text-[#1a1625]"
+                : "text-white/70 hover:text-white"
             )}
           >
             {isCreatingInstance
