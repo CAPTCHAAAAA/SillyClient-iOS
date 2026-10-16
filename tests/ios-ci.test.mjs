@@ -112,10 +112,10 @@ test('capability probe returns before creating the real console and stays isolat
 test('unsigned artifact version and monotonic native build agree', () => {
     const plist = read('native-src/Info.plist');
     const workflow = read('.github/workflows/build-ipa.yml');
-    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.13\.0<\/string>/);
+    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.13\.1<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
     assert.ok(build >= 28);
-    assert.match(workflow, /SillyClient-iOS-v1\.13\.0-unsigned/);
+    assert.match(workflow, /SillyClient-iOS-v1\.13\.1-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
 
@@ -519,7 +519,7 @@ async function simulateDriver(scenario = 'success') {
         const reject = error => ({ success: false, error });
         switch (request.method) {
         case 'getPlatform': return success({ platform: 'ios' });
-        case 'getAppVersion': return success({ version: '1.13.0' });
+        case 'getAppVersion': return success({ version: '1.13.1' });
         case 'getInstanceInfo': {
             const record = registry[options.instanceId];
             return record ? success({ ...record, installPath: record.path }) : reject('Instance directory is unavailable');
