@@ -62,7 +62,7 @@ const guideSteps: GuideStep[] = [
     views: [
       {
         label: "展开后",
-        description: "轻触实例卡片可查看创建时间、最近使用与快捷操作；再次轻触即可收回。",
+        description: "轻触实例卡片可查看创建时间、上次使用、累计使用和启动；再次轻触即可收回。",
         image: "./onboarding/instance-card-default-expanded.webp",
         imageAlt: "使用默认封面的展开实例卡片",
         imageClass: "is-card",
@@ -74,9 +74,9 @@ const guideSteps: GuideStep[] = [
     views: [
       {
         label: "私密锁定",
-        description: "设置访问密码后，实例卡片会显示锁定标记。本地实例与远程连接均需在本机校验密码后才能打开。",
+        description: "开启访问密码后，实例卡片会显示「锁定」。本地实例与远程连接都要先在本机解锁才能打开。",
         image: "./onboarding/instance-card-locked.webp",
-        imageAlt: "带有访问密码锁定标记的实例卡片",
+        imageAlt: "带有锁定标记的私密实例卡片",
         imageClass: "is-card",
       },
       {
@@ -88,7 +88,7 @@ const guideSteps: GuideStep[] = [
       },
       {
         label: "本地解锁",
-        description: "启动或打开受保护实例时，输入本地访问密码解锁。校验无需联网，此密码与远程服务的登录密码分别管理。",
+        description: "启动受保护实例时输入本地密码，确认后会解锁并启动。校验只在本机完成；此密码与远程服务的登录密码分别管理。",
         image: "./onboarding/password-unlock.webp",
         imageAlt: "本地访问密码解锁面板",
         imageClass: "is-panel",
@@ -107,7 +107,7 @@ const guideSteps: GuideStep[] = [
       },
       {
         label: "迁移目录",
-        description: "停止实例后可选择系统授权的目录或恢复默认位置。迁移会校验复制结果；请确认结果与来源保留提示后再处理原文件。",
+        description: "停止实例后，在「存储路径」里点「迁移目录」，选择系统授权的新目录。迁移会校验复制结果；请确认结果与来源保留提示后再处理原文件。",
         image: "./onboarding/storage-migrate.webp",
         imageAlt: "实例存储路径选择与迁移面板",
         imageClass: "is-panel",
@@ -115,20 +115,20 @@ const guideSteps: GuideStep[] = [
     ],
   },
   {
-    title: "控制台",
+    title: "实例终端",
     views: [
       {
         label: "入口",
-        description: "点击顶部控制岛左侧的控制台入口，展开或收起运行记录。",
+        description: "点击顶部控制岛左侧的终端按钮，打开或收起当前实例的终端。",
         image: "./onboarding/console-button.webp",
-        imageAlt: "顶部控制岛左侧的控制台入口",
+        imageAlt: "顶部控制岛左侧的终端按钮",
         imageClass: "is-toolbar",
       },
       {
         label: "实时日志",
-        description: "下载、安装、启动与错误信息会保留在这里，便于确认实例当前所处的阶段。",
+        description: "启动、安装和报错会留在这个终端里，用来确认实例现在走到哪一步。",
         image: "./onboarding/terminal-open.webp",
-        imageAlt: "展开后的运行控制台",
+        imageAlt: "展开后的实例终端",
         imageClass: "is-terminal",
       },
     ],
