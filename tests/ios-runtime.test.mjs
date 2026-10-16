@@ -491,6 +491,10 @@ test('iOS web console adapts platform labels, eliminates Android shell text, and
     assert.ok(routesIndex.includes('`SillyClient ${APP_VERSION} · iOS · NodeMobile`'), 'routes/index.tsx must define a version-aligned iOS banner');
     assert.ok(routesIndex.includes('"iOS 进程内环境（可查看服务运行日志）"'), 'routes/index.tsx must define iOS placeholder');
     assert.ok(routesIndex.includes('"ios >"'), 'routes/index.tsx must define ios > prompt');
+    assert.ok(
+        routesIndex.includes('(isIOS ? "ios >" : "~ $")'),
+        'selected-instance prompt must stay on the iOS branch instead of the Android shell prompt'
+    );
 
     // 2. ManageInstanceModal LAN description must be platform-neutral for mobile
     assert.ok(!manageModal.includes('Android 宿主默认建议关闭'), 'ManageInstanceModal must not hardcode Android 宿主');
