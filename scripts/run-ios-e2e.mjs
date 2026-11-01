@@ -48,8 +48,14 @@ function recordStepTimestamp(name) {
     if (typeof console?.log === 'function') console.log(`[E2E] Recorded diagnostic checkpoint: ${name} @ ${timeSec.toFixed(2)}s`);
 }
 
+let currentStderrLog = null;
+
 function launch(argument) {
-    const output = simctl('launch', device, bundleId, argument);
+    const suffix = argument ? argument.replace(/[^a-zA-Z0-9_-]/g, '') : 'default';
+    const stdoutLog = path.join(evidence, `app-stdout-${suffix}.log`);
+    const stderrLog = path.join(evidence, `app-stderr-${suffix}.log`);
+    currentStderrLog = stderrLog;
+    const output = simctl('launch', `--stdout=${stdoutLog}`, `--stderr=${stderrLog}`, device, bundleId, argument);
     const pid = output.trim().match(/:\s*(\d+)\s*$/);
     assert.ok(pid, 'Simulator launch did not report the application PID');
     appPid = Number(pid[1]);
@@ -59,7 +65,15 @@ function assertAppAlive() {
     if (!appPid) return;
     try { process.kill(appPid, 0); }
     catch (error) {
-        if (error.code === 'ESRCH') throw new Error(`Simulator application exited before replying (PID ${appPid})`);
+        if (error.code === 'ESRCH') {
+            let stderrContent = '';
+            try {
+                if (currentStderrLog && fs.existsSync(currentStderrLog)) {
+                    stderrContent = fs.readFileSync(currentStderrLog, 'utf8').trim();
+                }
+            } catch {}
+            throw new Error(`Simulator application exited before replying (PID ${appPid})${stderrContent ? ': ' + stderrContent : ''}`);
+        }
         throw error;
     }
 }
@@ -663,5 +677,15 @@ try {
                 + ' OR ((process == "amfid" OR process == "kernel") AND eventMessage CONTAINS[c] "App.app")',
             '--last', '10m'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 60000 }));
     } catch (error) { console.warn('Host signing log collection failed:', error.message); }
+    try {
+        const diagDir = path.join(process.env.HOME || '', 'Library/Logs/DiagnosticReports');
+        if (fs.existsSync(diagDir)) {
+            for (const file of fs.readdirSync(diagDir)) {
+                if (file.includes('App') || file.includes('sillyclient') || file.endsWith('.ips')) {
+                    fs.copyFileSync(path.join(diagDir, file), path.join(evidence, file));
+                }
+            }
+        }
+    } catch (error) { console.warn('Diagnostic reports collection failed:', error.message); }
     try { simctl('terminate', device, bundleId); } catch {}
 }

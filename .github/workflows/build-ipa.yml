@@ -239,6 +239,11 @@ jobs:
           wait $RECORDER_PID 2>/dev/null || true
           if [ $E2E_STATUS -ne 0 ]; then
             echo "E2E runner exited with error status: $E2E_STATUS"
+            echo "=== App Standard Error ==="
+            cat evidence/app-stderr*.log 2>/dev/null || true
+            echo "=== Diagnostic Reports ==="
+            ls -la evidence/*.ips 2>/dev/null || true
+            cat evidence/*.ips 2>/dev/null || true
             exit $E2E_STATUS
           fi
 
