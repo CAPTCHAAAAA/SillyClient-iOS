@@ -114,10 +114,15 @@ jobs:
             config.packageClassList = ['TarvenEnvPlugin', 'SillyClientCore.TarvenEnvPlugin'];
             fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
             const podfile = 'web/capacitor-ui/ios/App/Podfile';
-            const source = fs.readFileSync(podfile, 'utf8');
+            let source = fs.readFileSync(podfile, 'utf8');
             if (!source.includes(\"target 'App' do\")) throw new Error('Missing App target');
-            fs.writeFileSync(podfile, source.replace(\"target 'App' do\",
-              \"target 'App' do\n  pod 'Yams', :git => 'https://github.com/jpsim/Yams.git', :commit => '3d6871d5b4a5cd519adf233fbb576e0a2af71c17'\n  pod 'ZIPFoundation', :git => 'https://github.com/weichsel/ZIPFoundation.git', :commit => '02b6abe5f6eef7e3cbd5f247c5cc24e246efcfe0'\n  pod 'SillyClientCore', :path => '../../../../native-src'\"));
+            source = source.replace(\"target 'App' do\",
+              \"target 'App' do\n  pod 'Yams', :git => 'https://github.com/jpsim/Yams.git', :commit => '3d6871d5b4a5cd519adf233fbb576e0a2af71c17'\n  pod 'ZIPFoundation', :git => 'https://github.com/weichsel/ZIPFoundation.git', :commit => '02b6abe5f6eef7e3cbd5f247c5cc24e246efcfe0'\n  pod 'SillyClientCore', :path => '../../../../native-src'\");
+            if (source.includes(\"assertDeploymentTarget(installer)\")) {
+              source = source.replace(\"assertDeploymentTarget(installer)\",
+                \"assertDeploymentTarget(installer)\n    installer.pods_project.targets.each { |t| t.build_configurations.each { |c| c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' } }\");
+            }
+            fs.writeFileSync(podfile, source);
           "
           cd web/capacitor-ui/ios/App
           pod install
@@ -229,6 +234,11 @@ jobs:
           raise 'Incorrect linked Keychain group' unless linked['keychain-access-groups'] == [identity]
           raise 'Linked simulator entitlements differ from the source' unless linked == expected
           VERIFY
+          CRYPTEX_SWIFT=$(find /Library/Developer/CoreSimulator/Volumes/ -name "libswiftWebKit.dylib" -exec dirname {} \; 2>/dev/null | head -n 1)
+          if [ -n "$CRYPTEX_SWIFT" ]; then
+            echo "Found Cryptex Swift dylibs at: $CRYPTEX_SWIFT"
+            export SIMCTL_CHILD_DYLD_FALLBACK_LIBRARY_PATH="$CRYPTEX_SWIFT"
+          fi
           node scripts/simulator-recorder.mjs "$DEVICE_UUID" evidence &
           RECORDER_PID=$!
           set +e
