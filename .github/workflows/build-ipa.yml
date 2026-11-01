@@ -201,6 +201,13 @@ jobs:
           APP_PATH=web/capacitor-ui/ios/App/build/derived/Build/Products/Debug-iphonesimulator/App.app
           test -d "$APP_PATH"
           cp -R sillytavern-src "$APP_PATH/sillytavern"
+          xcrun clang -dynamiclib -target "$(uname -m)-apple-ios18.0-simulator" \
+            -isysroot "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+            -install_name @rpath/libswiftWebKit.dylib \
+            -reexport_framework WebKit \
+            -o "$APP_PATH/Frameworks/libswiftWebKit.dylib"
+          install_name_tool -change /usr/lib/swift/libswiftWebKit.dylib @rpath/libswiftWebKit.dylib \
+            "$APP_PATH/Frameworks/SillyClientCore.framework/SillyClientCore"
           for COMPONENT in "$APP_PATH"/Frameworks/*.framework "$APP_PATH"/Frameworks/*.dylib; do
             if [ -e "$COMPONENT" ]; then codesign --force --sign - "$COMPONENT"; fi
           done
