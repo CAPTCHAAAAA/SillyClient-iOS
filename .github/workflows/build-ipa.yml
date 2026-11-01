@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build-and-simulate:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 40
     env:
       APP_VERSION: 1.13.1
