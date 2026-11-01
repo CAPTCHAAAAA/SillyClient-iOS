@@ -195,6 +195,7 @@ jobs:
           xcodebuild -workspace App.xcworkspace -scheme App -configuration Debug \
             -sdk iphonesimulator -destination "id=$DEVICE_UUID" \
             -derivedDataPath build/derived build CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" ENABLE_DEBUG_DYLIB=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 \
             | tee "$GITHUB_WORKSPACE/evidence/xcode-simulator.log"
           cd "$GITHUB_WORKSPACE"
           APP_PATH=web/capacitor-ui/ios/App/build/derived/Build/Products/Debug-iphonesimulator/App.app
