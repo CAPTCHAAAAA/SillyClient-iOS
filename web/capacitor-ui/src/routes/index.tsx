@@ -810,7 +810,10 @@ function SillyClientLauncher() {
     TarvenEnv.getAppSettings()
       .then((settings) => {
         const configured = settings?.configuredInstancesRoot;
-        if (!cancelled && configured && !newInstanceDir.trim()) setNewInstanceDir(configured);
+        if (!cancelled && configured && !newInstanceDir.trim()) {
+          setNewInstanceDir(configured);
+          setNewInstancePathMode("root");
+        }
       })
       .catch(() => {});
     return () => { cancelled = true; };

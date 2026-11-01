@@ -330,7 +330,11 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(runner, /locations\.json/);
     assert.match(plugin, /call\.getString\("installPathMode"\)/);
     assert.match(plugin, /"installPath": directory\.path, "installPathMode": "exact"/);
+    assert.match(plugin, /UIDocumentPickerViewController\(forOpeningContentTypes: \[\.folder\]\)/);
+    assert.match(plugin, /let defaultInstallRoot = self\.store\.documents\.appendingPathComponent\("instances", isDirectory: true\)/);
+    assert.match(plugin, /picker\.directoryURL = defaultInstallRoot/);
     assert.match(plugin, /action == "installDir"[\s\S]*locations\.select\(selected\)/);
+    assert.equal(plugin, read('ios/App/App/TarvenEnvPlugin.swift'));
 });
 
 test('maintenance rejects terminal line controls before taking a recoverable snapshot', () => {

@@ -402,7 +402,9 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
                     </button>
                   </div>
                   <p className={cn("text-[11px] opacity-45 leading-relaxed", isLight ? "text-[#1a1625]" : "text-white")}>
-                    目标必须是可访问的新目录。跨存储迁移时校验副本；需要保留的原目录会在完成后明确列出。
+                    {isIOS
+                      ? "目标必须是可访问的新目录（点「浏览」进入目标文件夹后点击右上角「打开」确认）。跨存储迁移时校验副本；需要保留的原目录会在完成后明确列出。"
+                      : "目标必须是可访问的新目录。跨存储迁移时校验副本；需要保留的原目录会在完成后明确列出。"}
                   </p>
                 </div>
               </div>

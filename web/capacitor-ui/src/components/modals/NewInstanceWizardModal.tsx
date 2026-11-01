@@ -314,7 +314,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
                   isLight ? "text-[#1a1625]/45" : "text-white/40"
                 )}
               >
-                必选：点「浏览」选择存放文件夹，实例会创建在该文件夹内，之后创建的实例默认也放在这里。旧酒馆数据可在创建完成后，于「实例管理 → 存储路径 → 导入数据（ZIP）」无损导入。
+                必选：点「浏览」选择存放文件夹（iOS 请进入目标文件夹后点击右上角「打开」确认），实例会创建在该文件夹内，之后创建的实例默认也放在这里。旧酒馆数据可在创建完成后，于「实例管理 → 存储路径 → 导入数据（ZIP）」无损导入。
               </p>
             </NewInstanceField>
 

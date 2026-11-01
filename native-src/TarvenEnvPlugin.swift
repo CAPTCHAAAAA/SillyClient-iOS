@@ -532,6 +532,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     @objc func getSecret(_ call: CAPPluginCall) { call.reject("Generic secret access is unsupported; credentials are never returned to JavaScript") }
     @objc func deleteSecret(_ call: CAPPluginCall) { call.reject("Use clearRemoteBasicAuth for managed credentials") }
     @objc func openFilesApp(_ call: CAPPluginCall) {
+        let instancesDir = store.documents.appendingPathComponent("instances", isDirectory: true)
+        try? FileManager.default.createDirectory(at: instancesDir, withIntermediateDirectories: true)
         var components = URLComponents()
         components.scheme = "shareddocuments"
         components.path = store.documents.path
@@ -557,7 +559,9 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             }
             let isFolder = types.contains(.folder) || action == "dir" || action == "installDir"
             let picker = exporting.map { UIDocumentPickerViewController(forExporting: [$0], asCopy: true) }
-                ?? UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: !isFolder)
+                ?? (isFolder
+                    ? UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+                    : UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true))
             picker.delegate = self
             picker.allowsMultipleSelection = false
             picker.modalPresentationStyle = .formSheet
@@ -568,7 +572,22 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             }
             if #available(iOS 14.0, *) {
                 try? FileManager.default.createDirectory(at: self.store.documents, withIntermediateDirectories: true)
-                picker.directoryURL = self.store.documents
+                let defaultInstallRoot = self.store.documents.appendingPathComponent("instances", isDirectory: true)
+                if isFolder {
+                    try? FileManager.default.createDirectory(at: defaultInstallRoot, withIntermediateDirectories: true)
+                }
+                if action == "installDir" {
+                    let configured = UserDefaults.standard.string(forKey: "configuredInstancesRoot")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let conf = configured, !conf.isEmpty,
+                       conf != self.store.documents.path,
+                       FileManager.default.fileExists(atPath: conf) {
+                        picker.directoryURL = URL(fileURLWithPath: conf, isDirectory: true)
+                    } else {
+                        picker.directoryURL = defaultInstallRoot
+                    }
+                } else {
+                    picker.directoryURL = self.store.documents
+                }
             }
             self.pendingPickerCall = call
             self.pendingPickerAction = action

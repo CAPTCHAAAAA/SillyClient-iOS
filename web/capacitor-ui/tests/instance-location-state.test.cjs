@@ -134,9 +134,13 @@ test("iOS storage wiring preserves platform affordances and requests installatio
   assert.ok(route.includes('"iOS 控制台"'));
   assert.ok(route.includes('"ios >"'));
   assert.ok(route.includes('isIOS={isIOS}'));
+  assert.match(route, /const configured = settings\?\.configuredInstancesRoot;[\s\S]*setNewInstanceDir\(configured\);[\s\S]*setNewInstancePathMode\("root"\);/);
+  const wizard = read("components/modals/NewInstanceWizardModal.tsx");
+  assert.ok(wizard.includes('右上角「打开」'));
   const relocate = read("components/modals/RelocateInstanceModal.tsx");
   assert.ok(relocate.includes('purpose: "installation"'));
   assert.ok(relocate.includes('应用 Documents 下的'));
+  assert.ok(relocate.includes('右上角「打开」'));
   assert.ok(relocate.includes('retainedSourcePath'));
   const legacy = read("components/modals/LegacyMigrationModal.tsx");
   assert.ok(legacy.includes('应用 Documents 下的'));
