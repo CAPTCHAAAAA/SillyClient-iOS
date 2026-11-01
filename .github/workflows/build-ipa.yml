@@ -174,13 +174,14 @@ jobs:
           linker_flag = "-Wl,-sectcreate,__TEXT,__entitlements,#{entitlements}"
           flags << linker_flag unless flags.include?(linker_flag)
           settings[key] = flags
+          settings['ENABLE_DEBUG_DYLIB'] = 'NO'
           project.save
           RUBY
           cd web/capacitor-ui/ios/App
           set -o pipefail
           xcodebuild -workspace App.xcworkspace -scheme App -configuration Debug \
             -sdk iphonesimulator -destination "id=$DEVICE_UUID" \
-            -derivedDataPath build/derived build CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            -derivedDataPath build/derived build CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" ENABLE_DEBUG_DYLIB=NO \
             | tee "$GITHUB_WORKSPACE/evidence/xcode-simulator.log"
           cd "$GITHUB_WORKSPACE"
           APP_PATH=web/capacitor-ui/ios/App/build/derived/Build/Products/Debug-iphonesimulator/App.app
