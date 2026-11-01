@@ -242,11 +242,6 @@ jobs:
           raise 'Incorrect linked Keychain group' unless linked['keychain-access-groups'] == [identity]
           raise 'Linked simulator entitlements differ from the source' unless linked == expected
           VERIFY
-          CRYPTEX_SWIFT=$(find /Library/Developer/CoreSimulator/Volumes/ -name "libswiftWebKit.dylib" -exec dirname {} \; 2>/dev/null | head -n 1)
-          if [ -n "$CRYPTEX_SWIFT" ]; then
-            echo "Found Cryptex Swift dylibs at: $CRYPTEX_SWIFT"
-            export SIMCTL_CHILD_DYLD_FALLBACK_LIBRARY_PATH="$CRYPTEX_SWIFT"
-          fi
           node scripts/simulator-recorder.mjs "$DEVICE_UUID" evidence &
           RECORDER_PID=$!
           set +e
