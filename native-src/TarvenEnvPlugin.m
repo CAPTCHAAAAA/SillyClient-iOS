@@ -31,6 +31,8 @@ CAP_PLUGIN(TarvenEnvPlugin, "TarvenEnv",
     CAP_PLUGIN_METHOD(reloadTavern, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(clearWebViewData, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(setPullToRefresh, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(getRenderEngineSettings, CAPPluginReturnPromise);
+    CAP_PLUGIN_METHOD(setRenderEngineSettings, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(uninstallInstance, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(cleanGarbage, CAPPluginReturnPromise);
     CAP_PLUGIN_METHOD(deleteGarbageItem, CAPPluginReturnPromise);

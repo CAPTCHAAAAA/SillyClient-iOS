@@ -27,7 +27,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             "getContentOpenMode", "setContentOpenMode", "setRemoteBasicAuth", "getRemoteBasicAuthStatus",
             "clearRemoteBasicAuth", "pickDirectory", "pickImage", "pickZipFile", "saveTextFile",
             "readTextFile", "migrateInstance", "sendCommand", "reloadTavern", "clearWebViewData",
-            "setPullToRefresh", "uninstallInstance", "cleanGarbage", "deleteGarbageItem", "openFilesApp",
+            "setPullToRefresh", "getRenderEngineSettings", "setRenderEngineSettings",
+            "uninstallInstance", "cleanGarbage", "deleteGarbageItem", "openFilesApp",
             "setSecret", "getSecret", "deleteSecret", "checkUpdate", "scanInstanceMaintenance",
             "applyInstanceMaintenance", "listInstanceMaintenanceRecovery", "restoreInstanceMaintenance",
             "checkLegacyInstances", "renameInstance", "relocateInstance",
@@ -351,6 +352,30 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         DispatchQueue.main.async {
             if TavernViewController.shared.setPullToRefresh(call.getBool("enabled") ?? false) { call.resolve(["success": true]) }
             else { call.reject("Tavern WebView is unavailable") }
+        }
+    }
+    @objc func getRenderEngineSettings(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            let settings = TavernViewController.shared.renderSettings
+            call.resolve([
+                "immersiveColor": settings.immersiveColor,
+                "colorExtractionMode": settings.colorExtractionMode,
+                "clickEffect": settings.clickEffect
+            ])
+        }
+    }
+    @objc func setRenderEngineSettings(_ call: CAPPluginCall) {
+        let immersive = call.getBool("immersiveColor") ?? true
+        let mode = call.getString("colorExtractionMode") ?? "realtime"
+        let click = call.getBool("clickEffect") ?? true
+        let newSettings = TavernViewController.RenderSettings(
+            immersiveColor: immersive,
+            colorExtractionMode: mode,
+            clickEffect: click
+        )
+        DispatchQueue.main.async {
+            TavernViewController.shared.renderSettings = newSettings
+            call.resolve(["success": true])
         }
     }
     @objc func clearWebViewData(_ call: CAPPluginCall) {

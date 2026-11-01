@@ -218,8 +218,8 @@ function verifyStaticContracts() {
     fail('Swift 实现: uninstallInstance 缺少 isTakeover 原地接管安全保护');
   }
 
-  // 3.5. 实例存储路径与 ZIP 导入导出方法
-  for (const name of ['getAppSettings', 'setInstancesRoot', 'exportInstance', 'inspectImportArchive', 'importInstanceData']) {
+  // 3.5. 实例存储路径、ZIP 导入导出与渲染引擎设置方法
+  for (const name of ['getAppSettings', 'setInstancesRoot', 'exportInstance', 'inspectImportArchive', 'importInstanceData', 'getRenderEngineSettings', 'setRenderEngineSettings']) {
     const hasTS = tsContent.includes(name);
     const hasObjC = objcContent.includes(`CAP_PLUGIN_METHOD(${name},`);
     const hasSwift = swiftContent.includes(`"${name}"`) && swiftContent.includes(`@objc func ${name}(_ call: CAPPluginCall)`);

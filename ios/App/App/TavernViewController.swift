@@ -49,6 +49,54 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
     private var pullRefreshControl: UIRefreshControl?
     private var pullToRefreshEnabled = false
 
+    public struct RenderSettings {
+        public var immersiveColor: Bool
+        public var colorExtractionMode: String // "realtime" | "once"
+        public var clickEffect: Bool
+
+        public init(immersiveColor: Bool = true, colorExtractionMode: String = "realtime", clickEffect: Bool = true) {
+            self.immersiveColor = immersiveColor
+            self.colorExtractionMode = (colorExtractionMode == "once") ? "once" : "realtime"
+            self.clickEffect = immersiveColor && clickEffect
+        }
+    }
+
+    private var hasSampledOnce = false
+
+    public var renderSettings: RenderSettings {
+        get {
+            let ud = UserDefaults.standard
+            let immersive = ud.object(forKey: "sc_immersive_color") != nil ? ud.bool(forKey: "sc_immersive_color") : true
+            let mode = ud.string(forKey: "sc_color_extraction_mode") ?? "realtime"
+            let click = ud.object(forKey: "sc_click_effect") != nil ? ud.bool(forKey: "sc_click_effect") : true
+            return RenderSettings(immersiveColor: immersive, colorExtractionMode: mode, clickEffect: click)
+        }
+        set {
+            let ud = UserDefaults.standard
+            let safeMode = (newValue.colorExtractionMode == "once") ? "once" : "realtime"
+            let safeClick = newValue.immersiveColor && newValue.clickEffect
+            ud.set(newValue.immersiveColor, forKey: "sc_immersive_color")
+            ud.set(safeMode, forKey: "sc_color_extraction_mode")
+            ud.set(safeClick, forKey: "sc_click_effect")
+            applyRenderSettings(newValue)
+        }
+    }
+
+    public func applyRenderSettings(_ settings: RenderSettings) {
+        if !settings.immersiveColor {
+            chameleonEngine?.stopPolling()
+            let fallback = UIColor(red: 30.0/255.0, green: 30.0/255.0, blue: 30.0/255.0, alpha: 1.0)
+            topScrimBar.setColor(fallback, animated: false)
+            bottomScrimBar.backgroundColor = fallback
+            view.backgroundColor = fallback
+            shimmerHint?.updateTone(isDarkScrim: true)
+        } else {
+            if isTavernActive {
+                startChameleon()
+            }
+        }
+    }
+
     public override var prefersStatusBarHidden: Bool {
         return isTavernActive
     }
@@ -250,6 +298,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
         let isAlreadyLoadingSameUrl = (currentTavernUrl == url && wv.isLoading)
         currentTavernUrl = url
         isTavernActive = true
+        hasSampledOnce = false
 
         if isAlreadyOnUrl {
             // 已在目标页面，检查 DOM ready 状态，若已就绪直接产生信号并执行取色
@@ -385,19 +434,47 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     private func startChameleon() {
-        chameleonEngine?.startPolling { [weak self] color, isDark in
-            guard let self = self else { return }
-            self.topScrimBar.setColor(color)
-            self.bottomScrimBar.backgroundColor = color
-            self.view.backgroundColor = color
-            self.shimmerHint?.updateTone(isDarkScrim: isDark)
+        let current = renderSettings
+        guard current.immersiveColor else {
+            let fallback = UIColor(red: 30.0/255.0, green: 30.0/255.0, blue: 30.0/255.0, alpha: 1.0)
+            topScrimBar.setColor(fallback, animated: false)
+            bottomScrimBar.backgroundColor = fallback
+            view.backgroundColor = fallback
+            return
+        }
+
+        if current.colorExtractionMode == "once" {
+            chameleonEngine?.stopPolling()
+            sampleChameleonNow { [weak self] _, _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self = self, self.isTavernActive, self.renderSettings.colorExtractionMode == "once" else { return }
+                    self.sampleChameleonNow { [weak self] _, _ in
+                        self?.hasSampledOnce = true
+                        self?.chameleonEngine?.stopPolling()
+                    }
+                }
+            }
+        } else {
+            hasSampledOnce = false
+            chameleonEngine?.startPolling { [weak self] color, isDark in
+                guard let self = self else { return }
+                self.topScrimBar.setColor(color)
+                self.bottomScrimBar.backgroundColor = color
+                self.view.backgroundColor = color
+                self.shimmerHint?.updateTone(isDarkScrim: isDark)
+            }
         }
     }
 
     /**
      * 立即执行变色龙全精度采样并驱动顶栏变色
      */
-    public func sampleChameleonNow() {
+    public func sampleChameleonNow(completion: ((UIColor, Bool) -> Void)? = nil) {
+        guard renderSettings.immersiveColor else {
+            let fallback = UIColor(red: 30.0/255.0, green: 30.0/255.0, blue: 30.0/255.0, alpha: 1.0)
+            completion?(fallback, true)
+            return
+        }
         self.chameleonEngine?.sample { [weak self] color, isDark in
             guard let self = self else { return }
             self.topScrimBar.setColor(color, animated: true)
@@ -406,6 +483,7 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
                 self.view.backgroundColor = color
             }
             self.shimmerHint?.updateTone(isDarkScrim: isDark)
+            completion?(color, isDark)
         }
     }
 
@@ -513,19 +591,25 @@ public class TavernViewController: UIViewController, WKNavigationDelegate, WKUID
     }
 
     @objc private func handleTavernTap() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.chameleonEngine?.sample { color, isDark in
-                guard let self = self else { return }
-                self.topScrimBar.setColor(color)
-                self.bottomScrimBar.backgroundColor = color
-                self.view.backgroundColor = color
-                self.shimmerHint?.updateTone(isDarkScrim: isDark)
+        let settings = renderSettings
+        if settings.immersiveColor && settings.clickEffect {
+            topScrimBar.sweepGloss()
+        }
+        if settings.immersiveColor && (settings.colorExtractionMode == "realtime" || !hasSampledOnce) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                guard let self = self, self.renderSettings.immersiveColor else { return }
+                if self.renderSettings.colorExtractionMode == "realtime" || !self.hasSampledOnce {
+                    self.sampleChameleonNow()
+                }
             }
         }
     }
 
     @objc private func handleScrimTap() {
-        topScrimBar.sweepGloss()
+        let settings = renderSettings
+        if settings.immersiveColor && settings.clickEffect {
+            topScrimBar.sweepGloss()
+        }
     }
 
     @objc private func handleScrimPan(_ gesture: UIPanGestureRecognizer) {

@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { X, ChevronRight } from "lucide-react";
 import { Capacitor } from "@capacitor/core";
 import { TarvenEnv } from "../../capacitor-plugin";
-import type { ContentOpenMode, AppUpdateInfo } from "../../capacitor-plugin";
+import type { ContentOpenMode, AppUpdateInfo, RenderEngineSettings } from "../../capacitor-plugin";
 import { cn } from "../../lib/utils";
 import { LAYERS } from "../../constants/layers";
 import { ToggleSwitch } from "../common/ToggleSwitch";
@@ -21,6 +21,8 @@ export interface AppSettingsDrawerProps {
   isWeb: boolean;
   pullToRefresh: boolean;
   setPullToRefresh: (v: boolean) => void;
+  renderSettings?: RenderEngineSettings | null;
+  onRenderSettingsChange?: (next: RenderEngineSettings) => void;
   contentOpenMode: ContentOpenMode;
   setContentOpenMode: (m: ContentOpenMode) => void;
   replayOnboarding: () => void;
@@ -121,6 +123,8 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
   isWeb,
   pullToRefresh,
   setPullToRefresh,
+  renderSettings,
+  onRenderSettingsChange,
   contentOpenMode,
   setContentOpenMode,
   replayOnboarding,
@@ -202,6 +206,7 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
     isOpen,
     pullToRefresh,
     contentOpenMode,
+    renderSettings,
     instances.length,
     configuredInstancesRoot,
     appUpdateState,
@@ -316,6 +321,91 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                   isLight={isLight}
                 />
               </AppSettingsRow>
+              {renderSettings && onRenderSettingsChange && (
+                <>
+                  <AppSettingsRow
+                    label="沉浸式取色"
+                    desc="顶栏跟随酒馆页面的颜色"
+                  >
+                    <ToggleSwitch
+                      on={renderSettings.immersiveColor}
+                      ariaLabel="沉浸式取色"
+                      onChange={(enabled) => {
+                        onRenderSettingsChange({
+                          ...renderSettings,
+                          immersiveColor: enabled,
+                          clickEffect: enabled ? renderSettings.clickEffect : false,
+                        });
+                      }}
+                      isLight={isLight}
+                    />
+                  </AppSettingsRow>
+                  <div className="px-[3px] py-[9px]">
+                    <div className="app-settings-copy">
+                      <div className="app-settings-label setting-label">取色</div>
+                      <div className="app-settings-desc setting-desc">
+                        {renderSettings.colorExtractionMode === "once"
+                          ? "只在进入酒馆时取一次"
+                          : "页面变色时继续取色"}
+                      </div>
+                    </div>
+                    <div
+                      className={cn(
+                        "ios-choice-track mt-2",
+                        !renderSettings.immersiveColor && "opacity-40",
+                      )}
+                      role="group"
+                      aria-label="取色"
+                    >
+                      {(
+                        [
+                          { id: "realtime", label: "全时取色" },
+                          { id: "once", label: "单次取色" },
+                        ] as const
+                      ).map((mode) => (
+                        <button
+                          key={mode.id}
+                          type="button"
+                          disabled={!renderSettings.immersiveColor}
+                          aria-pressed={renderSettings.colorExtractionMode === mode.id}
+                          onClick={() => {
+                            if (!renderSettings.immersiveColor) return;
+                            onRenderSettingsChange({
+                              ...renderSettings,
+                              colorExtractionMode: mode.id,
+                            });
+                          }}
+                          className="ios-choice-control motion-control whitespace-nowrap px-2 py-2 text-xs font-medium border transition-colors duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
+                        >
+                          {mode.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <AppSettingsRow
+                    label="点击光效"
+                    desc={
+                      renderSettings.immersiveColor
+                        ? "轻触时顶栏扫过一道光"
+                        : "先打开沉浸式取色"
+                    }
+                  >
+                    <ToggleSwitch
+                      on={renderSettings.immersiveColor && renderSettings.clickEffect}
+                      disabled={!renderSettings.immersiveColor}
+                      ariaLabel="点击光效"
+                      onChange={(enabled) => {
+                        if (!renderSettings.immersiveColor) return;
+                        onRenderSettingsChange({
+                          ...renderSettings,
+                          clickEffect: enabled,
+                        });
+                      }}
+                      isLight={isLight}
+                    />
+                  </AppSettingsRow>
+                </>
+              )}
               {isWindows && (
                 <AppSettingsRow
                   label="系统浏览器"

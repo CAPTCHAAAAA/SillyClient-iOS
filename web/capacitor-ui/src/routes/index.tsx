@@ -15,9 +15,9 @@ import {
 } from "lucide-react";
 import { cn, normalizeStoredVersion, formatDisplayVersion } from "@/lib/utils";
 import { Capacitor } from "@capacitor/core";
-import { TarvenEnv, DEFAULT_CONFIG } from "@/capacitor-plugin";
+import { TarvenEnv, DEFAULT_CONFIG, normalizeRenderEngineSettings } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
-import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId } from "@/capacitor-plugin";
+import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId, RenderEngineSettings } from "@/capacitor-plugin";
 import { cleanInstallPath, exactInstallTarget, installationSelection, normalizeInstanceIdentity, sanitizeFolderName } from "@/lib/install-location";
 import { humanizeNativeError } from "@/lib/native-errors";
 import { normalizeStoredInstances, serializeInstanceRecords, parseInstanceBackup, type StoredInstance } from "@/lib/instance-persistence";
@@ -399,6 +399,30 @@ function SillyClientLauncher() {
     } catch {}
     TarvenEnv.setPullToRefresh({ enabled }).catch(() => {});
   }, []);
+
+  const [renderSettings, setRenderSettings] = useState<RenderEngineSettings | null>(null);
+  const renderHydrated = useRef(false);
+  const isMobile = isAndroid || isIOS;
+  const commitRenderSettings = useCallback((next: RenderEngineSettings) => {
+    if (!isMobile || !renderHydrated.current) return;
+    const normalized = normalizeRenderEngineSettings(next);
+    setRenderSettings(normalized);
+    TarvenEnv.setRenderEngineSettings(normalized).catch(() => {});
+  }, [isMobile]);
+  useEffect(() => {
+    if (!isMobile) return;
+    let cancelled = false;
+    TarvenEnv.getRenderEngineSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setRenderSettings(normalizeRenderEngineSettings(settings));
+        renderHydrated.current = true;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isMobile]);
 
   useEffect(() => {
     TarvenEnv.setPullToRefresh({ enabled: pullToRefresh }).catch(() => {});
@@ -2811,6 +2835,8 @@ function SillyClientLauncher() {
         isWeb={isWeb}
         pullToRefresh={pullToRefresh}
         setPullToRefresh={setPullToRefresh}
+        renderSettings={renderSettings}
+        onRenderSettingsChange={commitRenderSettings}
         contentOpenMode={contentOpenMode}
         setContentOpenMode={setContentOpenMode}
         replayOnboarding={replayOnboarding}
