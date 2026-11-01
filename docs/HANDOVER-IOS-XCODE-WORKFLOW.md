@@ -289,6 +289,27 @@ node scripts/verify-ios-cloud.mjs
 - 在 `ManageInstanceModal.tsx` 中执行密码重置或清除前，必须先触发 `onPasswordMutationStart?.()`。
 - 这会立即作废内存中缓存的解密凭据，防止并发操作时恶意重放旧密码。
 
+### 7. ⚠️ macOS 15 Runner 与 Xcode 16.4 CoreSimulator 动态库缺失 (`libswiftWebKit.dylib`)
+- **现象**：在 GitHub Actions `macos-15`（Xcode 16.4 / iOS 18+ 模拟器）上运行 E2E 测试时，应用启动瞬间崩溃，错误为：
+  `dyld[...]: Library not loaded: /usr/lib/swift/libswiftWebKit.dylib Referenced from: .../SillyClientCore.framework/SillyClientCore Reason: tried: '/usr/lib/swift/libswiftWebKit.dylib' (no such file)`
+- **根因**：Apple 在 iOS 18 模拟器运行时中移除了原先独立的 `/usr/lib/swift/libswiftWebKit.dylib`（功能合并进系统的 WebKit.framework）。当使用 Swift 并且包含 `import WebKit` 的动态库（CocoaPods 产物 `SillyClientCore.framework`）加载时，dyld 会强制寻找该旧路径。
+- **解法**：在 CI 构建步骤中，通过 `xcrun clang` 现场编译一个轻量级 `@rpath/libswiftWebKit.dylib`（附带 `-reexport_framework WebKit` 参数），然后使用 `install_name_tool -change /usr/lib/swift/libswiftWebKit.dylib @rpath/libswiftWebKit.dylib` 修补 `SillyClientCore.framework`，并将其复制进 App Bundle 进行 ad-hoc 重签名。
+
+### 8. ⚠️ Xcode 16 Debug Dylib 注入与 Mach-O 验签断言
+- **现象**：`otool-classic -l` 检查二进制 Mach-O Header 时报错 `No linked simulator entitlement bytes`。
+- **根因**：Xcode 16 的 Debug 模式构建会默认注入动态调试桩（stub dylib），阻断了 codesign 直接将 entitlements 注入 Mach-O 头部。
+- **解法**：在 `App.xcodeproj` 构建设置和 `xcodebuild` 命令中显式传递 `ENABLE_DEBUG_DYLIB=NO`。
+
+### 9. ⚠️ `simctl launch` 进程管道挂起（120s ETIMEDOUT）
+- **现象**：`scripts/run-ios-e2e.mjs` 在第二阶段（实际 NodeMobile worker HTTP）执行 `xcrun simctl launch` 时卡死 120 秒超时。
+- **根因**：当向 `simctl launch` 传递 `--stdout` 和 `--stderr` 参数时，宿主会持续阻塞等待管道流关闭（EOF）。由于 iOS 应用是后台常驻运行的服务进程，永远不会主动关闭标准输出流，导致 `spawnSync xcrun` 阻塞挂起。
+- **解法**：使用非阻塞异步模式执行 `simctl('launch', device, bundleId, argument)`（不带阻塞流重定向），运行时状态由应用内 `IOSDebugHarness` 或 HTTP 服务轮询判定。
+
+### 10. ⚠️ iOS UIDocumentPickerViewController 文件夹选择模式
+- **现象**：iOS 用户反馈在创建实例或迁移向导中“无法选择文件夹，只能浏览文件夹”。
+- **根因**：原生 `UIDocumentPickerViewController` 必须显式声明 content types 为 `[.folder]`（对应 `public.folder`），并且由于 iOS 严格沙盒，不能直接使用空的或不合法的起始目录，否则用户在 picker 中点击文件夹只会不断深入浏览，而右上角不会出现「打开/选取」确认按钮。
+- **解法**：原生插件在弹出选择器前预先创建好 `Documents/instances` 目录并作为 `picker.directoryURL`，同时前端向导配置 `pathMode: "root"` 并附带引导提示“进入目标文件夹后点击右上角「打开」确认”。
+
 ---
 
-*文档生成与签署：SillyClient 自动化架构组 (2026-10-12)*
+*文档生成与签署：SillyClient 自动化架构组 (2026-11-02)*
