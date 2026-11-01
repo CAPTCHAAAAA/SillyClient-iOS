@@ -125,6 +125,13 @@ jobs:
             }
             fs.writeFileSync(podfile, source);
           "
+          ruby <<'RUBY'
+          require 'xcodeproj'
+          project = Xcodeproj::Project.open('web/capacitor-ui/ios/App/App.xcodeproj')
+          project.build_configurations.each { |config| config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' }
+          project.targets.each { |target| target.build_configurations.each { |config| config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' } }
+          project.save
+          RUBY
           cd web/capacitor-ui/ios/App
           pod install
 
