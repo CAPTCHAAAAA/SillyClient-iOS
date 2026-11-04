@@ -6,10 +6,11 @@ import type { ContentOpenMode, AppUpdateInfo, RenderEngineSettings } from "../..
 import { cn } from "../../lib/utils";
 import { LAYERS } from "../../constants/layers";
 import { ToggleSwitch } from "../common/ToggleSwitch";
+import { SegmentedSwitch } from "../common/SegmentedSwitch";
 import type { TavernInstance } from "../../types";
 import { createInstanceBackup } from "../../lib/instance-persistence";
 import { openExternalUrl } from "../../lib/external-links";
-import { APP_VERSION } from "../../constants/app-version";
+
 
 export interface AppSettingsDrawerProps {
   isOpen: boolean;
@@ -18,7 +19,6 @@ export interface AppSettingsDrawerProps {
   isLight: boolean;
   glassBg: string;
   isWindows: boolean;
-  isWeb: boolean;
   pullToRefresh: boolean;
   setPullToRefresh: (v: boolean) => void;
   renderSettings?: RenderEngineSettings | null;
@@ -26,6 +26,8 @@ export interface AppSettingsDrawerProps {
   contentOpenMode: ContentOpenMode;
   setContentOpenMode: (m: ContentOpenMode) => void;
   replayOnboarding: () => void;
+  createCardPinned: boolean;
+  setCreateCardPinned: (pinned: boolean) => void;
   instances: TavernInstance[];
   setInstances: React.Dispatch<React.SetStateAction<TavernInstance[]>>;
   onImportBackup: (content: string) => void;
@@ -35,7 +37,6 @@ export interface AppSettingsDrawerProps {
   checkForAppUpdate: () => Promise<any>;
   openProjectPage: () => void;
   onOpenCleanGarbage: () => void;
-  onOpenWhatsNew?: () => void;
 }
 
 function AppSettingsRow({
@@ -58,6 +59,13 @@ function AppSettingsRow({
   );
 }
 
+function AppSettingsPlaceholder() {
+  return (
+    <div className="app-settings-row is-pending" aria-disabled="true">
+      <span className="app-settings-pending">敬请期待</span>
+    </div>
+  );
+}
 
 function AppSettingsLinkRow({
   label,
@@ -120,7 +128,6 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
   isLight,
   glassBg,
   isWindows,
-  isWeb,
   pullToRefresh,
   setPullToRefresh,
   renderSettings,
@@ -128,6 +135,8 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
   contentOpenMode,
   setContentOpenMode,
   replayOnboarding,
+  createCardPinned,
+  setCreateCardPinned,
   instances,
   setInstances,
   onImportBackup,
@@ -137,39 +146,51 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
   checkForAppUpdate,
   openProjectPage,
   onOpenCleanGarbage,
-  onOpenWhatsNew,
 }) => {
   const [appSettingsTab, setAppSettingsTab] = useState<
     "general" | "data" | "maintenance"
   >("general");
 
-  // 实例存储根（无默认路径模型）：仅来自用户显式登记的文件夹；仅影响之后创建的实例。
+  // 默认实例存储路径：实例始终是该根的直接子目录；仅影响之后创建的实例。
+  const [instancesRoot, setInstancesRoot] = useState<string | null>(null);
   const [configuredInstancesRoot, setConfiguredInstancesRoot] = useState<string | null>(null);
-  const [instancesRootLoaded, setInstancesRootLoaded] = useState(false);
   useEffect(() => {
-    if (!isOpen || instancesRootLoaded) return;
+    if (!isOpen || instancesRoot !== null) return;
     TarvenEnv.getAppSettings()
       .then(settings => {
+        setInstancesRoot(settings.instancesRoot ?? settings.configuredInstancesRoot ?? "");
         setConfiguredInstancesRoot(settings.configuredInstancesRoot ?? null);
-        setInstancesRootLoaded(true);
       })
-      .catch(() => setInstancesRootLoaded(true));
-  }, [isOpen, instancesRootLoaded]);
+      .catch(() => setInstancesRoot(""));
+  }, [isOpen, instancesRoot]);
 
   const chooseInstancesRoot = async () => {
     try {
       const picked = await TarvenEnv.pickDirectory({ purpose: "installation" });
       if (!picked?.path) return;
       const result = await TarvenEnv.setInstancesRoot({ path: picked.path });
+      setInstancesRoot(result.instancesRoot);
       setConfiguredInstancesRoot(result.configured ? result.instancesRoot : null);
     } catch {
       /* 用户取消或授权中断：保持现有路径不变 */
     }
   };
 
-  const displayInstancesRoot = !instancesRootLoaded
+  const resetInstancesRoot = async () => {
+    try {
+      const result = await TarvenEnv.setInstancesRoot({});
+      setInstancesRoot(result.instancesRoot);
+      setConfiguredInstancesRoot(null);
+    } catch {
+      /* 保持现有路径不变 */
+    }
+  };
+
+  const displayInstancesRoot = instancesRoot === null
     ? "读取中…"
-    : configuredInstancesRoot ?? "未设置 · 创建或迁移实例时需显式选择文件夹";
+    : instancesRoot === ""
+      ? "暂不可用"
+      : instancesRoot;
 
   const generalRef = useRef<HTMLDivElement>(null);
   const dataRef = useRef<HTMLDivElement>(null);
@@ -205,10 +226,9 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
     appSettingsTab,
     isOpen,
     pullToRefresh,
-    contentOpenMode,
     renderSettings,
+    contentOpenMode,
     instances.length,
-    configuredInstancesRoot,
     appUpdateState,
     appUpdateInfo,
   ]);
@@ -253,8 +273,8 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
             className={cn(
               "motion-control p-1.5 rounded-lg transition-colors",
               isLight
-                ? "hover:bg-black/5 text-[#1a1625]/30 hover:text-[#1a1625]/60"
-                : "hover:bg-white/5 text-white/30 hover:text-white/60"
+                ? "text-[#1a1625]/40 hover:text-[#1a1625]/85"
+                : "text-white/40 hover:text-white/85"
             )}
           >
             <X className="w-4 h-4" />
@@ -262,10 +282,10 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
         </div>
       </div>
 
-      <div className="app-settings-body flex-1 overflow-y-auto p-5 scrollbar-subtle">
+      <div className="px-5 pt-5 pb-3.5 flex-shrink-0">
         {/* 顶部胶囊切换栏 */}
         <div
-          className="app-settings-tabs ios-choice-track mb-4"
+          className="app-settings-tabs ios-choice-track mb-0"
           role="group"
           aria-label="设置分类"
         >
@@ -287,7 +307,9 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
             </button>
           ))}
         </div>
+      </div>
 
+      <div className="app-settings-body flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-5 pb-5 scrollbar-hidden">
         {/* 模式切换容器（向导级平滑高度自适应 + 同位驻留高斯模糊交叉溶变） */}
         <div
           className="motion-panel-stack"
@@ -324,12 +346,12 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
               {renderSettings && onRenderSettingsChange && (
                 <>
                   <AppSettingsRow
-                    label="沉浸式取色"
-                    desc="顶栏跟随酒馆页面的颜色"
+                    label="顶栏变色龙"
+                    desc="进入酒馆后顶栏自动融合页面主色调"
                   >
                     <ToggleSwitch
                       on={renderSettings.immersiveColor}
-                      ariaLabel="沉浸式取色"
+                      ariaLabel="顶栏变色龙"
                       onChange={(enabled) => {
                         onRenderSettingsChange({
                           ...renderSettings,
@@ -340,54 +362,37 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                       isLight={isLight}
                     />
                   </AppSettingsRow>
-                  <div className="px-[3px] py-[9px]">
-                    <div className="app-settings-copy">
-                      <div className="app-settings-label setting-label">取色</div>
-                      <div className="app-settings-desc setting-desc">
-                        {renderSettings.colorExtractionMode === "once"
-                          ? "只在进入酒馆时取一次"
-                          : "页面变色时继续取色"}
-                      </div>
-                    </div>
-                    <div
-                      className={cn(
-                        "ios-choice-track mt-2",
-                        !renderSettings.immersiveColor && "opacity-40",
-                      )}
-                      role="group"
-                      aria-label="取色"
-                    >
-                      {(
-                        [
-                          { id: "realtime", label: "全时取色" },
-                          { id: "once", label: "单次取色" },
-                        ] as const
-                      ).map((mode) => (
-                        <button
-                          key={mode.id}
-                          type="button"
-                          disabled={!renderSettings.immersiveColor}
-                          aria-pressed={renderSettings.colorExtractionMode === mode.id}
-                          onClick={() => {
-                            if (!renderSettings.immersiveColor) return;
-                            onRenderSettingsChange({
-                              ...renderSettings,
-                              colorExtractionMode: mode.id,
-                            });
-                          }}
-                          className="ios-choice-control motion-control whitespace-nowrap px-2 py-2 text-xs font-medium border transition-colors duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
-                        >
-                          {mode.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                  <AppSettingsRow
+                    label="取色频率"
+                    desc={
+                      renderSettings.colorExtractionMode === "once"
+                        ? "仅在进入酒馆时采样一次以降低功耗"
+                        : "随酒馆画面变化实时过渡顶栏色彩"
+                    }
+                  >
+                    <SegmentedSwitch
+                      value={renderSettings.colorExtractionMode}
+                      options={[
+                        { id: "realtime", label: "实时" },
+                        { id: "once", label: "单次" },
+                      ]}
+                      disabled={!renderSettings.immersiveColor}
+                      ariaLabel="取色频率"
+                      onChange={(mode) => {
+                        onRenderSettingsChange({
+                          ...renderSettings,
+                          colorExtractionMode: mode,
+                        });
+                      }}
+                      isLight={isLight}
+                    />
+                  </AppSettingsRow>
                   <AppSettingsRow
                     label="点击光效"
                     desc={
                       renderSettings.immersiveColor
-                        ? "轻触时顶栏扫过一道光"
-                        : "先打开沉浸式取色"
+                        ? "轻触酒馆页面时在顶栏泛起柔光反馈"
+                        : "开启顶栏变色龙后可用"
                     }
                   >
                     <ToggleSwitch
@@ -432,6 +437,16 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                 desc="再次查看 SillyClient 的使用说明"
                 onClick={replayOnboarding}
               />
+              <AppSettingsRow
+                label="创建卡片置顶"
+                desc="关闭后创建实例卡片可与普通卡片一样拖动排序"
+              >
+                <ToggleSwitch
+                  on={createCardPinned}
+                  onChange={setCreateCardPinned}
+                  isLight={isLight}
+                />
+              </AppSettingsRow>
             </div>
           </div>
 
@@ -449,10 +464,8 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
           >
             <div className="app-settings-list space-y-1">
               <AppSettingsRow
-                label="实例存储位置"
-                desc={configuredInstancesRoot
-                  ? `${displayInstancesRoot} · 之后创建的实例默认存放于该文件夹的一级子目录`
-                  : displayInstancesRoot}
+                label="默认实例存储路径"
+                desc={`${displayInstancesRoot} · 实例以此处一级子目录存放`}
               >
                 <div className="app-settings-actions">
                   <AppSettingsAction
@@ -460,6 +473,13 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                   >
                     更改
                   </AppSettingsAction>
+                  {configuredInstancesRoot !== null && (
+                    <AppSettingsAction
+                      onClick={() => { void resetInstancesRoot(); }}
+                    >
+                      默认
+                    </AppSettingsAction>
+                  )}
                 </div>
               </AppSettingsRow>
               <AppSettingsRow
@@ -530,6 +550,7 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                   清除
                 </AppSettingsAction>
               </AppSettingsRow>
+              <AppSettingsPlaceholder />
             </div>
           </div>
 
@@ -582,14 +603,6 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                     )}
                 </div>
               </AppSettingsRow>
-              <AppSettingsLinkRow
-                label={`${APP_VERSION} 主要更新`}
-                desc="查看本次版本新增功能与核心改进"
-                onClick={() => {
-                  onClose();
-                  onOpenWhatsNew?.();
-                }}
-              />
               <AppSettingsRow
                 label="临时文件"
                 desc="扫描可以安全移除的缓存"
@@ -628,6 +641,7 @@ export const AppSettingsDrawer: React.FC<AppSettingsDrawerProps> = ({
                 desc="查看安装包、更新说明与项目动态"
                 onClick={openProjectPage}
               />
+              <AppSettingsPlaceholder />
             </div>
           </div>
         </div>

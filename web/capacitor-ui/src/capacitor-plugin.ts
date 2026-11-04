@@ -203,8 +203,8 @@ export interface TarvenEnvPlugin {
   /** 拉取 GitHub SillyTavern releases 列表。 */
   fetchReleases(): Promise<{ releases: GithubRelease[]; warning?: string }>
 
-  /** 读取应用级设置；configuredInstancesRoot 为用户显式登记的实例存储根（无默认路径，未配置时缺省）。 */
-  getAppSettings(): Promise<{ configuredInstancesRoot?: string }>
+  /** 读取应用级设置；instancesRoot 为当前默认实例存储根，configuredInstancesRoot 为用户显式登记的实例存储根。 */
+  getAppSettings(): Promise<{ instancesRoot?: string; defaultInstancesRoot?: string; configuredInstancesRoot?: string }>
 
   /** 登记实例存储根（来自用户显式选择的文件夹）；path 留空时清除配置。仅影响之后创建的实例。 */
   setInstancesRoot(options?: { path?: string }): Promise<{ instancesRoot: string | null; configured: boolean }>
