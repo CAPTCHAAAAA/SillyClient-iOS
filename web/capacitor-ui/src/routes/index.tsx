@@ -1,4 +1,3 @@
-// __SC_TEST__ iOS 平台契约守卫与自动化测试标记
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from "react";
 import {
@@ -14,7 +13,7 @@ import { cn, normalizeStoredVersion } from "@/lib/utils";
 import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG, normalizeRenderEngineSettings } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
-import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId, RenderEngineSettings, InstanceRelocationResult } from "@/capacitor-plugin";
+import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId, RenderEngineSettings } from "@/capacitor-plugin";
 import { buildInstanceSubfolder, cleanInstallPath, installationSelection, instanceParentPath, sanitizeFolderName } from "@/lib/install-location";
 import { humanizeNativeError } from "@/lib/native-errors";
 import { selectTavernRelease } from "@/lib/tavern-release";
@@ -176,7 +175,7 @@ const DEBUG_OPEN_INSTANCE: TavernInstance = {
   id: "debug-open-instance",
   name: "演示打开实例",
   subtitle: "打开实例 · 调试预览",
-  version: "1.14.0",
+  version: "1.14.1",
   port: 8003,
 };
 const DEBUG_CREATE_INSTANCE: TavernInstance = {
@@ -184,7 +183,7 @@ const DEBUG_CREATE_INSTANCE: TavernInstance = {
   id: "debug-create-instance",
   name: "演示创建实例",
   subtitle: "创建实例 · 调试预览",
-  version: "1.14.0",
+  version: "1.14.1",
   port: 8004,
 };
 
@@ -806,11 +805,10 @@ function SillyClientLauncher() {
     TarvenEnv.getAppSettings()
       .then(settings => {
         if (cancelled) return;
-        const configured = settings?.configuredInstancesRoot;
-        if (configured && !newInstanceDir.trim()) {
-          setNewInstanceDir(configured);
-          setNewInstancePathMode("root");
-        }
+        const saved = settings.configuredInstancesRoot?.trim();
+        if (!saved) return;
+        setNewInstanceDir(current => (current.trim() ? current : saved));
+        setNewInstancePathMode(current => (current === "exact" ? "root" : current));
       })
       .catch(() => { /* 读取失败时保持必选流程 */ });
     return () => { cancelled = true; };
@@ -2035,12 +2033,12 @@ function SillyClientLauncher() {
     const logs = purpose === "create"
       ? [
           { msg: "创建实例 · 演示环境", level: "info" },
-          { msg: "准备安装 SillyTavern 1.14.0", level: "info" },
+          { msg: "准备安装 SillyTavern 1.14.1", level: "info" },
           { msg: "正在下载当前版本 · 68%", level: "info" },
         ]
       : [
           { msg: "打开实例 · 正在启动", level: "info" },
-          { msg: "SillyTavern 1.14.0", level: "success" },
+          { msg: "SillyTavern 1.14.1", level: "success" },
           { msg: "正在确认实例可运行", level: "info" },
         ];
     instanceLogs.update(DEBUG_LAUNCH_LOG_KEY, logs);
@@ -2484,16 +2482,14 @@ function SillyClientLauncher() {
     }, PANEL_EXIT_MS);
   }, []);
 
-  const handleInstanceRelocated = useCallback((previousId: string, result: string | InstanceRelocationResult) => {
-    const newPath = typeof result === "string" ? result : result.newPath;
-    const newId = typeof result === "string" ? previousId : result.instanceId;
+  const handleInstanceRelocated = useCallback((instanceId: string, resultOrPath: any) => {
+    const newPath = typeof resultOrPath === "string" ? resultOrPath : resultOrPath?.newPath || "";
+    if (!newPath) return;
     setInstances((prev) => {
       const updated = prev.map((inst) => {
-        if (inst.id === previousId || inst.installDir === previousId) {
+        if (inst.id === instanceId || inst.installDir === instanceId) {
           return {
             ...inst,
-            id: newId,
-            installDir: newId,
             installPath: newPath,
           };
         }
@@ -2504,11 +2500,9 @@ function SillyClientLauncher() {
     });
 
     setShowManagePanel((current) => {
-      if (current && (current.id === previousId || current.installDir === previousId)) {
+      if (current && (current.id === instanceId || current.installDir === instanceId)) {
         return {
           ...current,
-          id: newId,
-          installDir: newId,
           installPath: newPath,
         };
       }
@@ -3352,8 +3346,6 @@ function SillyClientLauncher() {
 
       {/* 新版本旧路径实例全屏一键迁移向导 */}
       <LegacyMigrationModal
-        isWindows={isWindows}
-        isIOS={isIOS}
         isOpen={showLegacyMigration}
         isClosing={isLegacyMigrationClosing}
         onClose={dismissLegacyMigration}
@@ -3365,8 +3357,6 @@ function SillyClientLauncher() {
 
       {/* 单实例存储路径迁移模态框 */}
       <RelocateInstanceModal
-        isWindows={isWindows}
-        isIOS={isIOS}
         instance={relocatingInstance}
         isOpen={showRelocateModal}
         isClosing={isRelocateModalClosing}
