@@ -171,6 +171,8 @@ export interface TarvenEnvPlugin {
   provisionAndStart(options: {
     port: number
     instanceId: string
+    /** 初始目录显示名；既有实例标识与路径保持不变。 */
+    instanceName?: string
     operationId?: string
     version: string
     /**

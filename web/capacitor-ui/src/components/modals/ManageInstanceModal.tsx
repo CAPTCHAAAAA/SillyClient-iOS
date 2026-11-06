@@ -169,7 +169,6 @@ export interface ManageInstanceModalProps {
   // 终端日志
   terminalDisplayPrompt: string;
   terminalPlaceholder: string;
-  onPasswordMutationStart?: () => void;
   onUpdateInstancePasswordStatus?: (instanceId: string, hasPassword: boolean) => void;
 }
 
@@ -497,7 +496,6 @@ export const ManageInstanceModal: React.FC<ManageInstanceModalProps> = ({
   onSaveManagedInstance,
   terminalDisplayPrompt,
   terminalPlaceholder,
-  onPasswordMutationStart,
   onUpdateInstancePasswordStatus,
 }) => {
   const [manageTab, setManageTab] = useState<ManageTab>("launch");
@@ -996,7 +994,7 @@ export const ManageInstanceModal: React.FC<ManageInstanceModalProps> = ({
                       </ManageItem>
                       <ManageItem
                         label="允许外部监听"
-                        desc={isWindows ? "开启后局域网其他设备可访问此实例" : "移动宿主默认建议关闭，只在明确需要局域网访问时开启"}
+                        desc={isWindows ? "仅在需要局域网访问时开启" : "移动宿主默认建议关闭，只在明确需要局域网访问时开启"}
                         isLight={isLight} isPortrait={isPortrait}
                       >
                         <ManageToggle
@@ -1325,7 +1323,6 @@ export const ManageInstanceModal: React.FC<ManageInstanceModalProps> = ({
                                     setPasswordSaving(false);
                                     return;
                                   }
-                                  onPasswordMutationStart?.();
                                   const res = await TarvenEnv.setInstancePassword({
                                     instanceId: instance.installDir || instance.id,
                                     password: cleanNew,
@@ -1341,7 +1338,6 @@ export const ManageInstanceModal: React.FC<ManageInstanceModalProps> = ({
                                     setPasswordSaving(false);
                                     return;
                                   }
-                                  onPasswordMutationStart?.();
                                   await TarvenEnv.clearInstancePassword({
                                     instanceId: instance.installDir || instance.id,
                                     oldPassword: passwordOld.trim(),

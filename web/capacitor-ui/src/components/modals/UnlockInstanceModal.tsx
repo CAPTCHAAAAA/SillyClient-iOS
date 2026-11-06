@@ -1,11 +1,10 @@
-import React, { useState, useLayoutEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Lock, Eye, EyeOff, Loader2, AlertCircle, X } from "lucide-react";
 import { TarvenEnv } from "../../capacitor-plugin";
 import { cn } from "../../lib/utils";
 import { LAYERS } from "../../constants/layers";
 import { LayerBackdrop } from "../common/LayerBackdrop";
 import type { TavernInstance } from "../../types";
-import { InstanceAccessScope, instanceAccessIdentity, instanceAccessTarget } from "../../lib/instance-access";
 
 export interface UnlockInstanceModalProps {
   instance: TavernInstance | null;
@@ -36,38 +35,26 @@ export const UnlockInstanceModal: React.FC<UnlockInstanceModalProps> = ({
   const [verifying, setVerifying] = useState(false);
   const [isShaking, setIsShaking] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const accessScope = useRef(new InstanceAccessScope()).current;
-  const shakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const target = instance && isOpen && !isClosing ? instanceAccessTarget(instance) : null;
 
-  useLayoutEffect(() => {
-    accessScope.select(target);
+  useEffect(() => {
+    if (isOpen) {
       setPassword("");
       setShowPassword(false);
       setError(null);
       setVerifying(false);
       setIsShaking(false);
-      const timer = target ? setTimeout(() => {
+      const timer = setTimeout(() => {
         inputRef.current?.focus();
-      }, 50) : null;
-      return () => {
-        accessScope.select(null);
-        if (timer) clearTimeout(timer);
-        if (shakeTimer.current) clearTimeout(shakeTimer.current);
-      };
-  }, [accessScope, target]);
-
-  const handleClose = () => {
-    accessScope.select(null);
-    setPassword("");
-    onClose();
-  };
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen, instance?.id]);
 
   if (!isOpen && !isClosing) return null;
   if (!instance) return null;
 
   const handleUnlock = async () => {
-    if (!target) return;
+    if (verifying) return;
     const cleanPassword = password.trim();
     if (!cleanPassword) {
       setError("请输入访问密码");
@@ -75,22 +62,17 @@ export const UnlockInstanceModal: React.FC<UnlockInstanceModalProps> = ({
       return;
     }
 
-    const request = accessScope.begin();
-    if (!request) return;
-    const requestedInstance = instance;
     setVerifying(true);
     setError(null);
 
     try {
       const res = await TarvenEnv.verifyInstancePassword({
-        instanceId: instanceAccessIdentity(requestedInstance),
+        instanceId: instance.installDir || instance.id,
         password: cleanPassword,
       });
 
-      if (!request.isCurrent()) return;
-      if (res?.valid === true) {
-        setPassword("");
-        onUnlockSuccess(requestedInstance);
+      if (res && res.valid) {
+        onUnlockSuccess(instance);
       } else {
         setError("密码错误，请重新输入");
         triggerShake();
@@ -98,19 +80,16 @@ export const UnlockInstanceModal: React.FC<UnlockInstanceModalProps> = ({
         inputRef.current?.select();
       }
     } catch (err: any) {
-      if (!request.isCurrent()) return;
       setError(err?.message || "密码校验失败");
       triggerShake();
     } finally {
-      if (request.isCurrent()) setVerifying(false);
-      request.finish();
+      setVerifying(false);
     }
   };
 
   const triggerShake = () => {
     setIsShaking(true);
-    if (shakeTimer.current) clearTimeout(shakeTimer.current);
-    shakeTimer.current = setTimeout(() => setIsShaking(false), 400);
+    setTimeout(() => setIsShaking(false), 400);
   };
 
   const actionText = instance.type === "remote" ? "连接" : "启动";
@@ -120,7 +99,7 @@ export const UnlockInstanceModal: React.FC<UnlockInstanceModalProps> = ({
       <LayerBackdrop
         isOpen={isOpen}
         isClosing={isClosing}
-        onClick={verifying ? undefined : handleClose}
+        onClick={verifying ? undefined : onClose}
         zIndex={LAYERS.DIALOG_BACKDROP}
         blur={true}
         className={cn(
@@ -173,13 +152,12 @@ export const UnlockInstanceModal: React.FC<UnlockInstanceModalProps> = ({
           </div>
           {!verifying && (
             <button
-              onClick={handleClose}
-              aria-label="关闭解锁弹窗"
+              onClick={onClose}
               className={cn(
                 "motion-control p-1.5 rounded-lg transition-colors",
                 isLight
-                  ? "hover:bg-black/5 text-[#1a1625]/30 hover:text-[#1a1625]/60"
-                  : "hover:bg-white/5 text-white/30 hover:text-white/60"
+                  ? "text-[#1a1625]/40 hover:text-[#1a1625]/85"
+                  : "text-white/40 hover:text-white/85"
               )}
             >
               <X className="w-4 h-4" />
@@ -222,8 +200,6 @@ export const UnlockInstanceModal: React.FC<UnlockInstanceModalProps> = ({
                 ref={inputRef}
                 type={showPassword ? "text" : "password"}
                 value={password}
-                aria-label="访问密码"
-                autoComplete="current-password"
                 disabled={verifying}
                 onChange={(e) => {
                   setPassword(e.target.value);
@@ -231,7 +207,7 @@ export const UnlockInstanceModal: React.FC<UnlockInstanceModalProps> = ({
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !verifying) handleUnlock();
-                  if (e.key === "Escape" && !verifying) handleClose();
+                  if (e.key === "Escape" && !verifying) onClose();
                 }}
                 placeholder="输入访问密码"
                 className={cn(
@@ -243,7 +219,6 @@ export const UnlockInstanceModal: React.FC<UnlockInstanceModalProps> = ({
               />
               <button
                 type="button"
-                aria-label={showPassword ? "隐藏密码" : "显示密码"}
                 onClick={() => setShowPassword((prev) => !prev)}
                 className={cn(
                   "absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded transition-colors",
@@ -271,7 +246,7 @@ export const UnlockInstanceModal: React.FC<UnlockInstanceModalProps> = ({
           )}
         >
           <button
-            onClick={handleClose}
+            onClick={onClose}
             disabled={verifying}
             className={cn(
               "flat-capsule motion-control h-8 px-3.5 rounded-full text-xs font-medium border-0",
