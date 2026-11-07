@@ -32,6 +32,7 @@ export const DEFAULT_CONFIG: InstanceConfig = {
 /** GitHub release 条目(来自 SillyTavern/SillyTavern releases)。 */
 export interface GithubRelease {
   tag: string
+  name?: string
   zipballUrl: string
   prerelease: boolean
   isBranch?: boolean
@@ -71,6 +72,16 @@ export interface InstanceInfo {
   lastUsedAt?: string
   totalUsageMs?: number
   status: string
+}
+
+export interface ImportArchiveSummary {
+  importEntries: number
+  importBytes: number
+  skippedEntries: number
+  skippedBytes: number
+  hasSecrets: boolean
+  hasConfig: boolean
+  importable: boolean
 }
 
 /** 垃圾清理项。 */
@@ -203,13 +214,7 @@ export interface TarvenEnvPlugin {
   getStatus(): Promise<{ serverReady: boolean; mode: string; url?: string; instanceId?: string; operationId?: string }>
 
   /** 拉取 GitHub SillyTavern releases 列表。 */
-  fetchReleases(): Promise<{ releases: GithubRelease[]; warning?: string }>
-
-  /** 读取应用级设置；instancesRoot 为当前默认实例存储根，configuredInstancesRoot 为用户显式登记的实例存储根。 */
-  getAppSettings(): Promise<{ instancesRoot?: string; defaultInstancesRoot?: string; configuredInstancesRoot?: string }>
-
-  /** 登记实例存储根（来自用户显式选择的文件夹）；path 留空时清除配置。仅影响之后创建的实例。 */
-  setInstancesRoot(options?: { path?: string }): Promise<{ instancesRoot: string | null; configured: boolean }>
+  fetchReleases(): Promise<{ releases: GithubRelease[] }>
 
   /** Installation selectors return an executable root; source selectors may return document URIs. */
   pickDirectory(options?: { purpose?: "installation" | "source" }): Promise<{
@@ -218,17 +223,22 @@ export interface TarvenEnvPlugin {
     installPathMode?: InstallPathMode
   }>
 
+  /** 读取应用级设置；instancesRoot 为当前默认实例存储根（实例是其直接子目录）。 */
+  getAppSettings(): Promise<{ instancesRoot?: string; defaultInstancesRoot?: string; configuredInstancesRoot?: string }>
+
+  /** 设置默认实例存储根；path 留空恢复出厂默认。仅影响之后创建的实例。 */
+  setInstancesRoot(options?: { path?: string }): Promise<{ instancesRoot: string | null; configured: boolean }>
+
   /** 调用系统图片选择器,把图片复制到 covers/{instanceId},返回可加载的文件路径。 */
   pickImage(options: { instanceId: string }): Promise<{ path: string; url?: string }>
 
-  /** 调用系统文件选择器,选择 SillyTavern zip 文件,复制到 tmp 并返回路径。 */
-  pickZipFile(): Promise<{ path: string; sizeBytes: number }>
-
-  /** 调用系统保存位置选择器,写入文本/JSON 文件。 */
-  saveTextFile(options: { fileName: string; mimeType: string; content: string }): Promise<void>
-
-  /** 调用系统文件选择器,读取小型文本/JSON 文件内容。 */
-  readTextFile(options?: { mimeType?: string }): Promise<{ content: string; fileName: string }>
+  /** 调用系统文件选择器，选择 SillyTavern ZIP；数据导入可保留文档 URI。 */
+  pickZipFile(options?: { purpose?: "instanceSource" | "dataImport" }): Promise<{
+    path: string
+    sizeBytes: number
+    uri?: string
+    direct?: boolean
+  }>
 
   /** 自检:扫描本地已存在的酒馆实例目录。 */
   scanInstances(): Promise<{ instances: ScannedInstance[] }>
@@ -258,6 +268,22 @@ export interface TarvenEnvPlugin {
   /** Windows: 获取和保存酒馆内容的全局打开方式。 */
   getContentOpenMode(): Promise<{ mode: ContentOpenMode }>
   setContentOpenMode(options: { mode: ContentOpenMode }): Promise<{ mode: ContentOpenMode }>
+
+  /** 只读预检：压缩包里有多少用户数据会被导入、多少依赖/程序文件会被忽略。 */
+  inspectImportArchive(options: { archivePath?: string; archiveUri?: string }): Promise<ImportArchiveSummary>
+
+  /** 把压缩包里的用户数据无损导入到已有实例：只覆盖用户数据，依赖与程序文件永不写入。 */
+  importInstanceData(options: {
+    instanceId: string
+    installPath?: string
+    archivePath?: string
+    archiveUri?: string
+    includeOptional?: boolean
+    operationId?: string
+  }): Promise<{ imported: number; bytes: number; skipped: number }>
+
+  /** 导出实例为 ZIP（支持弹窗选择保存位置），返回保存路径与字节数；取消可能由平台返回 canceled 或 reject。 */
+  exportInstance(options: { instanceId: string; installPath?: string; targetZipPath?: string }): Promise<{ path: string; bytes: number; canceled?: boolean; cancelled?: boolean }>
 
   /** 将远程实例的 Basic Auth 凭据写入平台安全存储。password 省略时保留现有密码。 */
   setRemoteBasicAuth(options: {
@@ -309,20 +335,6 @@ export interface TarvenEnvPlugin {
     installPath?: string
   }): Promise<{ success: boolean; recoveryId?: string; relativePath?: string; error?: string }>
 
-  /** 数据迁移：将旧酒馆目录或 ZIP 压缩包迁入新实例 */
-  migrateInstance(options: {
-    sourcePath: string
-    targetPath?: string
-    instanceId: string
-    operationId?: string
-    mode?: 'copy' | 'takeover'
-    includeSecrets?: boolean
-    preinstall?: PreinstallSelection
-  }): Promise<{ success: boolean; instanceId: string; targetPath?: string }>
-
-  /** 检测仍位于旧版默认目录的受管实例。 */
-  checkLegacyInstances(): Promise<{ instances: LegacyInstanceLocation[] }>
-
   /** 单个实例无损迁移 / 路径重定位 */
   relocateInstance(options: {
     instanceId: string
@@ -343,33 +355,40 @@ export interface TarvenEnvPlugin {
     newPath: string
   }>
 
-  /** 只读预检：压缩包里有多少用户数据会被导入、多少依赖/程序文件会被忽略。 */
-  inspectImportArchive(options: { archivePath: string }): Promise<{
-    importEntries: number
-    importBytes: number
-    skippedEntries: number
-    skippedBytes: number
-    hasSecrets: boolean
-    hasConfig: boolean
-    importable: boolean
+  /** 设置或更新实例访问密码（本地安全开关） */
+  setInstancePassword(options: {
+    instanceId: string
+    password?: string
+    oldPassword?: string
+  }): Promise<{
+    success: boolean
+    hasPassword: boolean
   }>
 
-  /** 把压缩包里的用户数据无损导入到已有实例：只覆盖用户数据，依赖与程序文件永不写入。 */
-  importInstanceData(options: {
+  /** 校验实例访问密码 */
+  verifyInstancePassword(options: {
     instanceId: string
-    installPath?: string
-    archivePath: string
-    includeOptional?: boolean
-    operationId?: string
-  }): Promise<{ imported: number; bytes: number; skipped: number }>
+    password: string
+  }): Promise<{
+    valid: boolean
+  }>
 
-  /** 导出实例为 ZIP 压缩包，返回保存路径与字节数。若用户取消则 canceled 为 true。 */
-  exportInstance(options: { instanceId: string; installPath?: string; targetZipPath?: string }): Promise<{ path: string; bytes: number; canceled?: boolean }>
+  /** 查询实例是否设置了访问密码 */
+  hasInstancePassword(options: {
+    instanceId: string
+  }): Promise<{
+    hasPassword: boolean
+  }>
 
-  setInstancePassword(options: { instanceId: string; password?: string; oldPassword?: string }): Promise<{ success: boolean; hasPassword: boolean }>
-  verifyInstancePassword(options: { instanceId: string; password: string }): Promise<{ valid: boolean }>
-  hasInstancePassword(options: { instanceId: string }): Promise<{ hasPassword: boolean }>
-  clearInstancePassword(options: { instanceId: string; oldPassword?: string }): Promise<{ success: boolean }>
+  /** 解除并清除实例访问密码 */
+  clearInstancePassword(options: {
+    instanceId: string
+    oldPassword?: string
+  }): Promise<{
+    success: boolean
+  }>
+
+  /** 批量获取所有实例的密码保护状态 */
   listInstancePasswordStatus(): Promise<Record<string, boolean>>
 
   addListener(

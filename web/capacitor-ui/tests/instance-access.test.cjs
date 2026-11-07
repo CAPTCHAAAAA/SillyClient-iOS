@@ -6,6 +6,7 @@ const { preview } = require("./load-native-preview.cjs");
 
 const { InstanceAccessScope, instanceAccessIdentity, instanceAccessTarget,
   readInstancePasswordStatus, requireUnlockedRemoteDeletion } = loadSource(path.join(__dirname, "../src/lib/instance-access.ts"));
+const plain = value => JSON.parse(JSON.stringify(value));
 const instance = { id: "card-a", installDir: "native-a", type: "local", installPath: "/Documents/a", url: "" };
 function deferred() {
   let resolve;
@@ -115,7 +116,8 @@ test("preview old password is required for every change and removal", async () =
 });
 
 test("preview passwords do not share Basic Auth storage", async () => {
-  const { api } = preview({ password: { passwords: { a: "lock-secret" } } });
+  const { api } = preview();
+  await api.setInstancePassword({ instanceId: "a", password: "lock-secret" });
   await api.setRemoteBasicAuth({ instanceId: "a", username: "account", password: "http-secret" });
   await api.clearRemoteBasicAuth({ instanceId: "a" });
   assert.equal((await api.verifyInstancePassword({ instanceId: "a", password: "lock-secret" })).valid, true);
@@ -125,7 +127,8 @@ test("preview passwords do not share Basic Auth storage", async () => {
 });
 
 test("iOS rename and relocation preserve the lock and successful uninstall clears it", async () => {
-  const { api } = preview({ platform: "ios", scannedInstanceIds: ["a"], password: { passwords: { a: "lock" } } });
+  const { api } = preview({ platform: "ios", scannedInstanceIds: ["a"] });
+  await api.setInstancePassword({ instanceId: "a", password: "lock" });
   assert.equal((await api.renameInstance({ instanceId: "a", newName: "New name" })).newId, "a");
   await api.relocateInstance({ instanceId: "a", targetPath: "/Documents/New name" });
   assert.equal((await api.verifyInstancePassword({ instanceId: "a", password: "lock" })).valid, true);
@@ -133,36 +136,26 @@ test("iOS rename and relocation preserve the lock and successful uninstall clear
   assert.equal((await api.hasInstancePassword({ instanceId: "a" })).hasPassword, false);
 });
 
-test("preview Windows identity-changing rename carries the lock", async () => {
-  const { api } = preview({ platform: "windows", scannedInstanceIds: ["a"], password: { passwords: { a: "lock" } } });
-  const renamed = await api.renameInstance({ instanceId: "a", newName: "b" });
-  assert.equal(renamed.newId, "b");
-  assert.equal((await api.hasInstancePassword({ instanceId: "a" })).hasPassword, false);
-  assert.equal((await api.verifyInstancePassword({ instanceId: "b", password: "lock" })).valid, true);
-});
-
-test("successful uninstall reports canonical identity and preserves a cleanup warning without reporting deletion failure", async () => {
-  const { api } = preview({
-    platform: "ios", scannedInstanceIds: ["canonical-a"], password: { passwords: { "canonical-a": "lock" } },
-    storage: { uninstallInstanceIds: { "scan-alias": "canonical-a" }, uninstallWarning: "Synthetic Keychain cleanup warning" },
-  });
-  const result = await api.uninstallInstance({ instanceId: "scan-alias" });
-  assert.equal(result.success, true);
-  assert.equal(result.instanceId, "canonical-a");
-  assert.equal(result.warning, "Synthetic Keychain cleanup warning");
+test("successful uninstall removes the selected instance and clears its password", async () => {
+  const { api } = preview({ platform: "ios", scannedInstanceIds: ["a"] });
+  await api.setInstancePassword({ instanceId: "a", password: "lock" });
+  const result = await api.uninstallInstance({ instanceId: "a" });
+  assert.deepEqual(plain(result), { success: true, freedBytes: 1, instanceId: "a" });
   assert.equal((await api.scanInstances()).instances.length, 0);
-  assert.equal((await api.hasInstancePassword({ instanceId: "canonical-a" })).hasPassword, true);
+  assert.equal((await api.hasInstancePassword({ instanceId: "a" })).hasPassword, false);
 });
 
-test("preview delayed failure fixtures reject without losing password state", async () => {
-  const { api, harness } = preview({ password: { passwords: { a: "lock" }, delayMillis: 5, failMethods: ["hasInstancePassword"] } });
-  await assert.rejects(api.hasInstancePassword({ instanceId: "a" }));
-  harness.configure({ password: { failMethods: [] } });
-  assert.equal((await api.hasInstancePassword({ instanceId: "a" })).hasPassword, true);
+test("preview password status list follows set and clear operations", async () => {
+  const { api } = preview();
+  assert.deepEqual(plain(await api.listInstancePasswordStatus()), {});
+  await api.setInstancePassword({ instanceId: "a", password: "lock" });
+  assert.deepEqual(plain(await api.listInstancePasswordStatus()), { a: true });
+  await api.clearInstancePassword({ instanceId: "a", oldPassword: "lock" });
+  assert.deepEqual(plain(await api.listInstancePasswordStatus()), {});
 });
 
-test("a delayed unlocked snapshot is revoked when password mutation starts", async () => {
-  const { api } = preview({ password: { delayByMethod: { hasInstancePassword: 10 } } });
+test("a pending access request is revoked when its scope closes", async () => {
+  const { api } = preview();
   const scope = new InstanceAccessScope();
   scope.select("a");
   const request = scope.begin();
@@ -181,10 +174,40 @@ test("preview platform query supports iOS but fixture takes precedence and unkno
   assert.equal(preview({}, "?platform=unknown").platform, "windows");
 });
 
-test("iOS preview rejects unsupported runtime ZIP and takeover while keeping data copy", async () => {
-  const { api } = preview({ platform: "ios" });
+test("iOS preview rejects runtime ZIP while allowing data ZIP import", async () => {
+  const { api, harness } = preview({
+    platform: "ios",
+    zipSelection: { path: "/Documents/backup.zip", uri: "file:///Documents/backup.zip", sizeBytes: 12 },
+  });
   assert.equal((await api.fetchReleases()).releases[0].zipballUrl, "");
   await assert.rejects(api.provisionAndStart({ instanceId: "a", port: 8000, localZipPath: "/backup.zip" }));
-  await assert.rejects(api.migrateInstance({ instanceId: "a", mode: "takeover", sourcePath: "/old" }));
-  assert.equal((await api.migrateInstance({ instanceId: "a", mode: "copy", sourcePath: "/backup.zip" })).success, true);
+  const selected = await api.pickZipFile({ purpose: "dataImport" });
+  assert.deepEqual(selected, { path: "/Documents/backup.zip", uri: "file:///Documents/backup.zip", sizeBytes: 12 });
+  assert.equal((await api.inspectImportArchive({
+    archivePath: selected.path,
+    archiveUri: selected.uri,
+  })).importable, true);
+  await api.importInstanceData({
+    instanceId: "a",
+    installPath: "/private/Synthetic/Documents/instances/a",
+    archivePath: selected.path,
+    archiveUri: selected.uri,
+    includeOptional: false,
+  });
+  assert.deepEqual(plain(harness.calls.find(call => call.method === "importInstanceData").options), {
+    instanceId: "a",
+    installPath: "/private/Synthetic/Documents/instances/a",
+    archivePath: selected.path,
+    archiveUri: selected.uri,
+    includeOptional: false,
+  });
+});
+
+test("native preview preserves ZIP export cancellation forms and explicit picker cancellation", async () => {
+  const { api, harness } = preview({ platform: "ios", zipSelection: null });
+  await assert.rejects(api.pickZipFile({ purpose: "dataImport" }), /cancel/);
+  for (const cancellation of [{ cancelled: true }, { canceled: true }]) {
+    harness.configure({ exportResult: cancellation });
+    assert.deepEqual(plain(await api.exportInstance({ instanceId: "a" })), cancellation);
+  }
 });

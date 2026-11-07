@@ -2,11 +2,11 @@
  * SillyClient iOS 云真机 / 云端 CI 自动化端到端验证脚本 (verify-ios-cloud.mjs)
  *
  * 验证范围：
- * 1. 契约一致性静态审计：TS 接口、ObjC 导出宏与 Swift 实现 100% 对齐（重点校验 readTextFile、migrateInstance、targetPath、isTakeover）；
- * 2. 文本导入验证 (readTextFile)：JSON 备份文件读取、非 ASCII / 中文字符编码支持、文件名提取；
- * 3. 复制迁移验证 (migrateInstance copy)：ZIP 压缩包解压、单根包裹目录压平、.git / node_modules / secrets.json 过滤；
+ * 1. 契约一致性静态审计：前端已移除的旧入口不再声明，ObjC 导出宏与 Swift 兼容实现仍保持对齐；
+ * 2. 原生兼容能力验证 (readTextFile)：JSON 备份文件读取、非 ASCII / 中文字符编码支持、文件名提取；
+ * 3. 原生兼容能力验证 (migrateInstance copy)：ZIP 压缩包解压、单根包裹目录压平、.git / node_modules / secrets.json 过滤；
  * 4. 纯数据底座补全验证：纯数据备份缺少 server.js 时，自动从默认底座补齐运行环境；
- * 5. 原地接管与卸载防护验证 (migrateInstance takeover & uninstallInstance)：
+ * 5. 原地接管与卸载防护验证 (native compatibility)：
  *    接管已存在目录，注册至 instances-registry.json；卸载时仅注销登记，绝对不删除用户原物理文件；
  * 6. 自定义目标路径验证 (targetPath)：验证自定义路径直接生效；
  * 7. 云端真机 / 模拟器 live 探针：若检测到 xcrun simctl 或真机设备，自动执行真机沙盒注入与文件选择器 dismiss 测试。
@@ -165,46 +165,48 @@ function verifyStaticContracts() {
   const objcContent = fs.readFileSync(objcFile, 'utf8');
   const swiftContent = fs.readFileSync(swiftFile, 'utf8');
 
-  // 1. readTextFile
-  if (tsContent.includes('readTextFile(options?: { mimeType?: string }): Promise<{ content: string; fileName: string }>')) {
-    pass('TS 契约: readTextFile 声明匹配');
+  // 1. readTextFile: the frontend no longer exposes the legacy JSON backup picker,
+  // while the frozen native bridge keeps the method for compatibility with older hosts.
+  const hasTsReadTextFile = /readTextFile\s*\(/.test(tsContent);
+  if (!hasTsReadTextFile) {
+    pass('TS 前端契约: readTextFile 旧入口已移除');
   } else {
-    fail('TS 契约: readTextFile 声明缺失或签名不匹配');
+    fail('TS 前端契约: readTextFile 旧入口仍被声明');
   }
 
   if (objcContent.includes('CAP_PLUGIN_METHOD(readTextFile, CAPPluginReturnPromise);')) {
-    pass('ObjC 导出: readTextFile 宏匹配');
+    pass('ObjC 兼容导出: readTextFile 宏保留');
   } else {
-    fail('ObjC 导出: readTextFile 宏缺失');
+    fail('ObjC 兼容导出: readTextFile 宏缺失');
   }
 
   const hasReadTextMethod = swiftContent.includes('"readTextFile"') && swiftContent.includes('@objc func readTextFile(_ call: CAPPluginCall)');
   if (hasReadTextMethod) {
-    pass('Swift 实现: readTextFile 注册与函数实现匹配');
+    pass('Swift 兼容实现: readTextFile 注册与函数实现匹配');
   } else {
-    fail('Swift 实现: readTextFile 注册或函数实现缺失');
+    fail('Swift 兼容实现: readTextFile 注册或函数实现缺失');
   }
 
-  // 2. migrateInstance 与 targetPath
-  if (tsContent.includes('migrateInstance(options: {') &&
-      tsContent.includes('targetPath?: string') &&
-      (tsContent.includes("mode?: 'copy' | 'takeover'") || tsContent.includes('mode?: "copy" | "takeover"'))) {
-    pass('TS 契约: migrateInstance 包含 targetPath 与 mode 字段');
+  // 2. migrateInstance: the frontend now uses ZIP data import/relocation instead
+  // of the legacy copy/takeover wizard, but native compatibility remains frozen.
+  const hasTsMigrateInstance = /migrateInstance\s*\(\s*options\s*:\s*\{/.test(tsContent);
+  if (!hasTsMigrateInstance) {
+    pass('TS 前端契约: migrateInstance 旧入口已移除');
   } else {
-    fail('TS 契约: migrateInstance 缺少 targetPath 或 mode');
+    fail('TS 前端契约: migrateInstance 旧入口仍被声明');
   }
 
   if (objcContent.includes('CAP_PLUGIN_METHOD(migrateInstance, CAPPluginReturnPromise);')) {
-    pass('ObjC 导出: migrateInstance 宏匹配');
+    pass('ObjC 兼容导出: migrateInstance 宏保留');
   } else {
-    fail('ObjC 导出: migrateInstance 宏缺失');
+    fail('ObjC 兼容导出: migrateInstance 宏缺失');
   }
 
   const hasMigrateMethod = swiftContent.includes('"migrateInstance"') && swiftContent.includes('@objc func migrateInstance(_ call: CAPPluginCall)');
   if (hasMigrateMethod) {
-    pass('Swift 实现: migrateInstance 注册与函数实现匹配');
+    pass('Swift 兼容实现: migrateInstance 注册与函数实现匹配');
   } else {
-    fail('Swift 实现: migrateInstance 注册或函数实现缺失');
+    fail('Swift 兼容实现: migrateInstance 注册或函数实现缺失');
   }
 
   // 3. 原地接管与卸载保护
@@ -250,7 +252,7 @@ function verifyStaticContracts() {
 // SUITE 2 - 6: 沙盒行为与算法仿真验证
 // =========================================================================
 function verifySandboxBehaviors() {
-  header('SUITE 2: 文本导入 (readTextFile) 行为验证');
+  header('SUITE 2: 原生兼容能力 (readTextFile) 行为验证');
 
   const testTmpDir = path.join(REPO_ROOT, '.test-tmp-ios-verify');
   fs.rmSync(testTmpDir, { recursive: true, force: true });
@@ -273,7 +275,7 @@ function verifySandboxBehaviors() {
   }
 
   // -----------------------------------------------------------------------
-  header('SUITE 3: 复制迁移 (migrateInstance copy) ZIP 解压与过滤验证');
+  header('SUITE 3: 原生兼容能力 (migrateInstance copy) ZIP 解压与过滤验证');
 
   const testZipEntries = [
     { name: 'SillyTavern-1.12.0/server.js', content: 'console.log("SillyTavern server");' },
@@ -445,7 +447,7 @@ function verifySandboxBehaviors() {
   }
 
   // -----------------------------------------------------------------------
-  header('SUITE 5: 原地接管 (takeover) 与卸载防删验证');
+  header('SUITE 5: 原生兼容能力原地接管 (takeover) 与卸载防删验证');
   const externalTavernDir = path.join(testTmpDir, 'user-external-tavern');
   fs.mkdirSync(path.join(externalTavernDir, 'data'), { recursive: true });
   fs.writeFileSync(path.join(externalTavernDir, 'server.js'), '// User precious code', 'utf8');
@@ -547,7 +549,7 @@ function main() {
     console.log(`\n${colors.red}${colors.bold}❌ 验证未能全部通过，请检查上方日志！${colors.reset}\n`);
     process.exit(1);
   } else {
-    console.log(`\n${colors.green}${colors.bold}🎉 全部 7 大验证套件均 100% 通过！SillyClient iOS 端数据迁移与导入规范验证无误。${colors.reset}\n`);
+    console.log(`\n${colors.green}${colors.bold}🎉 全部 7 大验证套件均 100% 通过！iOS 前端新数据导入契约与原生兼容能力验证无误。${colors.reset}\n`);
   }
 }
 

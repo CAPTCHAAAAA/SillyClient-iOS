@@ -21,6 +21,7 @@ export interface RunningConsoleCardProps {
   onToggleExpand: () => void;
   active: boolean;
   isWindows?: boolean;
+  isIOS?: boolean;
 }
 
 export { formatDisplayVersion };
@@ -40,6 +41,7 @@ const RunningConsoleCardComponent: React.FC<RunningConsoleCardProps> = ({
   onToggleExpand,
   active,
   isWindows = false,
+  isIOS = false,
 }) => {
   const [terminalInput, setTerminalInput] = useState("");
   const logsContainerRef = useRef<HTMLDivElement>(null);
@@ -51,10 +53,14 @@ const RunningConsoleCardComponent: React.FC<RunningConsoleCardProps> = ({
 
   const terminalDisplayPrompt = isWindows
     ? `${instance.installDir || instance.id}>`
-    : "~ $";
+    : isIOS
+      ? "ios >"
+      : "~ $";
   const terminalPlaceholder = isWindows
     ? "输入 Windows 命令..."
-    : "输入 shell 命令...";
+    : isIOS
+      ? "iOS 进程内环境（可查看服务运行日志）"
+      : "输入 Android shell 命令...";
 
   useEffect(() => {
     if (active && logsContainerRef.current) {

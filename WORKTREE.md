@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-11-08 iOS 1.14.1 (Build 39) 同步 common 前端交互锁（未提交）
+
+- **同步基线**：追加同步 common `cc692f5`（记录 `8c15cc9`），版本保持 `1.14.1` / Build `39`；本次只改 `web/capacitor-ui/src/routes/index.tsx` 与本验证脚本。
+- **交互闭环**：新增统一 `isBackgroundInteractionBlocked` 与透明 `LayerBackdrop`，覆盖浮层打开/退场、删除维护、启动/创建进度和下拉刷新；浮层期间阻断背景点击、拖动和下拉刷新，内联重命名输入仍可用。
+- **平台边界**：未修改 `native-src/`、`ios/App/App/`、Swift/ObjC、NodeMobile、Android、Windows 或 Main；iOS 终端仍保持 `iOS 控制台` / `ios >`。
+- **验证事实**：`pnpm run typecheck`、`pnpm run build`、`git diff --check`、`node --test web/capacitor-ui/tests/*.test.cjs`（39/39）、`node --test tests/*.test.mjs`（118 pass / 2 skip / 0 fail）和 `node scripts/verify-ios-cloud.mjs --mock-mode`（7 套件全绿）均通过。构建仅有既有静态脚本、字体与 chunk 大小警告。
+- **产物边界**：未重新打包 IPA；继续沿用既有 `Local/artifacts/v1.14.1/SillyClient-iOS-v1.14.1-unsigned.ipa`（Build 39，SHA-256 `db116a3046ad79fdcb8c4fd3f570ff338d067009ec661bc0bc320402d977c979`）。
+
+---
+
+## 2026-11-08 iOS 1.14.1 (Build 39) 通用前端同步（未提交）
+
+- **同步基线**：从 `lts/common-frontend` 的功能提交 `7f44d2e`、记录提交 `0c1bc90`，再追加 `cc692f5` / `8c15cc9`，同步 ZIP 数据迁移收敛、v4 引导图、实例卡片和浮层交互锁；通用前端版本保持 `1.14.1`（版本提交 `e12b9f2`）。
+- **功能闭环**：创建向导不再提供旧实例迁移/原地接管/JSON 备份；已创建实例通过「实例管理 → 存储路径」完成 ZIP 只读预检、可选配置与密钥导入、ZIP 导出。`archivePath` 与 `archiveUri` 双通道、原生取消返回值和 iOS runtime ZIP 限制均有前端测试覆盖。
+- **iOS 平台边界**：未修改 `native-src/`、`ios/App/App/`、NodeMobile、Swift/ObjC 或任何后端契约。终端链路由 `routes/index.tsx`、`InstanceCarousel`、`InstanceCard`、`RunningConsoleCard` 逐层传递 `isIOS`，保持 `iOS 控制台`、`ios >`、`iOS 进程内环境（可查看服务运行日志）`，不向 iOS 显示 Android shell 文案。
+- **代码清理**：移除 `LegacyMigrationModal`、旧 JSON 实例备份 API 与两张废弃引导图；保留 `InstanceRelocationResult` / `LegacyInstanceLocation` 类型兼容现有 iOS 存储状态模块，未恢复已删除的旧迁移入口。
+- **当前验证**：`pnpm run typecheck`、`pnpm run build`、`git diff --check` 已通过；前端测试 **39/39 PASS**，iOS Node 测试 **118 pass / 2 skip / 0 fail**，`verify-ios-cloud.mjs --mock-mode` 7 套件全绿。CI、推送和新 IPA 尚未执行，不能把本轮表述为已发布。
+- **现有产物基线**：`Local/artifacts/v1.14.1/SillyClient-iOS-v1.14.1-unsigned.ipa`，194,903,882 字节，SHA-256 `db116a3046ad79fdcb8c4fd3f570ff338d067009ec661bc0bc320402d977c979`，Build 39。该文件为既有产物，本轮未重新打包。
+
+---
+
 ## 1. 职责与范围边界 (Scope & Boundaries)
 
 - **所属仓库**: `SillyClient_iOS`
@@ -25,7 +46,7 @@
 1. **单嵌入式 NodeMobile 进程模型**：遵循 `IOS-RUNTIME.md`，多实例共享一个宿主生命周期，单 Worker 执行；
 2. **Documents 安全沙盒契约**：所有实例物理路径严格约束在合法作用域内，支持 Security-Scoped Bookmark 持久化授权；
 3. **原生与 Xcode 工程 100% 镜像一致性**：`native-src` 与 `ios/App/App` 保持完全同步；
-4. **全套自动化测试网全绿**：117 项 Node 测试、41 项前端单测与 `verify-ios-cloud.mjs` 全部 7 大套件 100% 通过。
+4. **全套自动化测试网全绿**：正式交付必须以最新记录中的 Node、前端、云端与构建门禁为准；本轮前端同步后的单测为 39/39 PASS，尚不等同于完整 CI 或真机验收。
 
 ---
 
@@ -33,6 +54,7 @@
 
 | 日期 | 操作人 / 提交 | 改动摘要与内部验证结果 | 状态 |
 | :--- | :--- | :--- | :---: |
+| 2026-11-08 | Agent（common `cc692f5`） | 同步浮层背景交互锁：覆盖浮层/退场/删除维护/启动创建进度，透明屏障阻断背景点击拖动，下拉刷新仅在无浮层时启用；typecheck、build、39项前端测试、118 pass/2 skip Node测试与 verify-ios-cloud 全绿。 | 未提交 |
 | 2026-10-09 | Agent (4ae7b82) | 预设扩展多镜像源加速与重试机制、config.yaml 默认开启服务端插件、全面清洗 Xcode 镜像分叉与测试后门、拔除悬空占位符 | 已提交 |
 | 2026-10-11 | Agent | 严格遵循 LTS 规约设立独立工作树 `release-hardening-ios`，分支对齐至 `lts/ios-release-hardening`，完成依赖 Junction 挂载与全量测试验证 | 长期加固 |
 | 2026-10-11 | Agent | 跨端通用前端 1.12.0 基准对齐（竖版 687×843 锁定缩放、连体沟槽轨、向导溶变遮罩、密码状态作废）、版本号升级至 1.12.0（Build 30）、41 项前端单测 + 116 项运行时测试 + verify-ios-cloud 7 大套件 100% 全绿 | 已提交 |
