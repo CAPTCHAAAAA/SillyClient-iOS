@@ -4,9 +4,9 @@
 
 ---
 
-## 2026-11-08 iOS 1.14.1 (Build 39) 同步 common 前端交互锁（未提交）
+## 2026-11-08 iOS 1.14.1 (Build 39) 同步 common 前端交互锁（已提交推送并合入 main）
 
-- **同步基线**：追加同步 common `cc692f5`（记录 `8c15cc9`），版本保持 `1.14.1` / Build `39`；本次只改 `web/capacitor-ui/src/routes/index.tsx` 与本验证脚本。
+- **同步基线**：追加同步 common `cc692f5`（记录 `8c15cc9`），版本保持 `1.14.1` / Build `39`；iOS 提交 `f698315` 已推送 `lts/ios-release-hardening` 并快进合入 `main`。
 - **交互闭环**：新增统一 `isBackgroundInteractionBlocked` 与透明 `LayerBackdrop`，覆盖浮层打开/退场、删除维护、启动/创建进度和下拉刷新；浮层期间阻断背景点击、拖动和下拉刷新，内联重命名输入仍可用。
 - **平台边界**：未修改 `native-src/`、`ios/App/App/`、Swift/ObjC、NodeMobile、Android、Windows 或 Main；iOS 终端仍保持 `iOS 控制台` / `ios >`。
 - **验证事实**：`pnpm run typecheck`、`pnpm run build`、`git diff --check`、`node --test web/capacitor-ui/tests/*.test.cjs`（39/39）、`node --test tests/*.test.mjs`（118 pass / 2 skip / 0 fail）和 `node scripts/verify-ios-cloud.mjs --mock-mode`（7 套件全绿）均通过。构建仅有既有静态脚本、字体与 chunk 大小警告。
@@ -14,7 +14,7 @@
 
 ---
 
-## 2026-11-08 iOS 1.14.1 (Build 39) 通用前端同步（未提交）
+## 2026-11-08 iOS 1.14.1 (Build 39) 通用前端同步（已提交推送并合入 main）
 
 - **同步基线**：从 `lts/common-frontend` 的功能提交 `7f44d2e`、记录提交 `0c1bc90`，再追加 `cc692f5` / `8c15cc9`，同步 ZIP 数据迁移收敛、v4 引导图、实例卡片和浮层交互锁；通用前端版本保持 `1.14.1`（版本提交 `e12b9f2`）。
 - **功能闭环**：创建向导不再提供旧实例迁移/原地接管/JSON 备份；已创建实例通过「实例管理 → 存储路径」完成 ZIP 只读预检、可选配置与密钥导入、ZIP 导出。`archivePath` 与 `archiveUri` 双通道、原生取消返回值和 iOS runtime ZIP 限制均有前端测试覆盖。
@@ -54,7 +54,7 @@
 
 | 日期 | 操作人 / 提交 | 改动摘要与内部验证结果 | 状态 |
 | :--- | :--- | :--- | :---: |
-| 2026-11-08 | Agent（common `cc692f5`） | 同步浮层背景交互锁：覆盖浮层/退场/删除维护/启动创建进度，透明屏障阻断背景点击拖动，下拉刷新仅在无浮层时启用；typecheck、build、39项前端测试、118 pass/2 skip Node测试与 verify-ios-cloud 全绿。 | 未提交 |
+| 2026-11-08 | Agent（iOS `f698315`，common `cc692f5`） | 同步浮层背景交互锁：覆盖浮层/退场/删除维护/启动创建进度，透明屏障阻断背景点击拖动，下拉刷新仅在无浮层时启用；typecheck、build、39项前端测试、118 pass/2 skip Node测试与 verify-ios-cloud 全绿。已推送 LTS 并快进合入 main。 | 已交付 |
 | 2026-10-09 | Agent (4ae7b82) | 预设扩展多镜像源加速与重试机制、config.yaml 默认开启服务端插件、全面清洗 Xcode 镜像分叉与测试后门、拔除悬空占位符 | 已提交 |
 | 2026-10-11 | Agent | 严格遵循 LTS 规约设立独立工作树 `release-hardening-ios`，分支对齐至 `lts/ios-release-hardening`，完成依赖 Junction 挂载与全量测试验证 | 长期加固 |
 | 2026-10-11 | Agent | 跨端通用前端 1.12.0 基准对齐（竖版 687×843 锁定缩放、连体沟槽轨、向导溶变遮罩、密码状态作废）、版本号升级至 1.12.0（Build 30）、41 项前端单测 + 116 项运行时测试 + verify-ios-cloud 7 大套件 100% 全绿 | 已提交 |
