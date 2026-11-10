@@ -746,6 +746,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
           </button>
           <button
             type="button"
+            data-onboarding-target="create-submit"
             onClick={createInstance}
             disabled={isCreatingInstance}
             className={cn(

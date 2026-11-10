@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-11-10 iOS 1.14.1 (Build 39) 同步统一前端交互式聚焦引导与零撕裂遮罩基准（已构建与验证）
+
+- **同步基线**：同步最新统一前端基准（`3b78ac0` / `7c20f7a` 及 Android `bfe5b0e` 零撕裂引导基线），版本保持 `1.14.1` / Build `39`。
+- **引导重构与交互闭环**：
+  - 彻底清理已下线的 23 张废弃教程截屏及 `LegacyMigrationModal` 历史死代码。
+  - 落地全新交互式聚光灯引导体系（`OnboardingSession`、`OnboardingGuide`、`onboarding-runtime`、`onboarding-viewport` 与 `useOnboardingTarget`），采用视口自适应 SVG Mask 切割，根除大阴影造成的 GPU 瓦片饥饿与高刷屏撕裂。
+  - 补齐沙箱环境生命周期与消息代理（`lib/onboarding-mode.ts`），`index.html` 注入沙箱 CSP 隔离与隔离 Storage 模拟。
+  - 管理面板完成竖屏布局优化（`ToggleSwitch`、字号梯级、`is-stacked` 项目排列与软键盘弹起联动避让）。
+- **平台契约守护**：
+  - 严格保持 `routes/index.tsx` 第一行测试契约标记 `// __SC_TEST__ iOS 平台契约守卫与自动化测试标记`。
+  - 严格守护 iOS 专属终端文案与提示符：`iOS 控制台`、`ios >`、`iOS 进程内环境（可查看服务运行日志）` 及 `SillyClient ${APP_VERSION} · iOS · NodeMobile`。
+  - 管理面板局域网描述严格保持跨平台移动端文案：`移动宿主默认建议关闭，只在明确需要局域网访问时开启`。
+  - 新建向导保持 iOS 目录选择引导文案与禁止从 ZIP 安装运行时约束；`lib/install-location.ts` 保持 `normalizeInstanceIdentity` 导出。
+  - 原生镜像代码 `TarvenEnvPlugin.swift`、`TarvenEnvPlugin.m`、`TavernViewController.swift`、`Info.plist` 与 `ios/App/App/` 保持 100% SHA-256 双向一致。
+- **全量测试与验证**：
+  - 前端类型检查与构建通过：`pnpm run typecheck` 0 错误，`pnpm run build` 成功。
+  - 前端单测套件：`node --test web/capacitor-ui/tests/*.test.cjs` 71 项全部 PASS。
+  - iOS 运行时与云端探针：`node --test tests/ios-runtime.test.mjs` 32 项 PASS，`node scripts/verify-ios-cloud.mjs --mock-mode` 7 大套件全部 PASS。
+  - iOS 工作树全量测试：`node --test tests/*.test.mjs` 120 项全量通过（118 PASS / 2 SKIP / 0 FAIL）。
+- **产物更新**：
+  - 重新打包未签名 IPA 归档：`Local/artifacts/v1.14.1/SillyClient-iOS-v1.14.1-unsigned.ipa`（192,372,331 字节，SHA-256 `137e05b9057a131b37c250e0079235d5c8e000b80bc377c9ff63ab688f4c5854`）。
+  - 同步更新 `Local/artifacts/v1.14.1/SHA256SUMS.txt` 校验清单。
+
+---
+
 ## 2026-11-08 iOS 1.14.1 (Build 39) 同步 common 前端交互锁（已提交推送并合入 main）
 
 - **同步基线**：追加同步 common `cc692f5`（记录 `8c15cc9`），版本保持 `1.14.1` / Build `39`；iOS 提交 `f698315` 已推送 `lts/ios-release-hardening` 并快进合入 `main`。

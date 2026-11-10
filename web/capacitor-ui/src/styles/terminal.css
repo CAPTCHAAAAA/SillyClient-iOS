@@ -39,7 +39,7 @@
 }
 
 .terminal-output {
-  font-family: "Terminal CJK", "SFMono-Regular", Consolas, Menlo, Monaco, "Liberation Mono", monospace;
+  font-family: var(--app-font-family);
   font-size: var(--terminal-font-size);
   font-weight: 400;
   font-variant-ligatures: none;
