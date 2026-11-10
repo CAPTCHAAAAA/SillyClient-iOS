@@ -14,8 +14,8 @@ import { cn, normalizeStoredVersion } from "@/lib/utils";
 import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG, normalizeRenderEngineSettings } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
-import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId, RenderEngineSettings } from "@/capacitor-plugin";
-import { buildInstanceSubfolder, cleanInstallPath, installationSelection, instanceParentPath, sanitizeFolderName } from "@/lib/install-location";
+import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId, RenderEngineSettings } from "@/capacitor-plugin";
+import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection, instanceParentPath, sanitizeFolderName } from "@/lib/install-location";
 import { humanizeNativeError } from "@/lib/native-errors";
 import { selectTavernRelease } from "@/lib/tavern-release";
 import { normalizeStoredInstances, serializeInstanceRecords, type StoredInstance } from "@/lib/instance-persistence";
@@ -339,6 +339,7 @@ function SillyClientLauncher() {
   const [newInstanceMode, setNewInstanceMode] = useState<"local" | "remote">("local");
   const [newInstanceName, setNewInstanceName] = useState("");
   const [newInstanceDir, setNewInstanceDir] = useState("");
+  const [newInstancePathMode, setNewInstancePathMode] = useState<InstallPathMode>("exact");
   const directoryPickerGeneration = useRef(0);
   const [newInstanceUrl, setNewInstanceUrl] = useState("http://");
   const [newRemoteAuthEnabled, setNewRemoteAuthEnabled] = useState(false);
@@ -826,7 +827,11 @@ function SillyClientLauncher() {
         if (cancelled) return;
         const configured = settings?.configuredInstancesRoot?.trim();
         if (!configured) return;
-        setNewInstanceDir(current => current.trim() ? current : configured);
+        setNewInstanceDir(current => {
+          if (cancelled || current.trim()) return current;
+          setNewInstancePathMode("root");
+          return configured;
+        });
       })
       .catch(() => { /* 读取失败时保持必选流程 */ });
     return () => { cancelled = true; };
@@ -834,9 +839,10 @@ function SillyClientLauncher() {
 
   const handleSetNewInstanceDir = useCallback((value: string) => {
     const clean = value.replace(/^["']|["']$/g, "").trim();
-    setNewInstanceDir(clean);
-    setNewInstanceError(null);
     directoryPickerGeneration.current += 1;
+    setNewInstanceDir(clean);
+    setNewInstancePathMode("exact");
+    setNewInstanceError(null);
   }, []);
 
   // 向导中的存放位置一律是"实例存放文件夹"（父目录）：先落成实例根；
@@ -861,6 +867,7 @@ function SillyClientLauncher() {
       const selection = installationSelection(await TarvenEnv.pickDirectory({ purpose: "installation" }));
       if (generation !== directoryPickerGeneration.current) return;
       setNewInstanceDir(selection.path);
+      setNewInstancePathMode(selection.mode);
       setNewInstanceError(null);
       if (isAndroid) {
         try {
@@ -1474,7 +1481,7 @@ function SillyClientLauncher() {
       const customParentDir = cleanInstallPath(newInstanceDir);
       const resolvedCustomPath = (newInstanceMode === "local" && isAndroid)
         ? await resolveInstanceParent(newInstanceDir, "请先选择实例存放文件夹（必选）：点击「浏览」选择后，实例会创建在该文件夹下", instanceDisplayName)
-        : (customParentDir ? buildInstanceSubfolder(customParentDir, instanceDisplayName) : undefined);
+        : (customParentDir ? exactInstallTarget(customParentDir, newInstancePathMode, instanceId) : undefined);
       const selectedLocalZip = isIOS ? undefined : (newInstanceLocalZip || undefined);
       let selectedVersion = newInstanceVersion;
       let selectedZipballUrl: string | undefined;
@@ -1605,8 +1612,12 @@ function SillyClientLauncher() {
       operationStarted = true;
 
       await provisionCreatedInstance(instance, operation);
+      if (newInstanceMode === "local" && newInstancePathMode === "root" && customParentDir) {
+        void TarvenEnv.setInstancesRoot({ path: customParentDir }).catch(() => {});
+      }
       setNewInstanceName("");
       setNewInstanceDir("");
+      setNewInstancePathMode("exact");
       setNewInstanceUrl("http://");
       setNewRemoteAuthEnabled(false);
       setNewRemoteAuthUsername("");
@@ -1643,6 +1654,7 @@ function SillyClientLauncher() {
     isWeb,
     operations,
     newInstanceDir,
+    newInstancePathMode,
     newInstanceCompanionPresetEnabled,
     newInstanceExtensionIds,
     newInstanceLocalZip,
@@ -2463,6 +2475,7 @@ function SillyClientLauncher() {
     setNewInstanceMode("local");
     setNewInstanceName("");
     setNewInstanceDir("");
+    setNewInstancePathMode("exact");
     setNewInstanceUrl("http://");
     setNewRemoteAuthEnabled(false);
     setNewRemoteAuthUsername("");
@@ -3006,6 +3019,7 @@ function SillyClientLauncher() {
         isLight={isLight}
         glassBg={glassBg}
         isWindows={isWindows}
+        isIOS={isIOS}
         newInstanceName={newInstanceName}
         setNewInstanceName={setNewInstanceName}
         newInstanceMode={newInstanceMode}

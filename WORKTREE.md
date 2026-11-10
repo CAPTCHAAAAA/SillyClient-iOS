@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-11-11 iOS 1.14.2 (Build 40) 安装目录修复与发版构建（CI 构建中）
+
+- **版本变更**：前端与 iOS 两份 `Info.plist` 已从 `1.14.1 / Build 39` 升至 `1.14.2 / Build 40`；两份 plist SHA-256 保持一致。
+- **功能修复**：新建实例向导补齐 iOS 身份透传，目录选择保留 `root/exact` 模式，Documents 实例根预填与所选路径回填、创建、持久化和启动链路保持一致；新增路径与 AST 回归覆盖。
+- **验证结果**：`pnpm run typecheck`、`pnpm run build`、前端测试 `72/72 PASS`、iOS Node 测试 `118 PASS / 0 FAIL`、`verify-ios-cloud.mjs --mock-mode` 的 `7/7` 套件及 `git diff --check` 已通过。
+- **平台边界**：仅修改 iOS 前端、版本元数据、CI 版本断言、对应回归与本记录；未修改后端、Swift/ObjC、NodeMobile 或其他平台。Windows 无 Xcode，正式未签名 IPA 由 GitHub Actions macOS-15 工作流构建；CI 完成前不宣称 IPA 已生成。
+
+---
+
+## 2026-11-11 iOS 新建实例安装目录排查（前端漏传已修，真机症状待确认）
+
+- **用户反馈范围**：新建实例的安装目录无法选择；尚未确认是浏览无响应、系统选择器无法确认文件夹，还是确认后不回填，不能把以下前端修复视为真机问题已解决。
+- **确定修复**：首页向 `NewInstanceWizardModal` 补传 `isIOS={isIOS}`，恢复 iOS 文件夹确认说明，并隐藏不支持的运行时 ZIP 安装入口。创建链路保留原生选择器的 `root/exact` 模式，确保 Documents 实例根预填和原生选定目录按父目录处理；用户手动编辑路径切换为精确路径。新增 AST 与路径模式回归；修复前 AST 接线测试失败，修复后通过。
+- **浏览器验证**：本地前端 `http://127.0.0.1:3024/?nativePreview=1&platform=ios&wizard=local`，390x844 触屏视口、模拟 iOS 桥接下，浏览按钮发送 `pickDirectory({ purpose: "installation" })`；含空格路径完整回填，取消保留已有路径且不显示错误；创建请求使用所选父目录下的实例子目录，持久化路径一致，点击进入后启动请求保持同一路径。全程仅操作合成实例，不读取或操作用户实例；截图和日志在 `Local/临时/ios-install-picker-20261111/`。
+- **验证边界**：最终前端类型检查、构建、72/72 前端测试、路径及 AST 子集测试、Node 测试（118 PASS / 2 SKIP / 0 FAIL）、`verify-ios-cloud.mjs --mock-mode` 和 `git diff --check` 通过。浏览器测试与 Windows 主机模拟不等同于 iPhone 系统选择器、权限持久化或完整 CI 验收；未在真机重现用户症状。
+- **平台边界**：仅修改 iOS 前端、对应回归与本记录。`native-src/`、`ios/App/App/`、Swift/ObjC、NodeMobile 与其他仓库未改；版本保持 `1.14.1` / Build `39`，未生成或替换 IPA，未提交、推送或发布。
+
+---
+
 ## 2026-11-10 iOS 1.14.1 (Build 39) 同步统一前端交互式聚焦引导与零撕裂遮罩基准（已构建与验证）
 
 - **同步基线**：同步最新统一前端基准（`3b78ac0` / `7c20f7a` 及 Android `bfe5b0e` 零撕裂引导基线），版本保持 `1.14.1` / Build `39`。

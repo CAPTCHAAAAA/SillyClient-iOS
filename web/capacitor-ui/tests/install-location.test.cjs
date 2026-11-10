@@ -38,6 +38,8 @@ test("only an explicit root selection adds the dedicated instance folder", () =>
   const selected = location.installationSelection({ path: "/external/Selected", installPathMode: "root" });
   assert.equal(selected.mode, "root");
   assert.equal(location.exactInstallTarget(selected.path, selected.mode, "New instance"), "/external/Selected/New instance");
+  assert.equal(location.exactInstallTarget("/external/New instance", selected.mode, "New instance"),
+    "/external/New instance");
   const exact = location.installationSelection({ path: "/external/Selected" });
   assert.equal(location.exactInstallTarget(exact.path, exact.mode, "New instance"), "/external/Selected");
 });

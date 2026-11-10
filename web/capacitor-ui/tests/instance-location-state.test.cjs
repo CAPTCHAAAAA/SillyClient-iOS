@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
+const ts = require("typescript");
 const { loadSource } = require("./load-source.cjs");
 const { preview } = require("./load-native-preview.cjs");
 
@@ -63,6 +64,30 @@ test("iOS relocation defaults to Documents and retains native IDs", async () => 
   assert.equal(relocated.newPath, "/private/Synthetic/Documents/instances/stable-id");
 });
 
+test("new-instance wizard receives iOS identity and its installation picker callback", () => {
+  const filename = path.join(__dirname, "../src/routes/index.tsx");
+  const route = ts.createSourceFile(filename, fs.readFileSync(filename, "utf8"),
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const wizards = [];
+  function visit(node) {
+    if ((ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node))
+        && node.tagName.getText(route) === "NewInstanceWizardModal") wizards.push(node);
+    ts.forEachChild(node, visit);
+  }
+  visit(route);
+  assert.equal(wizards.length, 1);
+  const attributes = new Map(wizards[0].attributes.properties
+    .filter(ts.isJsxAttribute)
+    .map(attribute => [attribute.name.getText(route), attribute.initializer?.getText(route)]));
+  assert.equal(attributes.get("isIOS"), "{isIOS}");
+  assert.equal(attributes.get("onPickInstallFolder"), "{handlePickInstallFolder}");
+
+  const source = fs.readFileSync(filename, "utf8");
+  assert.match(source, /setNewInstancePathMode\(selection\.mode\)/);
+  assert.match(source, /exactInstallTarget\(customParentDir, newInstancePathMode, instanceId\)/);
+  assert.match(source, /setNewInstancePathMode\("exact"\)/);
+});
+
 test("iOS storage wiring preserves platform affordances and requests installation bookmark access", () => {
   const read = filename => fs.readFileSync(path.join(__dirname, "../src", filename), "utf8");
   const route = read("routes/index.tsx");
@@ -71,7 +96,7 @@ test("iOS storage wiring preserves platform affordances and requests installatio
   assert.ok(route.includes('"ios >"'));
   assert.ok(route.includes('isIOS={isIOS}'));
   assert.ok(route.includes('isWindows={isWindows}'));
-  assert.match(route, /const configured = settings\?\.configuredInstancesRoot\?\.trim\(\);[\s\S]*setNewInstanceDir\(current => current\.trim\(\) \? current : configured\);/);
+  assert.match(route, /const configured = settings\?\.configuredInstancesRoot\?\.trim\(\);[\s\S]*setNewInstanceDir\(current => \{[\s\S]*if \(cancelled \|\| current\.trim\(\)\) return current;[\s\S]*setNewInstancePathMode\("root"\);[\s\S]*return configured;[\s\S]*\}\);/);
   assert.doesNotMatch(route, /LegacyMigration|migrateLegacy|migrateInstance|checkLegacyInstances|createInstanceBackup|parseInstanceBackup/);
   const wizard = read("components/modals/NewInstanceWizardModal.tsx");
   assert.ok(wizard.includes('右上角「打开」'));
