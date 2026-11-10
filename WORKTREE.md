@@ -4,12 +4,13 @@
 
 ---
 
-## 2026-11-11 iOS 1.14.2 (Build 40) 安装目录修复与发版构建（CI 构建中）
+## 2026-11-11 iOS 1.14.2 (Build 40) 安装目录修复与官方发版（已构建与发布）
 
 - **版本变更**：前端与 iOS 两份 `Info.plist` 已从 `1.14.1 / Build 39` 升至 `1.14.2 / Build 40`；两份 plist SHA-256 保持一致。
 - **功能修复**：新建实例向导补齐 iOS 身份透传，目录选择保留 `root/exact` 模式，Documents 实例根预填与所选路径回填、创建、持久化和启动链路保持一致；新增路径与 AST 回归覆盖。
 - **验证结果**：`pnpm run typecheck`、`pnpm run build`、前端测试 `72/72 PASS`、iOS Node 测试 `118 PASS / 0 FAIL`、`verify-ios-cloud.mjs --mock-mode` 的 `7/7` 套件及 `git diff --check` 已通过。
-- **平台边界**：仅修改 iOS 前端、版本元数据、CI 版本断言、对应回归与本记录；未修改后端、Swift/ObjC、NodeMobile 或其他平台。Windows 无 Xcode，正式未签名 IPA 由 GitHub Actions macOS-15 工作流构建；CI 完成前不宣称 IPA 已生成。
+- **平台边界与构建**：Windows 无 Xcode，正式未签名 IPA 由 GitHub Actions macOS-15 官方构建（Run `42871644356`，17m28s 全量通过）交付；产物 `SillyClient-iOS-v1.14.2-unsigned.ipa`（194,197,945 字节，SHA-256 `e7c6fbae6b167762c684c148da726b0815771e8f6ec4550d05cd3cbf46ea847c`）。
+- **发版记录**：已完成发版文案 `release/v1.14.2.md` 与更新日志 `release/CHANGELOG.md` 编制，已正式发布 GitHub Release `v1.14.2` 并推送远端 Tag。
 
 ---
 
