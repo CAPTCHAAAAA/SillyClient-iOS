@@ -4,11 +4,12 @@
 
 ---
 
-## 2026-11-13 iOS v1.14.2 Build 42 文件夹确认回归修复（待 CI 构建）
+## 2026-11-13 iOS v1.14.2 Build 43 文件夹确认与外部目录授权修复（待 CI 构建）
 
 - **根因**：Build 41 只恢复了空路径拦截；原生 `UIDocumentPickerViewController` 的文件夹初始化没有显式传 `asCopy: false`，Files 中可以进入文件夹但不能将当前文件夹作为授权目录确认。
 - **修复**：`native-src/TarvenEnvPlugin.swift` 与 Xcode 镜像改为 `forOpeningContentTypes: [.folder], asCopy: false`，保留 security-scoped bookmark、路径回填和创建链路；静态 CI 断言同步收紧。
-- **版本**：营销版本保持 `1.14.2`，Build `42` 用于区分尚未交付的 Build 41。
+- **补强**：外部 Files 目录的 bookmark 创建与解析均显式使用 `.withSecurityScope`，避免首次选择后创建/重启时无法重新取得目录授权。
+- **版本**：营销版本保持 `1.14.2`，Build `43` 用于区分前一轮仍未解决的 Build 42。
 - **边界**：只改 iOS 原生选择器和对应测试/版本元数据，不改后端、Android、Windows 或 Main。
 
 ---

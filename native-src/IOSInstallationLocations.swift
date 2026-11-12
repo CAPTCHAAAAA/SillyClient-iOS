@@ -31,11 +31,11 @@ final class IOSInstallationLocations {
 
     init(documents: URL,
          makeBookmark: @escaping (URL) throws -> Data = {
-             try $0.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+             try $0.bookmarkData(options: [.minimalBookmark, .withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
          },
          resolveBookmark: @escaping (Data) throws -> (URL, Bool) = {
              var stale = false
-             let url = try URL(resolvingBookmarkData: $0, bookmarkDataIsStale: &stale)
+             let url = try URL(resolvingBookmarkData: $0, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale)
              return (url, stale)
          },
          startScope: @escaping (URL) -> Bool = { $0.startAccessingSecurityScopedResource() },

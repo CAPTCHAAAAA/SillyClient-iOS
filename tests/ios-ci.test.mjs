@@ -114,7 +114,7 @@ test('unsigned artifact version and monotonic native build agree', () => {
     const workflow = read('.github/workflows/build-ipa.yml');
     assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.2<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 42);
+    assert.equal(build, 43);
     assert.match(workflow, /SillyClient-iOS-v1\.14\.2-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
@@ -312,13 +312,13 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     const maintenance = read('native-src/IOSInstanceMaintenance.swift');
     const runner = read('native-src/NodeRunner.swift');
     const plugin = read('native-src/TarvenEnvPlugin.swift');
-    assert.match(locations, /bookmarkData\(options: \.minimalBookmark/);
+    assert.match(locations, /bookmarkData\(options: \[\.minimalBookmark, \.withSecurityScope\]/);
+    assert.match(locations, /URL\(resolvingBookmarkData: \$0, options: \.withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale\)/);
     assert.match(locations, /guard !stale, scopedURL\.isFileURL/);
     assert.match(locations, /guard startScope\(scopedURL\)/);
     assert.match(locations, /root\.path == expectedPath/);
     assert.match(locations, /expectedRootIdentity: identity/);
     assert.match(locations, /deinit \{ release\(\) \}/);
-    assert.doesNotMatch(locations, /withSecurityScope/);
     assert.match(store, /mode == "root" \? \$0\.appendingPathComponent\(id\) : \$0/);
     assert.match(store, /documentsRelativePath/);
     assert.match(store, /recoverRegistration\(id, location: location\)/);
