@@ -114,7 +114,7 @@ test('unsigned artifact version and monotonic native build agree', () => {
     const workflow = read('.github/workflows/build-ipa.yml');
     assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.2<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 41);
+    assert.equal(build, 42);
     assert.match(workflow, /SillyClient-iOS-v1\.14\.2-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
@@ -330,7 +330,7 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(runner, /locations\.json/);
     assert.match(plugin, /call\.getString\("installPathMode"\)/);
     assert.match(plugin, /"installPath": directory\.path, "installPathMode": "exact"/);
-    assert.match(plugin, /UIDocumentPickerViewController\(forOpeningContentTypes: \[\.folder\]\)/);
+    assert.match(plugin, /UIDocumentPickerViewController\(forOpeningContentTypes: \[\.folder\], asCopy: false\)/);
     assert.match(plugin, /let defaultInstallRoot = self\.store\.documents\.appendingPathComponent\("instances", isDirectory: true\)/);
     assert.match(plugin, /picker\.directoryURL = defaultInstallRoot/);
     assert.match(plugin, /action == "installDir"[\s\S]*locations\.select\(selected\)/);
