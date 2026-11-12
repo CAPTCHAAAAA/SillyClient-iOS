@@ -114,7 +114,7 @@ test('unsigned artifact version and monotonic native build agree', () => {
     const workflow = read('.github/workflows/build-ipa.yml');
     assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.2<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 43);
+    assert.equal(build, 44);
     assert.match(workflow, /SillyClient-iOS-v1\.14\.2-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
@@ -312,10 +312,15 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     const maintenance = read('native-src/IOSInstanceMaintenance.swift');
     const runner = read('native-src/NodeRunner.swift');
     const plugin = read('native-src/TarvenEnvPlugin.swift');
-    assert.match(locations, /bookmarkData\(options: \.minimalBookmark/);
+    assert.match(locations, /BookmarkCreationOptions\(rawValue: 1 << 11\)/);
+    assert.match(locations, /BookmarkResolutionOptions\(rawValue: 1 << 10\)/);
+    assert.match(locations, /bookmarkData\(options: securityScope/);
+    assert.doesNotMatch(locations, /\.withSecurityScope/);
     assert.match(locations, /guard !stale, scopedURL\.isFileURL/);
     assert.match(locations, /guard startScope\(scopedURL\)/);
     assert.match(locations, /root\.path == expectedPath/);
+    assert.doesNotMatch(locations, /NSFileCoordinator\(\)\.coordinate\(writingItemAt: selected/);
+    assert.match(locations, /validateExternalCapability/);
     assert.match(locations, /expectedRootIdentity: identity/);
     assert.match(locations, /deinit \{ release\(\) \}/);
     assert.match(store, /mode == "root" \? \$0\.appendingPathComponent\(id\) : \$0/);
@@ -334,6 +339,7 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(plugin, /picker\.directoryURL = defaultInstallRoot/);
     assert.match(plugin, /IOSInstallationLocations\.contains\(self\.store\.documents, candidate\)/);
     assert.match(plugin, /action == "installDir"[\s\S]*locations\.select\(selected\)/);
+    assert.match(plugin, /DispatchQueue\.main\.async \{ call\.resolve\(result\) \}/);
     assert.equal(plugin, read('ios/App/App/TarvenEnvPlugin.swift'));
 });
 

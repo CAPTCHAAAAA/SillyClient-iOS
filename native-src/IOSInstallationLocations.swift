@@ -31,11 +31,17 @@ final class IOSInstallationLocations {
 
     init(documents: URL,
          makeBookmark: @escaping (URL) throws -> Data = {
-             try $0.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+             // The typed security-scope member is annotated unavailable by
+             // the iOS SDK even though the underlying bookmark flag is supported.
+             let securityScope = URL.BookmarkCreationOptions(rawValue: 1 << 11)
+             return try $0.bookmarkData(options: securityScope,
+                                        includingResourceValuesForKeys: nil, relativeTo: nil)
          },
          resolveBookmark: @escaping (Data) throws -> (URL, Bool) = {
              var stale = false
-             let url = try URL(resolvingBookmarkData: $0, bookmarkDataIsStale: &stale)
+             let securityScope = URL.BookmarkResolutionOptions(rawValue: 1 << 10)
+             let url = try URL(resolvingBookmarkData: $0, options: securityScope,
+                               relativeTo: nil, bookmarkDataIsStale: &stale)
              return (url, stale)
          },
          startScope: @escaping (URL) -> Bool = { $0.startAccessingSecurityScopedResource() },
@@ -118,20 +124,9 @@ final class IOSInstallationLocations {
         guard identity.isDirectory else { throw IOSFileError.invalid("Select an installation directory") }
         let internalRoot = Self.contains(documents, root)
         guard internalRoot || scoped else { throw IOSFileError.invalid("The selected installation root has no security-scoped authorization") }
-        if !internalRoot {
-            var coordinationError: NSError?
-            var capabilityError: Error?
-            NSFileCoordinator().coordinate(writingItemAt: selected, options: [], error: &coordinationError) { coordinated in
-                do {
-                    guard coordinated.resolvingSymlinksInPath().standardizedFileURL.path == root.path else {
-                        throw IOSFileError.invalid("The file provider changed the selected installation root")
-                    }
-                    try self.externalCapability(root)
-                } catch { capabilityError = error }
-            }
-            if let error = coordinationError { throw error }
-            if let error = capabilityError { throw error }
-        }
+        // Do not coordinate a write or probe create/move/read capability while the
+        // document picker is returning. Files providers can authorize a folder yet
+        // reject eager writes, which made a valid selection look cancelled.
         var roots = try records()
         let key = roots.first(where: { $0.value["path"] as? String == root.path })?.key ?? UUID().uuidString
         guard roots[key] != nil || roots.count < 32 else { throw IOSFileError.invalid("Installation root authorization capacity reached") }
@@ -148,6 +143,11 @@ final class IOSInstallationLocations {
         roots[key] = record
         try files.writeJSON(["revision": 1, "roots": roots], to: registryURL)
         return root
+    }
+
+    func validateExternalCapability(for location: IOSInstallationLocation) throws {
+        guard !Self.contains(documents, location.root) else { return }
+        try externalCapability(location.root)
     }
 
     func acquire(_ target: URL, grantId: String? = nil) throws -> IOSInstallationLocation {

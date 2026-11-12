@@ -674,9 +674,13 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             io.async {
                 do {
                     let root = try self.store.locations.select(selected)
-                    call.resolve(["name": root.lastPathComponent, "path": root.path, "installPathMode": "root",
-                        "runtimeLocation": "selected", "persistentAuthorization": true])
-                } catch { call.reject(error.localizedDescription) }
+                    let result: [String: Any] = ["name": root.lastPathComponent, "path": root.path, "installPathMode": "root",
+                        "runtimeLocation": "selected", "persistentAuthorization": true]
+                    DispatchQueue.main.async { call.resolve(result) }
+                } catch {
+                    let message = error.localizedDescription
+                    DispatchQueue.main.async { call.reject(message) }
+                }
             }
             return
         }

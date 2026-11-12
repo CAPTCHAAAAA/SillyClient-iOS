@@ -2,6 +2,13 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-13 iOS v1.14.2 Build 44 外部 Files 选择回调修复（待 CI 与真机验证）
+
+- **症状根因**：文件夹选择回调曾在 `locations.select` 内立即执行 `NSFileCoordinator` 写协调和创建/移动/读取能力探针；部分 iCloud/第三方 Files provider 会拒绝这些操作，导致系统已选中但前端没有回填。
+- **修复**：选择阶段只完成目录身份、沙盒边界、安全作用域 bookmark 保存和路径返回；外部目录能力探针延迟到真正创建实例时。安装目录 resolve/reject 统一回主线程，避免 Capacitor 回调跨队列丢失。
+- **授权**：Xcode 16.4 将 typed security-scope bookmark 成员标为 iOS unavailable，改用 Foundation raw flags（creation `1 << 11`、resolution `1 << 10`），且创建 bookmark 只传 security-scope flag。
+- **版本**：营销版本保持 `1.14.2`，Build 升至 `44`。本节不代表真机 Files/iCloud 已验收；必须等待 CI 构建并在真实 iPhone 上复测。
+
 ---
 
 ## 2026-11-13 iOS v1.14.2 Build 43 文件夹确认与外部目录授权修复（待 CI 构建）

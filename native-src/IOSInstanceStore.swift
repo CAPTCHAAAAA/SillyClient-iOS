@@ -296,6 +296,7 @@ final class IOSInstanceStore {
         guard createIntent else {
             throw IOSFileError.invalid("The instance directory is missing, so launch was stopped to protect existing data")
         }
+        try locations.validateExternalCapability(for: location)
         let source = try bundleRuntime()
         let sourceFiles = IOSManagedFiles(root: source)
         let pinned = try validateRuntime(source, files: sourceFiles)
