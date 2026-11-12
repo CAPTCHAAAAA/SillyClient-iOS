@@ -301,9 +301,14 @@ enum IOSNativeTests {
             try rejects("Same-path replacement root was trusted") { _ = try authorizations().acquire(selected.appendingPathComponent("instance")) }
             try require(scopes == 0, "Rejected bookmark leaked security scope")
             let denied = IOSInstallationLocations(documents: documents, makeBookmark: { _ in Data([1]) },
+                resolveBookmark: { _ in (selected, false) },
                 startScope: { _ in true }, stopScope: { _ in },
                 externalCapability: { _ in throw IOSFileError.invalid("Unsupported provider fixture") })
-            try rejects("Unsupported provider was persisted") { _ = try denied.select(selected) }
+            try denied.select(selected)
+            let deniedLocation = try denied.acquire(selected)
+            try rejects("Unsupported provider blocked folder selection instead of creation") {
+                try denied.validateExternalCapability(for: deniedLocation)
+            }
         }
         test("Custom installation commits at the selected root and can recover registration without replacing data") { root, files in
             let store = IOSInstanceStore(root: root)

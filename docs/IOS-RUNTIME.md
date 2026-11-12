@@ -52,13 +52,14 @@ move to another path.
 
 The installation directory picker uses `purpose: installation`, without
 changing source/import pickers. Documents-relative roots and registrations
-survive store recreation; external directories retain an iOS minimal bookmark
+survive store recreation; external directories retain an iOS security-scoped bookmark
 and their approved root identity. A restored bookmark must resolve to that
 same local directory, retain its identity, and successfully start security-scoped
 access. Stale, moved, revoked, cloud-only, linked, overlapping, and unsupported
 locations fail explicitly, without provisioning an internal replacement.
-The external root selection coordinates its local capability probe and verifies
-exclusive creation, atomic rename, fsync-backed writes, and readback. This is
+The external root selection stores its security-scoped bookmark without eager
+provider writes. Creation-time capability validation verifies exclusive creation,
+atomic rename, fsync-backed writes, and readback. This is
 not a claim that every third-party File Provider supports an uncoordinated,
 long-lived Node runtime, or that external provider behavior has been physically
 verified. Runtime roots requiring provider-mediated streaming or materialization
