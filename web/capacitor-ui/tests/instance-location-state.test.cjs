@@ -86,6 +86,8 @@ test("new-instance wizard receives iOS identity and its installation picker call
   assert.match(source, /setNewInstancePathMode\(selection\.mode\)/);
   assert.match(source, /exactInstallTarget\(customParentDir, newInstancePathMode, instanceId\)/);
   assert.match(source, /setNewInstancePathMode\("exact"\)/);
+  assert.match(source, /if \(newInstanceMode === "local" && !cleanInstallPath\(newInstanceDir\)\)/);
+  assert.match(source, /请先点「浏览」选择实例安装目录（必选）/);
 });
 
 test("iOS storage wiring preserves platform affordances and requests installation bookmark access", () => {

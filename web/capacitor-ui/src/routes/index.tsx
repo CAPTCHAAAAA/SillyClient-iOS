@@ -1468,6 +1468,11 @@ function SillyClientLauncher() {
       candidateId = `${safeCandidateId} (${counter++})`;
     }
     const instanceId = candidateId;
+    // iOS/desktop custom installs must have an explicit selected path; never silently fall back to Documents.
+    if (newInstanceMode === "local" && !cleanInstallPath(newInstanceDir)) {
+      setNewInstanceError("请先点「浏览」选择实例安装目录（必选）");
+      return;
+    }
     const operation = operations.begin(instanceId, "create");
     setNewInstanceError(null);
     setIsCreatingInstance(true);
