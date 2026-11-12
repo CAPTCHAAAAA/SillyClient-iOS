@@ -603,10 +603,14 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                 }
                 if action == "installDir" {
                     let configured = UserDefaults.standard.string(forKey: "configuredInstancesRoot")?.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if let conf = configured, !conf.isEmpty,
-                       conf != self.store.documents.path,
-                       FileManager.default.fileExists(atPath: conf) {
-                        picker.directoryURL = URL(fileURLWithPath: conf, isDirectory: true)
+                    if let conf = configured, !conf.isEmpty {
+                        let candidate = URL(fileURLWithPath: conf, isDirectory: true).standardizedFileURL
+                        if IOSInstallationLocations.contains(self.store.documents, candidate),
+                           FileManager.default.fileExists(atPath: candidate.path) {
+                            picker.directoryURL = candidate
+                        } else {
+                            picker.directoryURL = defaultInstallRoot
+                        }
                     } else {
                         picker.directoryURL = defaultInstallRoot
                     }

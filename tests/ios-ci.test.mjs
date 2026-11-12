@@ -312,8 +312,7 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     const maintenance = read('native-src/IOSInstanceMaintenance.swift');
     const runner = read('native-src/NodeRunner.swift');
     const plugin = read('native-src/TarvenEnvPlugin.swift');
-    assert.match(locations, /bookmarkData\(options: \[\.minimalBookmark, \.withSecurityScope\]/);
-    assert.match(locations, /URL\(resolvingBookmarkData: \$0, options: \.withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale\)/);
+    assert.match(locations, /bookmarkData\(options: \.minimalBookmark/);
     assert.match(locations, /guard !stale, scopedURL\.isFileURL/);
     assert.match(locations, /guard startScope\(scopedURL\)/);
     assert.match(locations, /root\.path == expectedPath/);
@@ -333,6 +332,7 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(plugin, /UIDocumentPickerViewController\(forOpeningContentTypes: \[\.folder\], asCopy: false\)/);
     assert.match(plugin, /let defaultInstallRoot = self\.store\.documents\.appendingPathComponent\("instances", isDirectory: true\)/);
     assert.match(plugin, /picker\.directoryURL = defaultInstallRoot/);
+    assert.match(plugin, /IOSInstallationLocations\.contains\(self\.store\.documents, candidate\)/);
     assert.match(plugin, /action == "installDir"[\s\S]*locations\.select\(selected\)/);
     assert.equal(plugin, read('ios/App/App/TarvenEnvPlugin.swift'));
 });
