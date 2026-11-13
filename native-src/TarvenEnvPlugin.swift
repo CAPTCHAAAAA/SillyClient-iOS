@@ -724,7 +724,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         }
     }
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        pendingPickerCall?.reject("Selection cancelled")
+        pendingPickerCall?.reject("PICKER_CANCELLED")
         pendingPickerCall = nil
     }
     @objc func checkLegacyInstances(_ call: CAPPluginCall) {

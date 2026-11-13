@@ -20,6 +20,17 @@ export function installationSelection(selection: { path?: string; installPathMod
   return { path, mode };
 }
 
+export function shouldShowDirectoryPickerError(error: unknown, isIOS: boolean): boolean {
+  if (isIOS) {
+    return !(typeof error === "object" && error !== null && (
+      ("code" in error && error.code === "PICKER_CANCELLED")
+      || ("message" in error && error.message === "PICKER_CANCELLED")
+    ));
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return !/cancel/i.test(message);
+}
+
 export function instanceParentPath(value: string): string | undefined {
   return executablePath(value);
 }

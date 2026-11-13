@@ -246,7 +246,7 @@ archived unsigned Release IPA. Its capability-probe
 process never creates a production console or deploys an instance. Tests,
 source assertions, host fixtures, simulator acceptance, and physical-device
 acceptance are distinct evidence categories.
-The current harness contains 44 fixture groups, including full-capacity token
+The current harness contains 46 fixture groups, including full-capacity token
 recovery, flat/multi-user migration layouts, and captured-output event routing.
 Added groups cover actual access-lock derivation/Keychain, rename/relocation,
 retryable deletion, durable journal recovery, and pending maintenance backups.

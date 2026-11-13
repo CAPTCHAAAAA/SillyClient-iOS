@@ -31,17 +31,12 @@ final class IOSInstallationLocations {
 
     init(documents: URL,
          makeBookmark: @escaping (URL) throws -> Data = {
-             // The typed security-scope member is annotated unavailable by
-             // the iOS SDK even though the underlying bookmark flag is supported.
-             let securityScope = URL.BookmarkCreationOptions(rawValue: 1 << 11)
-             return try $0.bookmarkData(options: securityScope,
+             return try $0.bookmarkData(options: .minimalBookmark,
                                         includingResourceValuesForKeys: nil, relativeTo: nil)
          },
          resolveBookmark: @escaping (Data) throws -> (URL, Bool) = {
              var stale = false
-             let securityScope = URL.BookmarkResolutionOptions(rawValue: 1 << 10)
-             let url = try URL(resolvingBookmarkData: $0, options: securityScope,
-                               relativeTo: nil, bookmarkDataIsStale: &stale)
+             let url = try URL(resolvingBookmarkData: $0, bookmarkDataIsStale: &stale)
              return (url, stale)
          },
          startScope: @escaping (URL) -> Bool = { $0.startAccessingSecurityScopedResource() },
@@ -111,38 +106,52 @@ final class IOSInstallationLocations {
 
     @discardableResult
     func select(_ selected: URL) throws -> URL {
-        guard selected.isFileURL else { throw IOSFileError.invalid("The selected installation root is not a local directory URL") }
-        let scoped = startScope(selected)
-        defer { if scoped { stopScope(selected) } }
-        _ = try IOSManagedFiles(root: selected.standardizedFileURL).guardValue(selected.standardizedFileURL)
-        let root = selected.resolvingSymlinksInPath().standardizedFileURL
-        guard root.path != "/", root.path == documents.path || !Self.contains(root, documents) else {
-            throw IOSFileError.invalid("A filesystem root or sandbox ancestor cannot be an installation root")
+        var stage = "validate-selection"
+        var scoped = false
+        do {
+            guard selected.isFileURL else { throw IOSFileError.invalid("The selected installation root is not a local directory URL") }
+            stage = "start-security-scope"
+            scoped = startScope(selected)
+            NSLog("[IOSInstallationLocations] stage=%@ scope=%@", stage, String(scoped))
+            defer { if scoped { stopScope(selected) } }
+            stage = "inspect-selected-directory"
+            _ = try IOSManagedFiles(root: selected.standardizedFileURL).guardValue(selected.standardizedFileURL)
+            let root = selected.resolvingSymlinksInPath().standardizedFileURL
+            guard root.path != "/", root.path == documents.path || !Self.contains(root, documents) else {
+                throw IOSFileError.invalid("A filesystem root or sandbox ancestor cannot be an installation root")
+            }
+            stage = "inspect-root-identity"
+            let managed = IOSManagedFiles(root: root)
+            let identity = try managed.guardValue(root)
+            guard identity.isDirectory else { throw IOSFileError.invalid("Select an installation directory") }
+            let internalRoot = Self.contains(documents, root)
+            guard internalRoot || scoped else { throw IOSFileError.invalid("The selected installation root has no security-scoped authorization") }
+            // Keep selection lightweight; validate provider write capabilities only when creating an instance.
+            stage = "read-authorization-registry"
+            var roots = try records()
+            let key = roots.first(where: { $0.value["path"] as? String == root.path })?.key ?? UUID().uuidString
+            guard roots[key] != nil || roots.count < 32 else { throw IOSFileError.invalid("Installation root authorization capacity reached") }
+            var record: [String: Any] = ["path": root.path, "rootIdentity": identity.identity]
+            if internalRoot {
+                record["kind"] = "documents"
+                record["relativePath"] = root.path == documents.path ? "" : String(root.path.dropFirst(documents.path.count + 1))
+            } else {
+                stage = "create-security-scoped-bookmark"
+                let bookmark = try makeBookmark(selected)
+                guard !bookmark.isEmpty, bookmark.count <= 16384 else { throw IOSFileError.invalid("Installation root bookmark is invalid or oversized") }
+                record["kind"] = "bookmark"
+                record["bookmark"] = bookmark.base64EncodedString()
+            }
+            roots[key] = record
+            stage = "write-authorization-registry"
+            try files.writeJSON(["revision": 1, "roots": roots], to: registryURL)
+            NSLog("[IOSInstallationLocations] stage=complete scope=%@", String(scoped))
+            return root
+        } catch {
+            let nsError = error as NSError
+            NSLog("[IOSInstallationLocations] stage=%@ scope=%@ domain=%@ code=%ld", stage, String(scoped), nsError.domain, nsError.code)
+            throw IOSFileError.invalid("Installation folder selection failed at \(stage) [\(nsError.domain):\(nsError.code)]: \(error.localizedDescription)")
         }
-        let managed = IOSManagedFiles(root: root)
-        let identity = try managed.guardValue(root)
-        guard identity.isDirectory else { throw IOSFileError.invalid("Select an installation directory") }
-        let internalRoot = Self.contains(documents, root)
-        guard internalRoot || scoped else { throw IOSFileError.invalid("The selected installation root has no security-scoped authorization") }
-        // Do not coordinate a write or probe create/move/read capability while the
-        // document picker is returning. Files providers can authorize a folder yet
-        // reject eager writes, which made a valid selection look cancelled.
-        var roots = try records()
-        let key = roots.first(where: { $0.value["path"] as? String == root.path })?.key ?? UUID().uuidString
-        guard roots[key] != nil || roots.count < 32 else { throw IOSFileError.invalid("Installation root authorization capacity reached") }
-        var record: [String: Any] = ["path": root.path, "rootIdentity": identity.identity]
-        if internalRoot {
-            record["kind"] = "documents"
-            record["relativePath"] = root.path == documents.path ? "" : String(root.path.dropFirst(documents.path.count + 1))
-        } else {
-            let bookmark = try makeBookmark(selected)
-            guard !bookmark.isEmpty, bookmark.count <= 16384 else { throw IOSFileError.invalid("Installation root bookmark is invalid or oversized") }
-            record["kind"] = "bookmark"
-            record["bookmark"] = bookmark.base64EncodedString()
-        }
-        roots[key] = record
-        try files.writeJSON(["revision": 1, "roots": roots], to: registryURL)
-        return root
     }
 
     func validateExternalCapability(for location: IOSInstallationLocation) throws {
@@ -167,9 +176,18 @@ final class IOSInstallationLocations {
               let expectedPath = match.value["path"] as? String, let identity = match.value["rootIdentity"] as? String else {
             throw IOSFileError.invalid("Select this installation root again to grant persistent access; no default directory was used")
         }
-        let (scopedURL, stale) = try resolveBookmark(bookmark)
+        let scopedURL: URL
+        let stale: Bool
+        do { (scopedURL, stale) = try resolveBookmark(bookmark) }
+        catch {
+            let nsError = error as NSError
+            NSLog("[IOSInstallationLocations] stage=resolve-security-scoped-bookmark domain=%@ code=%ld", nsError.domain, nsError.code)
+            throw IOSFileError.invalid("Installation folder authorization could not be restored [\(nsError.domain):\(nsError.code)]: \(error.localizedDescription)")
+        }
         guard !stale, scopedURL.isFileURL else { throw IOSFileError.invalid("Installation root bookmark is stale; select the same directory again") }
-        guard startScope(scopedURL) else { throw IOSFileError.invalid("Installation root authorization was lost; select the same directory again") }
+        let scopeStarted = startScope(scopedURL)
+        NSLog("[IOSInstallationLocations] stage=restore-security-scope scope=%@", String(scopeStarted))
+        guard scopeStarted else { throw IOSFileError.invalid("Installation root authorization was lost; select the same directory again") }
         var retained = false
         defer { if !retained { stopScope(scopedURL) } }
         let root = scopedURL.resolvingSymlinksInPath().standardizedFileURL

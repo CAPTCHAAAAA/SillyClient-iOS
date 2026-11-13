@@ -88,6 +88,12 @@ test("new-instance wizard receives iOS identity and its installation picker call
   assert.match(source, /setNewInstancePathMode\("exact"\)/);
   assert.match(source, /if \(newInstanceMode === "local" && !cleanInstallPath\(newInstanceDir\)\)/);
   assert.match(source, /请先点「浏览」选择实例安装目录（必选）/);
+
+  const picker = source.slice(source.indexOf("const handlePickInstallFolder"), source.indexOf("// 实例列表持久化", source.indexOf("const handlePickInstallFolder")));
+  assert.match(picker, /shouldShowDirectoryPickerError\(error, isIOS\)/);
+  assert.match(picker, /\}, \[isAndroid, isIOS\]\)/);
+  const pickerErrorHandler = picker.slice(picker.lastIndexOf("} catch (error)"));
+  assert.doesNotMatch(pickerErrorHandler, /setNewInstanceDir\(""\)/);
 });
 
 test("iOS storage wiring preserves platform affordances and requests installation bookmark access", () => {

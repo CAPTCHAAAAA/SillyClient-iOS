@@ -57,6 +57,18 @@ test("document-provider URIs cannot be disguised as executable install paths", (
   assert.throws(() => location.exactInstallTarget("content://provider/tree/test", "exact", "local-100"));
 });
 
+test("iOS picker hides only its explicit cancellation code, not provider errors mentioning cancellation", () => {
+  assert.equal(location.shouldShowDirectoryPickerError({ code: "PICKER_CANCELLED", message: "Selection cancelled" }, true), false);
+  assert.equal(location.shouldShowDirectoryPickerError(new Error("PICKER_CANCELLED"), true), false);
+  assert.equal(location.shouldShowDirectoryPickerError(new Error("NSFileProviderError: operation cancelled by provider"), true), true);
+  assert.equal(location.shouldShowDirectoryPickerError(new Error("Selection cancelled"), true), true);
+});
+
+test("non-iOS picker cancellation keeps the existing message-based behavior", () => {
+  assert.equal(location.shouldShowDirectoryPickerError(new Error("Selection cancelled"), false), false);
+  assert.equal(location.shouldShowDirectoryPickerError(new Error("Permission denied"), false), true);
+});
+
 test("normalizeInstanceIdentity strictly produces ASCII characters satisfying ^[A-Za-z0-9_-]{1,128}$", () => {
   const regex = /^[A-Za-z0-9_-]{1,128}$/;
   assert.ok(regex.test(location.normalizeInstanceIdentity("")));

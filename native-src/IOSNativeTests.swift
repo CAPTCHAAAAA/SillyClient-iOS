@@ -310,6 +310,31 @@ enum IOSNativeTests {
                 try denied.validateExternalCapability(for: deniedLocation)
             }
         }
+        test("Foundation bookmark round trip retains a selected external sibling root across recreation") { root, _ in
+            let documents = root.appendingPathComponent("documents", isDirectory: true)
+            let selected = root.appendingPathComponent("selected-sibling", isDirectory: true)
+            try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: true)
+            var scopeStarts = 0
+            var scopeStops = 0
+            func locations() -> IOSInstallationLocations {
+                IOSInstallationLocations(documents: documents,
+                    startScope: { _ in scopeStarts += 1; return true },
+                    stopScope: { _ in scopeStops += 1 },
+                    externalCapability: { _ in })
+            }
+
+            try require(locations().select(selected).path == selected.path, "Foundation bookmark selection changed the external root")
+            let target = selected.appendingPathComponent("fixture-instance", isDirectory: true)
+            var lease: IOSInstallationLocation? = try locations().acquire(target)
+            try require(lease?.root.path == selected.path, "Foundation bookmark did not resolve to the selected root")
+            try lease!.files.createDirectory(target)
+            let marker = target.appendingPathComponent("bookmark-round-trip.txt")
+            try lease!.files.write(Data("bookmark persisted".utf8), to: marker)
+            try require(lease!.files.data(marker) == Data("bookmark persisted".utf8), "Recreated authority could not read and write the selected root")
+            lease = nil
+            try require(scopeStarts == 2 && scopeStops == 2, "Bookmark round trip leaked a synthetic security-scope lease")
+        }
         test("Custom installation commits at the selected root and can recover registration without replacing data") { root, files in
             let store = IOSInstanceStore(root: root)
             let selected = root.appendingPathComponent("selected-root")

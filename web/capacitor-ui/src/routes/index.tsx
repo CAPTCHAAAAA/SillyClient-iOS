@@ -15,7 +15,7 @@ import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG, normalizeRenderEngineSettings } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
 import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId, RenderEngineSettings } from "@/capacitor-plugin";
-import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection, instanceParentPath, sanitizeFolderName } from "@/lib/install-location";
+import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection, instanceParentPath, sanitizeFolderName, shouldShowDirectoryPickerError } from "@/lib/install-location";
 import { humanizeNativeError } from "@/lib/native-errors";
 import { selectTavernRelease } from "@/lib/tavern-release";
 import { normalizeStoredInstances, serializeInstanceRecords, type StoredInstance } from "@/lib/instance-persistence";
@@ -881,9 +881,9 @@ function SillyClientLauncher() {
     } catch (error) {
       if (generation !== directoryPickerGeneration.current) return;
       const message = error instanceof Error ? error.message : String(error);
-      if (!/cancel/i.test(message)) setNewInstanceError(message);
+      if (shouldShowDirectoryPickerError(error, isIOS)) setNewInstanceError(message);
     }
-  }, [isAndroid]);
+  }, [isAndroid, isIOS]);
 
   // 实例列表持久化到 localStorage
   useEffect(() => {

@@ -2,6 +2,14 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-13 iOS v1.14.2 Build 45 安装目录选择修正（CI 与真实 iPhone Files provider 验证待执行）
+
+- **Build 44 仍未解决的点**：其 bookmark 创建/解析使用 raw security-scope flags；iOS 官方目录授权流程应使用 `.minimalBookmark` 创建、默认 options 解析。此前 Foundation closures 均被测试替身覆盖，未验证真实 Foundation bookmark 往返。
+- **修正**：恢复 iOS bookmark 官方调用；新增 Foundation bookmark 创建、重建解析、所选外置目录读写和 scope 释放测试。选择与 bookmark 恢复失败会记录阶段、scope 返回值及 NSError domain/code；前端不再把含 `cancelled` 的 provider 错误当成用户取消静默吞掉，只忽略显式 `PICKER_CANCELLED`。
+- **版本**：保持 `1.14.2`，Build 升至 `45`。此修改不宣称已通过真实 iPhone Files/iCloud provider；需先通过 CI，再由用户在目标 iPhone 上复测。
+
+---
+
 ## 2026-11-13 iOS v1.14.2 Build 44 外部 Files 选择回调修复（待 CI 与真机验证）
 
 - **症状根因**：文件夹选择回调曾在 `locations.select` 内立即执行 `NSFileCoordinator` 写协调和创建/移动/读取能力探针；部分 iCloud/第三方 Files provider 会拒绝这些操作，导致系统已选中但前端没有回填。
