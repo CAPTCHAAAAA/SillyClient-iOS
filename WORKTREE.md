@@ -16,7 +16,10 @@
   - 依据用户指令升级至 `1.14.3`（Build `48`），更新 `native-src/Info.plist`、`ios/App/App/Info.plist`、`web/capacitor-ui/package.json`、`.github/workflows/build-ipa.yml`、`scripts/run-ios-e2e.mjs`、`tests/ios-ci.test.mjs`、`release/v1.14.3.md` 与 `release/CHANGELOG.md`；
   - 仅更新 iOS 并按紧急补丁跳过 Windows 与 Android（后续再整合）。
 - **验证与推送**：
-  - Windows 本地完成 `pnpm install --frozen-lockfile --offline`、TypeScript、Vite 构建、前端 CJS 测试、iOS Node 测试、`verify-ios-cloud.mjs --mock-mode`、镜像文件 SHA-256 一致性与工作区规则校验，随后推送 `lts/ios-release-hardening` 触发 GitHub Actions `macos-15` Swift 编译、48 组原生测试、Hosted Simulator E2E 与 IPA 构建。
+  - 提交 `f9b32da` 与 Swift 非可选绑定修复 `4f7c483` 已推送至 `origin/lts/ios-release-hardening`；
+  - GitHub Actions `macos-15` Run `43494192516`（耗时 15m35s）全绿通过：React 生产构建、Server No-WASM Smoke、48/48 组 Swift 原生 fixture（含 stale bookmark 身份校验恢复与持久化刷新）、24/24 阶段 Hosted Simulator E2E（`uiInteractionTested: false`）、arm64 Release Archive 与 IPA 打包均通过；
+  - 交付产物 `Local/artifacts/v1.14.3/SillyClient-iOS-v1.14.3-unsigned.ipa`（194,221,464 字节，SHA-256 `291fbb0fdaebde4bb4a0306ac0643436c3a25ce0f99fd63d6544c6874cbdc8c5`，与 CI `ipa-sha256.txt` 一致）；
+  - 真机 Files / iCloud provider UI 交互需在真机安装本包复测。随后快进合入并推送 `SillyClient_iOS/main`，在 `SillyClient_Main` 打 `v1.14.3` Tag 并发布 GitHub Release（按用户指令仅发 iOS 紧急补丁，跳过 Windows 与 Android）。
 
 ---
 
