@@ -62,18 +62,40 @@ final class IOSInstanceStore {
         guard mode != "root" || requested != nil else { throw IOSFileError.invalid("Root installation mode requires an explicit absolute root") }
         let requestedTarget = requested.map { mode == "root" ? $0.appendingPathComponent(id) : $0 }
         let registered = try records[id].map { try recordPath($0) }
-        if let registered = registered, let requestedTarget = requestedTarget, registered.path != requestedTarget.path {
+        let registeredGrant = records[id]?["grantId"] as? String
+        let registeredRelativePath = records[id]?["grantRelativePath"] as? String
+        let canResolveRegisteredGrant = registeredGrant != nil && registeredRelativePath != nil
+        if let registered = registered, let requestedTarget = requestedTarget,
+           registered.path != requestedTarget.path, !canResolveRegisteredGrant {
             throw IOSFileError.invalid("The requested path conflicts with the registered instance location")
         }
         let target = registered ?? requestedTarget ?? defaultURL
-        let location = try locations.acquire(target, grantId: records[id]?["grantId"] as? String)
+        let location: IOSInstallationLocation
+        if let registeredGrant, let registeredRelativePath {
+            location = try locations.acquire(grantId: registeredGrant, relativePath: registeredRelativePath)
+        } else {
+            location = try locations.acquire(target, grantId: registeredGrant)
+        }
+        if let registered = registered, let requestedTarget = requestedTarget,
+           registered.path != requestedTarget.path, location.directory.path != requestedTarget.path {
+            throw IOSFileError.invalid("The requested path conflicts with the registered instance location")
+        }
         try validateLocation(id, location: location, records: records)
         let managed = location.files
         if requireExisting || registered != nil {
-            let guardValue = try managed.guardValue(target)
+            let guardValue = try managed.guardValue(location.directory)
             guard guardValue.isDirectory else { throw IOSFileError.invalid("Instance directory is unavailable") }
             if let expected = records[id]?["directoryIdentity"] as? String, expected != guardValue.identity {
                 throw IOSFileError.invalid("The registered instance directory was replaced; its contents were preserved") }
+        }
+        let refreshGrantRecord = registered != nil && registeredGrant != nil &&
+            ((records[id]?["path"] as? String) != location.directory.path || registeredRelativePath == nil)
+        if refreshGrantRecord {
+            var updated = try registry()
+            if let prior = updated[id] {
+                updated[id] = try registrationRecord(id, location: location, previous: prior)
+                try files.writeJSON(updated, to: registryURL)
+            }
         }
         return location
     }
@@ -187,9 +209,11 @@ final class IOSInstanceStore {
         record["lastUsedAt"] = previous["lastUsedAt"] ?? now
         record["totalUsageMs"] = previous["totalUsageMs"] ?? 0
         record["grantId"] = nil
+        record["grantRelativePath"] = nil
         record["documentsRelativePath"] = nil
         if let grant = location.grantId { record["grantId"] = grant }
         else { record["documentsRelativePath"] = String(directory.path.dropFirst(documents.path.count + 1)) }
+        if location.grantRelativePath != nil { record["grantRelativePath"] = location.grantRelativePath }
         return record
     }
 
@@ -572,10 +596,20 @@ final class IOSInstanceStore {
         if pending {
             let record = records[id]!
             let target = try recordPath(record)
-            if let requested = try installPath.map({ try IOSInstallationLocations.path($0) }), requested.path != target.path {
+            let grant = record["grantId"] as? String
+            let relativePath = record["grantRelativePath"] as? String
+            let requested = try installPath.map { try IOSInstallationLocations.path($0) }
+            if let requested, requested.path != target.path, relativePath == nil {
                 throw IOSFileError.invalid("The deletion path conflicts with the registered instance location")
             }
-            location = try locations.acquire(target, grantId: record["grantId"] as? String)
+            if let grant, let relativePath {
+                location = try locations.acquire(grantId: grant, relativePath: relativePath)
+            } else {
+                location = try locations.acquire(target, grantId: grant)
+            }
+            if let requested, requested.path != target.path, requested.path != location.directory.path {
+                throw IOSFileError.invalid("The deletion path conflicts with the registered instance location")
+            }
             try validateLocation(id, location: location, records: records)
         } else {
             location = try self.location(id, installPath: installPath)

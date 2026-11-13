@@ -7,13 +7,16 @@ final class IOSInstallationLocation {
     let directory: URL
     let files: IOSManagedFiles
     let grantId: String?
+    let grantRelativePath: String?
     let rootIdentity: String
     private let release: () -> Void
 
-    init(root: URL, directory: URL, grantId: String?, identity: String, release: @escaping () -> Void = {}) {
+    init(root: URL, directory: URL, grantId: String?, grantRelativePath: String? = nil,
+         identity: String, release: @escaping () -> Void = {}) {
         self.root = root
         self.directory = directory
         self.grantId = grantId
+        self.grantRelativePath = grantRelativePath
         rootIdentity = identity
         files = IOSManagedFiles(root: root, expectedRootIdentity: identity)
         self.release = release
@@ -101,11 +104,17 @@ final class IOSInstallationLocations {
         return roots
     }
 
-    private static func requireLocalRuntime(_ root: URL) throws {
-        let values = try root.resourceValues(forKeys: [.isDirectoryKey, .isUbiquitousItemKey])
-        guard values.isDirectory == true, values.isUbiquitousItem != true else {
-            throw IOSFileError.invalid("Cloud-only installation roots cannot host the embedded runtime; select a local directory")
+    static func requireLocalAvailability(isUbiquitous: Bool?, downloadingStatus: URLUbiquitousItemDownloadingStatus?) throws {
+        guard isUbiquitous != true || downloadingStatus != .notDownloaded else {
+            throw IOSFileError.invalid("This iCloud installation folder is not downloaded locally; download it or choose a local folder")
         }
+    }
+
+    private static func requireLocalRuntime(_ root: URL) throws {
+        let values = try root.resourceValues(forKeys: [.isDirectoryKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+        guard values.isDirectory == true else { throw IOSFileError.invalid("Select an installation directory") }
+        try requireLocalAvailability(isUbiquitous: values.isUbiquitousItem,
+                                     downloadingStatus: values.ubiquitousItemDownloadingStatus)
         let managed = IOSManagedFiles(root: root)
         let probe = root.appendingPathComponent(".sillyclient-capability-\(UUID().uuidString)")
         // Probe only launcher-created files. No provider file is replaced or removed.
@@ -179,17 +188,35 @@ final class IOSInstallationLocations {
         try externalCapability(location.root)
     }
 
+    func acquire(grantId: String, relativePath: String) throws -> IOSInstallationLocation {
+        let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard !relativePath.isEmpty, relativePath.utf8.count <= 4096, !relativePath.contains("\\"),
+              !relativePath.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw IOSFileError.invalid("The registered installation path is invalid")
+        }
+        let roots = try records()
+        guard let record = roots[grantId], record["kind"] as? String == "bookmark",
+              let path = record["path"] as? String else {
+            throw IOSFileError.invalid("The registered installation root authorization is missing")
+        }
+        var target = URL(fileURLWithPath: path, isDirectory: true)
+        for part in parts { target.appendPathComponent(String(part)) }
+        return try acquire(target.standardizedFileURL, grantId: grantId)
+    }
+
     func acquire(_ target: URL, grantId: String? = nil) throws -> IOSInstallationLocation {
-        if Self.contains(documents, target) {
+        let requestedTarget = target.standardizedFileURL
+        if Self.contains(documents, requestedTarget) {
             let identity = try files.guardValue(documents).identity
-            _ = try files.checked(target, allowMissing: true)
-            return IOSInstallationLocation(root: documents, directory: target, grantId: nil, identity: identity)
+            _ = try files.checked(requestedTarget, allowMissing: true)
+            return IOSInstallationLocation(root: documents, directory: requestedTarget, grantId: nil, identity: identity)
         }
         let roots = try records()
         let matches = roots.filter { entry in
             guard entry.value["kind"] as? String == "bookmark",
                   let path = entry.value["path"] as? String else { return false }
-            return (grantId == nil || entry.key == grantId) && Self.contains(URL(fileURLWithPath: path), target)
+            return (grantId == nil || entry.key == grantId) && Self.contains(URL(fileURLWithPath: path), requestedTarget)
         }.sorted { ($0.value["path"] as? String ?? "").count > ($1.value["path"] as? String ?? "").count }
         guard let match = matches.first, let encoded = match.value["bookmark"] as? String,
               encoded.utf8.count <= 21848, let bookmark = Data(base64Encoded: encoded),
@@ -210,15 +237,34 @@ final class IOSInstallationLocations {
         guard scopeStarted else { throw IOSFileError.invalid("Installation root authorization was lost; select the same directory again") }
         var retained = false
         defer { if !retained { stopScope(scopedURL) } }
-        let root = scopedURL.resolvingSymlinksInPath().standardizedFileURL
-        guard root.path == expectedPath else { throw IOSFileError.invalid("Installation root bookmark moved to another location; no runtime was substituted") }
-        let managed = IOSManagedFiles(root: root, expectedRootIdentity: identity)
-        guard try managed.guardValue(root).isDirectory else { throw IOSFileError.invalid("Installation root is unavailable") }
-        _ = try managed.checked(target, allowMissing: true)
-        let values = try root.resourceValues(forKeys: [.isUbiquitousItemKey])
-        guard values.isUbiquitousItem != true else { throw IOSFileError.invalid("The selected installation root is not locally available") }
+        let relativePath = requestedTarget.path == expectedPath ? "" : String(requestedTarget.path.dropFirst(expectedPath.count + 1))
+        var root: URL?
+        var directory: URL?
+        try coordinateRead(scopedURL) { coordinatedURL in
+            let coordinatedRoot = coordinatedURL.resolvingSymlinksInPath().standardizedFileURL
+            let unpinned = IOSManagedFiles(root: coordinatedRoot)
+            let rootGuard = try unpinned.guardValue(coordinatedRoot)
+            guard rootGuard.isDirectory else { throw IOSFileError.invalid("Installation root is unavailable") }
+            guard rootGuard.identity == identity else {
+                throw IOSFileError.invalid("Installation root bookmark now points to a different directory; its contents were preserved")
+            }
+            let managed = IOSManagedFiles(root: coordinatedRoot, expectedRootIdentity: identity)
+            let mappedDirectory = relativePath.isEmpty ? coordinatedRoot :
+                coordinatedRoot.appendingPathComponent(relativePath, isDirectory: requestedTarget.hasDirectoryPath).standardizedFileURL
+            guard Self.contains(coordinatedRoot, mappedDirectory) else {
+                throw IOSFileError.invalid("Installation target is outside its authorized root")
+            }
+            _ = try managed.checked(mappedDirectory, allowMissing: true)
+            root = coordinatedRoot
+            directory = mappedDirectory
+        }
+        guard let root, let directory else { throw IOSFileError.invalid("The file provider did not restore the authorized directory") }
+        let values = try root.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+        try Self.requireLocalAvailability(isUbiquitous: values.isUbiquitousItem,
+                                          downloadingStatus: values.ubiquitousItemDownloadingStatus)
         retained = true
-        return IOSInstallationLocation(root: root, directory: target, grantId: match.key, identity: identity) {
+        return IOSInstallationLocation(root: root, directory: directory, grantId: match.key,
+                                       grantRelativePath: relativePath, identity: identity) {
             self.stopScope(scopedURL)
         }
     }

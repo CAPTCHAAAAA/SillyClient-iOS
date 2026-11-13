@@ -264,6 +264,14 @@ enum IOSNativeTests {
             let unavailable = try recreated.records().first { $0["instanceId"] as? String == "custom-instance" }
             try require(unavailable?["status"] as? String == "unavailable", "Unavailable registration disappeared from scan")
         }
+        test("Downloaded iCloud installation roots pass local availability while cloud-only roots fail closed") { _, _ in
+            try IOSInstallationLocations.requireLocalAvailability(isUbiquitous: true, downloadingStatus: .current)
+            try IOSInstallationLocations.requireLocalAvailability(isUbiquitous: true, downloadingStatus: .downloaded)
+            try IOSInstallationLocations.requireLocalAvailability(isUbiquitous: false, downloadingStatus: .notDownloaded)
+            try rejects("Cloud-only installation root was treated as local") {
+                try IOSInstallationLocations.requireLocalAvailability(isUbiquitous: true, downloadingStatus: .notDownloaded)
+            }
+        }
         test("Persistent external root bookmarks retain bounded leases and fail closed after lost authorization") { root, files in
             let documents = root.appendingPathComponent("documents")
             let selected = root.appendingPathComponent("external-root")
@@ -339,10 +347,14 @@ enum IOSNativeTests {
             let documents = root.appendingPathComponent("documents", isDirectory: true)
             let pickerURL = root.appendingPathComponent("provider-entry", isDirectory: true)
             let coordinatedURL = root.appendingPathComponent("coordinated-entry", isDirectory: true)
+            let relocatedURL = root.appendingPathComponent("relocated-entry", isDirectory: true)
+            let replacementURL = root.appendingPathComponent("replacement-entry", isDirectory: true)
             try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: pickerURL, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: coordinatedURL, withIntermediateDirectories: true)
-            try FileManager.default.createSymbolicLink(at: pickerURL, withDestinationURL: coordinatedURL)
+            try FileManager.default.createDirectory(at: replacementURL, withIntermediateDirectories: true)
             var bookmarkURL: URL?
+            var currentAccessorURL = coordinatedURL
             var scopeStarts = 0
             var scopeStops = 0
             let locations = IOSInstallationLocations(documents: documents,
@@ -352,15 +364,55 @@ enum IOSNativeTests {
                 stopScope: { _ in scopeStops += 1 },
                 coordinateRead: { selected, accessor in
                     try require(selected == pickerURL, "Coordinator did not receive the picker URL")
-                    try accessor(coordinatedURL)
+                    try accessor(currentAccessorURL)
                 },
                 externalCapability: { _ in })
 
             let selectedRoot = try locations.select(pickerURL)
             try require(selectedRoot.path == coordinatedURL.path, "Selection ignored the provider accessor URL")
             try require(bookmarkURL == pickerURL, "Bookmark did not retain the original picker authorization")
-            let lease = try locations.acquire(coordinatedURL.appendingPathComponent("instance"))
-            try require(lease.root.path == coordinatedURL.path, "Persistent authorization changed the coordinated root")
+            let store = IOSInstanceStore(root: documents, locations: locations)
+            var lease: IOSInstallationLocation? = try store.location("provider-instance", installPath: selectedRoot.path,
+                installPathMode: "root", requireExisting: false)
+            let instanceURL = coordinatedURL.appendingPathComponent("provider-instance", isDirectory: true)
+            try require(lease?.root.path == coordinatedURL.path, "Persistent authorization changed the coordinated root")
+            try require(lease?.directory.path == instanceURL.path, "Create path was not remapped to the coordinated root")
+            try lease!.files.createDirectory(instanceURL)
+            try lease!.files.write(Data("provider root retained".utf8), to: instanceURL.appendingPathComponent("marker.txt"))
+            try require(lease!.files.data(instanceURL.appendingPathComponent("marker.txt")) == Data("provider root retained".utf8),
+                        "Creation could not use the restored coordinated directory")
+            lease = nil
+
+            try FileManager.default.moveItem(at: coordinatedURL, to: relocatedURL)
+            currentAccessorURL = relocatedURL
+            var reopened: IOSInstallationLocation? = try store.location("provider-instance", installPath: selectedRoot.path,
+                installPathMode: "root", requireExisting: true)
+            let relocatedInstance = relocatedURL.appendingPathComponent("provider-instance", isDirectory: true)
+            try require(reopened?.directory.path == relocatedInstance.path, "Existing instance did not follow the coordinated root path change")
+            try require(reopened!.files.data(relocatedInstance.appendingPathComponent("marker.txt")) == Data("provider root retained".utf8),
+                        "Reopened instance did not retain its existing data")
+            let record = try store.registrationRecord("provider-instance", location: reopened!)
+            try files.writeJSON(["provider-instance": record], to: store.registryURL)
+            reopened = nil
+
+            var reopenedFromRegistry: IOSInstallationLocation? = try store.location("provider-instance",
+                installPath: relocatedInstance.path, requireExisting: true)
+            try require(reopenedFromRegistry?.directory.path == relocatedInstance.path,
+                        "Persisted instance path could not resolve through its original grant")
+            try require(reopenedFromRegistry!.files.data(relocatedInstance.appendingPathComponent("marker.txt")) == Data("provider root retained".utf8),
+                        "Persisted instance lookup lost its existing data")
+            reopenedFromRegistry = nil
+            try rejects("Persisted grant accepted an unrelated requested path") {
+                _ = try store.location("provider-instance", installPath: replacementURL.appendingPathComponent("provider-instance").path,
+                    requireExisting: true)
+            }
+
+            currentAccessorURL = replacementURL
+            try rejects("A bookmark resolving to a different directory identity was trusted") {
+                _ = try store.location("provider-instance-2", installPath: selectedRoot.path,
+                    installPathMode: "root", requireExisting: false)
+            }
+            try require(scopeStarts == scopeStops, "Rejected provider mapping leaked its security scope")
 
             let denied = IOSInstallationLocations(documents: documents,
                 startScope: { _ in scopeStarts += 1; return true },

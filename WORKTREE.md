@@ -2,7 +2,24 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
-## 2026-11-13 iOS v1.14.2 Build 45 安装目录选择修正（CI 与真实 iPhone Files provider 验证待执行）
+## 2026-11-13 iOS v1.14.2 Build 47 安装目录授权恢复修复
+
+- **Build 46 的漏测断点**：选择时保存的是 `NSFileCoordinator` accessor 路径，bookmark 却指向 picker URL；恢复时旧代码要求两者路径相等。现有回归用符号链接模拟差异，`resolvingSymlinksInPath()` 把路径合并，漏掉了真实 provider 可能返回不同 accessor URL 的情形。
+- **修复**：bookmark 继续作为安全作用域授权来源；恢复时重新协调取得当前 accessor URL，验证原目录 inode 身份，再将授权根下的相对实例路径映射至当前 accessor 根。实例记录持久化授权相对路径，因此 provider 后续改变 accessor 前缀后，既有实例仍可重新打开；不匹配的手动路径仍拒绝。iCloud 仅在明确 `notDownloaded` 时拒绝，已下载目录仍需通过实际本地读写能力探针。
+- **回归**：使用互不相关目录覆盖选择、实例目录创建、provider 根路径变化后重开已有实例、持久化 grant 映射、错误路径拒绝和被替换目录身份拒绝；不再用符号链接模拟 accessor 差异。
+- **验证边界**：本地 iOS Node 回归 `118/118` 通过；Windows 主机没有 Swift/Xcode，原生测试与 hosted simulator 必须由 macOS CI 执行。CI 不点击真实 Files picker，真实 iPhone provider 仍需安装 Build 47 复测。
+- **版本/发布**：保持 `1.14.2`，Build `47`；CI、IPA 校验值及 GitHub Release 替换结果待完成后补记。
+
+---
+
+## 2026-11-13 iOS v1.14.2 Build 46 已替换 Build 45
+
+- Build 46 是当前已发布版本，资产仅包含 iOS IPA 与 SHA-256 校验文件。Build 47 通过 CI 并验证产物后再替换当前 Release 资产；不修改其他平台。
+- Build 46 hosted simulator E2E 通过 Debug harness 注入安装路径，没有真实操作 `UIDocumentPickerViewController`，不能作为 Files 选择链路验收。
+
+---
+
+## 2026-11-13 iOS v1.14.2 Build 45 中间修正（已由 Build 46 替代）
 
 - **Build 44 仍未解决的点**：其 bookmark 创建/解析使用 raw security-scope flags；iOS 官方目录授权流程应使用 `.minimalBookmark` 创建、默认 options 解析。此前 Foundation closures 均被测试替身覆盖，未验证真实 Foundation bookmark 往返。
 - **修正**：恢复 iOS bookmark 官方调用；新增 Foundation bookmark 创建、重建解析、所选外置目录读写和 scope 释放测试。选择与 bookmark 恢复失败会记录阶段、scope 返回值及 NSError domain/code；前端不再把含 `cancelled` 的 provider 错误当成用户取消静默吞掉，只忽略显式 `PICKER_CANCELLED`。

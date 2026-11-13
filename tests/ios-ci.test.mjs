@@ -55,7 +55,7 @@ test('simulator acceptance does not claim synthetic showcase interactions', () =
     const runner = read('scripts/run-ios-e2e.mjs');
     assert.doesNotMatch(runner, /__SC_TEST__|evalInConsole|uiStepsShowcased|setWizardMode|setManageTab/);
     assert.match(runner, /uiInteractionTested: false/);
-    assert.match(runner, /const nativeFixtureGroups = 47;/);
+    assert.match(runner, /const nativeFixtureGroups = 48;/);
 });
 
 test('copy migration is explicitly whitelisted only in the Debug test harness', () => {
@@ -114,7 +114,7 @@ test('unsigned artifact version and monotonic native build agree', () => {
     const workflow = read('.github/workflows/build-ipa.yml');
     assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.2<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 46);
+    assert.equal(build, 47);
     assert.match(workflow, /SillyClient-iOS-v1\.14\.2-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
@@ -318,7 +318,12 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.doesNotMatch(locations, /BookmarkResolutionOptions\(rawValue:/);
     assert.match(locations, /guard !stale, scopedURL\.isFileURL/);
     assert.match(locations, /guard scopeStarted/);
-    assert.match(locations, /root\.path == expectedPath/);
+    assert.doesNotMatch(locations, /root\.path == expectedPath/);
+    assert.match(locations, /rootGuard\.identity == identity/);
+    assert.match(locations, /coordinateRead\(scopedURL\)/);
+    assert.match(locations, /appendingPathComponent\(relativePath/);
+    assert.match(locations, /ubiquitousItemDownloadingStatusKey/);
+    assert.match(locations, /downloadingStatus != \.notDownloaded/);
     assert.match(locations, /coordinator\.coordinate\(readingItemAt: url/);
     assert.match(locations, /coordinateRead\(selected\) \{ coordinatedURL in/);
     assert.doesNotMatch(locations, /NSFileCoordinator\(\)\.coordinate\(writingItemAt: selected/);
@@ -326,6 +331,8 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(locations, /expectedRootIdentity: identity/);
     assert.match(locations, /deinit \{ release\(\) \}/);
     assert.match(store, /mode == "root" \? \$0\.appendingPathComponent\(id\) : \$0/);
+    assert.match(store, /managed\.guardValue\(location\.directory\)/);
+    assert.match(store, /"grantRelativePath"/);
     assert.match(store, /documentsRelativePath/);
     assert.match(store, /recoverRegistration\(id, location: location\)/);
     assert.match(store, /"status"\] = "unavailable"/);
@@ -342,6 +349,9 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(plugin, /IOSInstallationLocations\.contains\(self\.store\.documents, candidate\)/);
     assert.match(plugin, /action == "installDir"[\s\S]*locations\.select\(selected\)/);
     assert.match(plugin, /DispatchQueue\.main\.async \{ call\.resolve\(result\) \}/);
+    assert.match(read('native-src/IOSNativeTests.swift'), /Create path was not remapped to the coordinated root/);
+    assert.match(read('native-src/IOSNativeTests.swift'), /A bookmark resolving to a different directory identity was trusted/);
+    assert.match(read('native-src/IOSNativeTests.swift'), /Persisted instance path could not resolve through its original grant/);
     assert.equal(plugin, read('ios/App/App/TarvenEnvPlugin.swift'));
 });
 
