@@ -88,12 +88,13 @@ final class IOSInstanceStore {
             if let expected = records[id]?["directoryIdentity"] as? String, expected != guardValue.identity {
                 throw IOSFileError.invalid("The registered instance directory was replaced; its contents were preserved") }
         }
-        let refreshGrantRecord = registered != nil && registeredGrant != nil &&
-            ((records[id]?["path"] as? String) != location.directory.path || registeredRelativePath == nil)
+        let refreshGrantRecord = registered != nil && registeredGrant != nil && registeredRelativePath == nil
         if refreshGrantRecord {
             var updated = try registry()
             if let prior = updated[id] {
-                updated[id] = try registrationRecord(id, location: location, previous: prior)
+                var refreshed = try registrationRecord(id, location: location, previous: prior)
+                refreshed["path"] = prior["path"]
+                updated[id] = refreshed
                 try files.writeJSON(updated, to: registryURL)
             }
         }

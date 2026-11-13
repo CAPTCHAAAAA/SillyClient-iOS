@@ -351,7 +351,7 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(plugin, /DispatchQueue\.main\.async \{ call\.resolve\(result\) \}/);
     assert.match(read('native-src/IOSNativeTests.swift'), /Create path was not remapped to the coordinated root/);
     assert.match(read('native-src/IOSNativeTests.swift'), /A bookmark resolving to a different directory identity was trusted/);
-    assert.match(read('native-src/IOSNativeTests.swift'), /Persisted instance path could not resolve through its original grant/);
+    assert.match(read('native-src/IOSNativeTests.swift'), /Repeated preflight and creation lookups did not resolve the original selected path/);
     assert.equal(plugin, read('ios/App/App/TarvenEnvPlugin.swift'));
 });
 

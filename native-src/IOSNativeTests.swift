@@ -381,6 +381,8 @@ enum IOSNativeTests {
             try lease!.files.write(Data("provider root retained".utf8), to: instanceURL.appendingPathComponent("marker.txt"))
             try require(lease!.files.data(instanceURL.appendingPathComponent("marker.txt")) == Data("provider root retained".utf8),
                         "Creation could not use the restored coordinated directory")
+            let initialRecord = try store.registrationRecord("provider-instance", location: lease!)
+            try store.files.writeJSON(["provider-instance": initialRecord], to: store.registryURL)
             lease = nil
 
             try FileManager.default.moveItem(at: coordinatedURL, to: relocatedURL)
@@ -391,17 +393,22 @@ enum IOSNativeTests {
             try require(reopened?.directory.path == relocatedInstance.path, "Existing instance did not follow the coordinated root path change")
             try require(reopened!.files.data(relocatedInstance.appendingPathComponent("marker.txt")) == Data("provider root retained".utf8),
                         "Reopened instance did not retain its existing data")
-            let record = try store.registrationRecord("provider-instance", location: reopened!)
-            try files.writeJSON(["provider-instance": record], to: store.registryURL)
             reopened = nil
 
-            var reopenedFromRegistry: IOSInstallationLocation? = try store.location("provider-instance",
-                installPath: relocatedInstance.path, requireExisting: true)
+            var reopenedFromRegistry: IOSInstallationLocation? = try store.location("provider-instance", installPath: selectedRoot.path,
+                installPathMode: "root", requireExisting: true)
             try require(reopenedFromRegistry?.directory.path == relocatedInstance.path,
-                        "Persisted instance path could not resolve through its original grant")
+                        "The original exact installation path did not survive a changed provider accessor")
             try require(reopenedFromRegistry!.files.data(relocatedInstance.appendingPathComponent("marker.txt")) == Data("provider root retained".utf8),
                         "Persisted instance lookup lost its existing data")
             reopenedFromRegistry = nil
+            let stablePath = try store.registry()["provider-instance"]?["path"] as? String
+            try require(stablePath == instanceURL.path, "Provider accessor URL replaced the stable selected path alias")
+            var reopenedFromStablePath: IOSInstallationLocation? = try store.location("provider-instance", installPath: selectedRoot.path,
+                installPathMode: "root", requireExisting: true)
+            try require(reopenedFromStablePath?.directory.path == relocatedInstance.path,
+                        "Repeated preflight and creation lookups did not resolve the original selected path")
+            reopenedFromStablePath = nil
             try rejects("Persisted grant accepted an unrelated requested path") {
                 _ = try store.location("provider-instance", installPath: replacementURL.appendingPathComponent("provider-instance").path,
                     requireExisting: true)
