@@ -78,3 +78,11 @@ test("normalizeInstanceIdentity strictly produces ASCII characters satisfying ^[
   assert.equal(location.normalizeInstanceIdentity("test_instance-123"), "test_instance-123");
   assert.ok(regex.test(location.normalizeInstanceIdentity("  ...---special###!!!$$$   ")));
 });
+
+test("humanizeNativeError translates iOS provider and bookmark diagnostics cleanly", () => {
+  const nativeErrors = loadSource(path.join(__dirname, "../src/lib/native-errors.ts"));
+  assert.match(nativeErrors.humanizeNativeError("Installation root bookmark is stale; select the same directory again"), /持久化访问授权已失效/);
+  assert.match(nativeErrors.humanizeNativeError("This iCloud installation folder is not downloaded locally; download it or choose a local folder"), /iCloud 文件夹尚未下载/);
+  assert.match(nativeErrors.humanizeNativeError("The selected provider cannot retain local runtime files [NSPOSIXErrorDomain:45]: Operation not supported"), /不支持直接运行本地酒馆文件/);
+  assert.match(nativeErrors.humanizeNativeError("Installation folder selection failed at coordinate-selected-directory [NSCocoaErrorDomain:257]: Permission denied"), /目录选择失败（coordinate-selected-directory NSCocoaErrorDomain:257）/);
+});

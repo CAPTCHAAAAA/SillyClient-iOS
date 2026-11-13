@@ -37,7 +37,7 @@ final class IOSInstallationLocations {
 
     init(documents: URL,
          makeBookmark: @escaping (URL) throws -> Data = {
-             return try $0.bookmarkData(options: .minimalBookmark,
+             return try $0.bookmarkData(options: [],
                                         includingResourceValuesForKeys: nil, relativeTo: nil)
          },
          resolveBookmark: @escaping (Data) throws -> (URL, Bool) = {
@@ -51,7 +51,7 @@ final class IOSInstallationLocations {
              let coordinator = NSFileCoordinator(filePresenter: nil)
              var coordinationError: NSError?
              var accessorError: Error?
-             coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+             coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinationError) { coordinatedURL in
                  do { try accessor(coordinatedURL) }
                  catch { accessorError = error }
              }
@@ -104,6 +104,14 @@ final class IOSInstallationLocations {
         return roots
     }
 
+    private func refreshBookmark(_ bookmark: Data, for key: String) throws {
+        var roots = try records()
+        guard var entry = roots[key], entry["kind"] as? String == "bookmark" else { return }
+        entry["bookmark"] = bookmark.base64EncodedString()
+        roots[key] = entry
+        try files.writeJSON(["revision": 1, "roots": roots], to: registryURL)
+    }
+
     static func requireLocalAvailability(isUbiquitous: Bool?, downloadingStatus: URLUbiquitousItemDownloadingStatus?) throws {
         guard isUbiquitous != true || downloadingStatus != .notDownloaded else {
             throw IOSFileError.invalid("This iCloud installation folder is not downloaded locally; download it or choose a local folder")
@@ -117,15 +125,30 @@ final class IOSInstallationLocations {
                                      downloadingStatus: values.ubiquitousItemDownloadingStatus)
         let managed = IOSManagedFiles(root: root)
         let probe = root.appendingPathComponent(".sillyclient-capability-\(UUID().uuidString)")
-        // Probe only launcher-created files. No provider file is replaced or removed.
-        try managed.createExclusiveDirectory(probe)
-        defer { try? FileManager.default.removeItem(at: managed.checked(probe)) }
-        let first = probe.appendingPathComponent("first")
-        let second = probe.appendingPathComponent("second")
-        let bytes = Data("sillyclient-local-runtime".utf8)
-        try managed.write(bytes, to: first, replace: false)
-        try managed.move(first, to: second)
-        guard try managed.data(second) == bytes else { throw IOSFileError.invalid("The selected provider cannot retain local runtime files") }
+        // Probe only launcher-created files inside write coordination. No provider file is replaced or removed.
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var probeError: Error?
+        coordinator.coordinate(writingItemAt: probe, options: .forReplacing, error: &coordinationError) { coordinatedProbe in
+            do {
+                let targetProbe = coordinatedProbe.resolvingSymlinksInPath().standardizedFileURL
+                try managed.createExclusiveDirectory(targetProbe)
+                defer { try? FileManager.default.removeItem(at: managed.checked(targetProbe)) }
+                let first = targetProbe.appendingPathComponent("first")
+                let second = targetProbe.appendingPathComponent("second")
+                let bytes = Data("sillyclient-local-runtime".utf8)
+                try managed.write(bytes, to: first, replace: false)
+                try managed.move(first, to: second)
+                guard try managed.data(second) == bytes else { throw IOSFileError.invalid("The selected provider cannot retain local runtime files") }
+            } catch {
+                probeError = error
+            }
+        }
+        if let error = coordinationError ?? probeError {
+            let nsError = error as NSError
+            if let fileError = error as? IOSFileError { throw fileError }
+            throw IOSFileError.invalid("The selected provider cannot retain local runtime files [\(nsError.domain):\(nsError.code)]: \(error.localizedDescription)")
+        }
     }
 
     @discardableResult
@@ -140,6 +163,7 @@ final class IOSInstallationLocations {
             defer { if scoped { stopScope(selected) } }
             var root: URL?
             var rootIdentity: String?
+            var bookmarkData: Data?
             stage = "coordinate-selected-directory"
             try coordinateRead(selected) { coordinatedURL in
                 stage = "inspect-coordinated-directory"
@@ -151,6 +175,18 @@ final class IOSInstallationLocations {
                 guard identity.isDirectory else { throw IOSFileError.invalid("Select an installation directory") }
                 root = candidate
                 rootIdentity = identity.identity
+                if !Self.contains(self.documents, candidate) {
+                    stage = "create-security-scoped-bookmark"
+                    do {
+                        bookmarkData = try self.makeBookmark(selected)
+                    } catch let primaryError {
+                        if let coordinatedBookmark = try? self.makeBookmark(coordinatedURL), !coordinatedBookmark.isEmpty {
+                            bookmarkData = coordinatedBookmark
+                        } else {
+                            throw primaryError
+                        }
+                    }
+                }
             }
             guard let root, let rootIdentity else { throw IOSFileError.invalid("The file provider did not provide an authorized directory URL") }
             let internalRoot = Self.contains(documents, root)
@@ -165,9 +201,9 @@ final class IOSInstallationLocations {
                 record["kind"] = "documents"
                 record["relativePath"] = root.path == documents.path ? "" : String(root.path.dropFirst(documents.path.count + 1))
             } else {
-                stage = "create-security-scoped-bookmark"
-                let bookmark = try makeBookmark(selected)
-                guard !bookmark.isEmpty, bookmark.count <= 16384 else { throw IOSFileError.invalid("Installation root bookmark is invalid or oversized") }
+                guard let bookmark = bookmarkData, !bookmark.isEmpty, bookmark.count <= 16384 else {
+                    throw IOSFileError.invalid("Installation root bookmark is invalid or oversized")
+                }
                 record["kind"] = "bookmark"
                 record["bookmark"] = bookmark.base64EncodedString()
             }
@@ -231,9 +267,9 @@ final class IOSInstallationLocations {
             NSLog("[IOSInstallationLocations] stage=resolve-security-scoped-bookmark domain=%@ code=%ld", nsError.domain, nsError.code)
             throw IOSFileError.invalid("Installation folder authorization could not be restored [\(nsError.domain):\(nsError.code)]: \(error.localizedDescription)")
         }
-        guard !stale, scopedURL.isFileURL else { throw IOSFileError.invalid("Installation root bookmark is stale; select the same directory again") }
+        guard scopedURL.isFileURL else { throw IOSFileError.invalid("Installation root bookmark is invalid; select the same directory again") }
         let scopeStarted = startScope(scopedURL)
-        NSLog("[IOSInstallationLocations] stage=restore-security-scope scope=%@", String(scopeStarted))
+        NSLog("[IOSInstallationLocations] stage=restore-security-scope scope=%@ stale=%@", String(scopeStarted), String(stale))
         guard scopeStarted else { throw IOSFileError.invalid("Installation root authorization was lost; select the same directory again") }
         var retained = false
         defer { if !retained { stopScope(scopedURL) } }
@@ -247,6 +283,11 @@ final class IOSInstallationLocations {
             guard rootGuard.isDirectory else { throw IOSFileError.invalid("Installation root is unavailable") }
             guard rootGuard.identity == identity else {
                 throw IOSFileError.invalid("Installation root bookmark now points to a different directory; its contents were preserved")
+            }
+            if stale,
+               let refreshed = (try? self.makeBookmark(scopedURL)) ?? (try? self.makeBookmark(coordinatedURL)),
+               !refreshed.isEmpty, refreshed.count <= 16384 {
+                try? self.refreshBookmark(refreshed, for: match.key)
             }
             let managed = IOSManagedFiles(root: coordinatedRoot, expectedRootIdentity: identity)
             let mappedDirectory = relativePath.isEmpty ? coordinatedRoot :

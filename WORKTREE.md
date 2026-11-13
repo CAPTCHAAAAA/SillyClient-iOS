@@ -2,6 +2,24 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-14 iOS v1.14.3 (Build 48) 路径/文件选择失败紧急修复与升版
+
+- **本地记录核对结果**：
+  - `Local/docs/CURRENT_STATE.md` 与 `Local/docs/AGENT_HANDOVER.md` 此前仅更新到 Build 46（记录其仍存在选择失败），而本工作树 `WORKTREE.md` 与 `SillyClient_iOS` 主干均已合并至 Build 47（`v1.14.2`）。
+  - Build 47 实际只修补了 `IOSInstallationLocations.acquire` 的 `grantRelativePath` 与重映射逻辑，并未解决真实设备上 UIKit 选择器卡死、外部目录授权丢失/陈旧拒用、非安装选择缺少文件协调及前端错误吞咽问题。
+- **Build 41–47 仍未解决的根因**：
+  1. `TarvenEnvPlugin.swift` 未实现 `UIAdaptivePresentationControllerDelegate` 且未设置 `picker.presentationController?.delegate = self`；`.formSheet` 下滑或点击外部关闭后 `pendingPickerCall` 永不清空，后续所有目录/文件选择全部锁死（`"Another picker is active or the presenter is unavailable"`）；同时缺少 dismiss 过渡等待、孤立回调清理与 `PICKER_CANCELLED` 错误码。
+  2. `TarvenEnvPlugin.swift` 的 `dir` / `zip` / `image` / `readText` 回调未经过 `NSFileCoordinator` 协调读取；`dir` 达到 8 个目录上限后永久拒绝新目录；无扩展名图片拼接出末尾带点的文件名；`getAppSettings` 会直接返回已失效的 `configuredInstancesRoot`。
+  3. `IOSInstallationLocations.swift` 中 `makeBookmark` 使用 `.minimalBookmark`（改为 `options: []`），`coordinateRead` 未传 `.withoutChanges`，`select` 在脱离协调作用域后才生成 bookmark，`acquire` 遇到 `stale == true` 直接抛错拒绝而不校验目录身份并刷新 bookmark，`requireLocalRuntime` 的局部读写探针未包裹在 `NSFileCoordinator(writingItemAt:options:)` 内。
+  4. 前端 `RelocateInstanceModal.tsx` 仍用 `!/cancel/i.test(error.message)` 判断取消；`routes/index.tsx` 的 `handlePickInstallFolder` 缺少 `humanizeNativeError`，`pickInstanceCover` 将非取消报错仅写入 `console.error`；`native-errors.ts` 缺少 iOS bookmark/FileProvider/iCloud/`ENOTSUP` 中文诊断提示。
+- **升版与交付范围**：
+  - 依据用户指令升级至 `1.14.3`（Build `48`），更新 `native-src/Info.plist`、`ios/App/App/Info.plist`、`web/capacitor-ui/package.json`、`.github/workflows/build-ipa.yml`、`scripts/run-ios-e2e.mjs`、`tests/ios-ci.test.mjs`、`release/v1.14.3.md` 与 `release/CHANGELOG.md`；
+  - 仅更新 iOS 并按紧急补丁跳过 Windows 与 Android（后续再整合）。
+- **验证与推送**：
+  - Windows 本地完成 `pnpm install --frozen-lockfile --offline`、TypeScript、Vite 构建、前端 CJS 测试、iOS Node 测试、`verify-ios-cloud.mjs --mock-mode`、镜像文件 SHA-256 一致性与工作区规则校验，随后推送 `lts/ios-release-hardening` 触发 GitHub Actions `macos-15` Swift 编译、48 组原生测试、Hosted Simulator E2E 与 IPA 构建。
+
+---
+
 ## 2026-11-13 iOS v1.14.2 Build 47 安装目录授权恢复修复
 
 - **Build 46 的漏测断点**：选择时保存的是 `NSFileCoordinator` accessor 路径，bookmark 却指向 picker URL；恢复时旧代码要求两者路径相等。现有回归用符号链接模拟差异，`resolvingSymlinksInPath()` 把路径合并，漏掉了真实 provider 可能返回不同 accessor URL 的情形。

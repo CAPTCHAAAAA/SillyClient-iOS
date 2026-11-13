@@ -881,7 +881,7 @@ function SillyClientLauncher() {
     } catch (error) {
       if (generation !== directoryPickerGeneration.current) return;
       const message = error instanceof Error ? error.message : String(error);
-      if (shouldShowDirectoryPickerError(error, isIOS)) setNewInstanceError(message);
+      if (shouldShowDirectoryPickerError(error, isIOS)) setNewInstanceError(humanizeNativeError(message));
     }
   }, [isAndroid, isIOS]);
 
@@ -1746,8 +1746,11 @@ function SillyClientLauncher() {
         : current);
     } catch (err) {
       console.error("[pickImage]", err);
+      if (shouldShowDirectoryPickerError(err, isIOS)) {
+        setManageSaveError(humanizeNativeError(err instanceof Error ? err.message : String(err)));
+      }
     }
-  }, [isWindows]);
+  }, [isIOS, isWindows]);
 
   const closeInstanceRename = useCallback(() => {
     if (!renamingId || isRenameClosing) return;

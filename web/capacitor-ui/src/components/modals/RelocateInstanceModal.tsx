@@ -10,7 +10,7 @@ import { LAYERS } from "../../constants/layers";
 import { LayerBackdrop } from "../common/LayerBackdrop";
 import { TarvenEnv } from "../../capacitor-plugin";
 import type { InstanceRelocationResult } from "../../capacitor-plugin";
-import { exactInstallTarget, installationSelection } from "../../lib/install-location";
+import { exactInstallTarget, installationSelection, shouldShowDirectoryPickerError } from "../../lib/install-location";
 import { requireRelocationResult } from "../../lib/instance-location-state";
 import type { TavernInstance } from "../../types";
 import { humanizeNativeError } from "../../lib/native-errors";
@@ -142,7 +142,9 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
       const selected = installationSelection(res);
       setCustomPath(exactInstallTarget(selected.path, selected.mode, instance.subtitle || instance.name) || "");
     } catch (error) {
-      if (session === sessionRef.current && error instanceof Error && !/cancel/i.test(error.message)) setErrorMsg(error.message);
+      if (session === sessionRef.current && shouldShowDirectoryPickerError(error, isIOS)) {
+        setErrorMsg(error instanceof Error ? error.message : String(error));
+      }
     }
   };
 

@@ -2,6 +2,14 @@
 
 这里只保留已经发布版本的用户可见变化。完整实现历史以 Git 提交和各版本 Release 说明为准。
 
+## 1.14.3 - 2026-11-14
+
+- 修复 `UIDocumentPickerViewController` 下滑或点击外部关闭后 `pendingPickerCall` 未清理导致的后续目录/文件选择永久卡死，同时补齐正在退场过渡重试、孤立回调清理与 `PICKER_CANCELLED` 错误码。
+- 修复外置目录 bookmark 使用 `.minimalBookmark` 与未协调生成导致的授权失效/陈旧拒用：改用标准 `bookmarkData(options: [])` 与 `.withoutChanges` 只读协调，并在 `select` 协调作用域内生成 bookmark；遇到 `stale == true` 且目录身份一致时自动刷新持久化 bookmark，权限丢失或目录被替换仍拒绝；本地读写能力探针补充 `NSFileCoordinator(writingItemAt:options:.forReplacing)` 协调。
+- 补齐其余文件/目录选择动作（源目录、ZIP、封面、文本文件）的 `NSFileCoordinator` 读取协调与主队列回调；外置源目录授权队列支持 FIFO 上限淘汰（保留 8 个）；无扩展名封面自动回退 `.png`；`getAppSettings` 自动核验并清理已失效的预设根目录。
+- 前端接入标准错误诊断翻译（含 iCloud 未下载、`ENOTSUP`/provider 读写限制、bookmark 失效、系统容器拒绝等中文提示），并在迁移路径弹窗及封面选择中停止吞咽非取消错误。
+- 应用版本升至 `1.14.3`（Build `48`），CI 流水线、E2E 断言与原生契约同步更新（仅更新 iOS，跳过 Windows 与 Android）。
+
 ## 1.14.2 - 2026-11-11
 
 - 修复 Files provider bookmark URL 与协调器 accessor URL 不同导致授权恢复后实例创建失败的问题：恢复时重新协调访问、核对目录身份，并持久化相对路径以支持后续重开。

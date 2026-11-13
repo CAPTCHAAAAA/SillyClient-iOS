@@ -155,6 +155,7 @@ test("approved button palette, motion layers and inline async wiring remain pres
   assert.ok(relocate.includes("LAYERS.DIALOG_SURFACE"));
   assert.ok(relocate.includes("motion-panel-stack"));
   assert.ok(relocate.includes("retainedSourcePath"));
+  assert.ok(relocate.includes("shouldShowDirectoryPickerError(error, isIOS)"));
   const stopped = read("components/instance/InstanceStoppedCard.tsx");
   assert.ok(stopped.includes("await onRenameSave"));
   assert.ok(stopped.includes("motion-instance-card"));

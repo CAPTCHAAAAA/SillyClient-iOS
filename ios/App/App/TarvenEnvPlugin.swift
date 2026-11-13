@@ -5,7 +5,7 @@ import WebKit
 import UniformTypeIdentifiers
 
 @objc(TarvenEnvPlugin)
-public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPickerDelegate {
+public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
     public let identifier = "TarvenEnv"
     public let jsName = "TarvenEnv"
     private let io = DispatchQueue(label: "com.sillyclient.instance-io", qos: .userInitiated)
@@ -13,11 +13,17 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     private var pendingPickerCall: CAPPluginCall?
     private var pendingPickerAction = ""
     private var pendingInstanceId = ""
+    private weak var activePickerController: UIDocumentPickerViewController?
+    private var pendingExportCleanupURL: URL?
     private var scopedDirectories: [String: URL] = [:]
+    private var scopedDirectoryOrder: [String] = []
     private var viewSession: (String, URL, Bool)?
     private var pendingViewSession: (String, URL, Bool)?
     private var viewGeneration: UInt64 = 0
-    deinit { for directory in scopedDirectories.values { directory.stopAccessingSecurityScopedResource() } }
+    deinit {
+        for directory in scopedDirectories.values { directory.stopAccessingSecurityScopedResource() }
+        if let cleanup = pendingExportCleanupURL { try? FileManager.default.removeItem(at: cleanup) }
+    }
 
     public var pluginMethods: [CAPPluginMethod] {
         var names = [
@@ -498,6 +504,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                 guard let source = call.getString("sourcePath") else { throw IOSFileError.invalid("Migration source is required") }
                 try self.reserveLocal(instance: instance, operation: operation)
                 let scoped = self.scopedDirectories.removeValue(forKey: source)
+                self.scopedDirectoryOrder.removeAll { $0 == source }
                 self.io.async {
                     defer { scoped?.stopAccessingSecurityScopedResource() }
                     do {
@@ -570,17 +577,102 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         }
     }
 
-    private func presentPicker(_ call: CAPPluginCall, action: String, types: [UTType], exporting: URL? = nil) {
+    private func takePendingPicker() -> (call: CAPPluginCall?, action: String, instanceId: String) {
+        let call = pendingPickerCall
+        let action = pendingPickerAction
+        let instance = pendingInstanceId
+        pendingPickerCall = nil
+        pendingPickerAction = ""
+        pendingInstanceId = ""
+        activePickerController = nil
+        return (call, action, instance)
+    }
+
+    private func cleanupPendingExport() {
+        guard let url = pendingExportCleanupURL else { return }
+        pendingExportCleanupURL = nil
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private func cancelPendingPicker(message: String = "PICKER_CANCELLED", code: String? = "PICKER_CANCELLED") {
+        let (call, _, _) = takePendingPicker()
+        cleanupPendingExport()
+        call?.reject(message, code)
+    }
+
+    private func activePresentationRoot() -> UIViewController? {
+        if let bridgeVC = self.bridge?.viewController, bridgeVC.viewIfLoaded?.window != nil {
+            return bridgeVC.viewIfLoaded?.window?.rootViewController ?? bridgeVC
+        }
+        if let shared = TavernViewController.shared, shared.viewIfLoaded?.window != nil {
+            return shared
+        }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let keyWindow = scenes.flatMap { $0.windows }.first { $0.isKeyWindow }
+            ?? scenes.flatMap { $0.windows }.first { !$0.isHidden }
+        return keyWindow?.rootViewController ?? TavernViewController.shared ?? self.bridge?.viewController
+    }
+
+    private func rememberScopedDirectory(_ selected: URL, at path: String) {
+        if let previous = scopedDirectories.removeValue(forKey: path) {
+            previous.stopAccessingSecurityScopedResource()
+            scopedDirectoryOrder.removeAll { $0 == path }
+        }
+        while scopedDirectories.count >= 8, !scopedDirectoryOrder.isEmpty {
+            let oldest = scopedDirectoryOrder.removeFirst()
+            scopedDirectories.removeValue(forKey: oldest)?.stopAccessingSecurityScopedResource()
+        }
+        scopedDirectories[path] = selected
+        scopedDirectoryOrder.append(path)
+    }
+
+    private func presentPicker(_ call: CAPPluginCall, action: String, types: [UTType], exporting: URL? = nil, cleanupDirectory: URL? = nil, allowTransitionRetry: Bool = true) {
         DispatchQueue.main.async {
-            var topPresenter: UIViewController? = self.bridge?.viewController ?? TavernViewController.shared
+            var topPresenter = self.activePresentationRoot()
+            var dismissingPicker: UIDocumentPickerViewController?
             while let presented = topPresenter?.presentedViewController {
-                if presented is UIDocumentPickerViewController {
-                    call.reject("Another picker is active"); return
+                if let picker = presented as? UIDocumentPickerViewController {
+                    if picker.isBeingDismissed {
+                        dismissingPicker = picker
+                        break
+                    }
+                    call.reject("Another picker is active")
+                    if let cleanupDirectory { try? FileManager.default.removeItem(at: cleanupDirectory) }
+                    return
                 }
+                if presented.isBeingDismissed { break }
                 topPresenter = presented
             }
-            guard self.pendingPickerCall == nil, let presenter = topPresenter, presenter.view.window != nil else {
-                call.reject("Another picker is active or the presenter is unavailable"); return
+            if let dismissing = dismissingPicker {
+                guard allowTransitionRetry else {
+                    call.reject("Another picker is active")
+                    if let cleanupDirectory { try? FileManager.default.removeItem(at: cleanupDirectory) }
+                    return
+                }
+                if let coordinator = dismissing.transitionCoordinator {
+                    coordinator.animate(alongsideTransition: nil) { _ in
+                        self.presentPicker(call, action: action, types: types, exporting: exporting, cleanupDirectory: cleanupDirectory, allowTransitionRetry: false)
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        self.presentPicker(call, action: action, types: types, exporting: exporting, cleanupDirectory: cleanupDirectory, allowTransitionRetry: false)
+                    }
+                }
+                return
+            }
+            if self.pendingPickerCall != nil {
+                if self.activePickerController?.presentingViewController == nil && self.activePickerController?.isBeingPresented == false {
+                    self.cancelPendingPicker()
+                } else {
+                    call.reject("Another picker is active")
+                    if let cleanupDirectory { try? FileManager.default.removeItem(at: cleanupDirectory) }
+                    return
+                }
+            }
+            guard let presenter = topPresenter, presenter.view.window != nil else {
+                call.reject("Another picker is active or the presenter is unavailable")
+                if let cleanupDirectory { try? FileManager.default.removeItem(at: cleanupDirectory) }
+                return
             }
             let isFolder = types.contains(.folder) || action == "dir" || action == "installDir"
             let picker = exporting.map { UIDocumentPickerViewController(forExporting: [$0], asCopy: true) }
@@ -588,6 +680,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                     ? UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
                     : UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true))
             picker.delegate = self
+            picker.presentationController?.delegate = self
             picker.allowsMultipleSelection = false
             picker.modalPresentationStyle = .formSheet
             if let popover = picker.popoverPresentationController {
@@ -621,6 +714,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             self.pendingPickerCall = call
             self.pendingPickerAction = action
             self.pendingInstanceId = call.getString("instanceId") ?? "default"
+            self.activePickerController = picker
+            self.pendingExportCleanupURL = cleanupDirectory
             presenter.present(picker, animated: true)
         }
     }
@@ -660,16 +755,22 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             try files.createDirectory(directory)
             let target = directory.appendingPathComponent(name)
             try files.write(Data(content.utf8), to: target, replace: false)
-            self.presentPicker(call, action: "save", types: [], exporting: target)
-            } catch { call.reject(error.localizedDescription) }
+            self.presentPicker(call, action: "save", types: [], exporting: target, cleanupDirectory: directory)
+            } catch { DispatchQueue.main.async { call.reject(error.localizedDescription) } }
         }
     }
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        guard let call = pendingPickerCall, let selected = urls.first else { pendingPickerCall?.reject("No file was selected"); pendingPickerCall = nil; return }
-        let action = pendingPickerAction
-        let instance = pendingInstanceId
-        pendingPickerCall = nil
-        if action == "save" { call.resolve(["success": true]); return }
+        let (takenCall, action, instance) = takePendingPicker()
+        guard let call = takenCall, let selected = urls.first else {
+            cleanupPendingExport()
+            takenCall?.reject("No file was selected")
+            return
+        }
+        if action == "save" {
+            cleanupPendingExport()
+            call.resolve(["success": true])
+            return
+        }
         if action == "installDir" {
             io.async {
                 do {
@@ -684,48 +785,97 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             }
             return
         }
-        let scoped = selected.startAccessingSecurityScopedResource()
-        let source = selected.resolvingSymlinksInPath()
         if action == "dir" {
-            guard scopedDirectories.count < 8 else { if scoped { selected.stopAccessingSecurityScopedResource() }; call.reject("Too many pending directory imports"); return }
-            if scoped {
-                scopedDirectories.removeValue(forKey: source.path)?.stopAccessingSecurityScopedResource()
-                scopedDirectories[source.path] = selected
+            io.async {
+                let scoped = selected.startAccessingSecurityScopedResource()
+                var releaseScope = true
+                defer { if scoped && releaseScope { selected.stopAccessingSecurityScopedResource() } }
+                do {
+                    let coordinator = NSFileCoordinator(filePresenter: nil)
+                    var coordinationError: NSError?
+                    var accessorError: Error?
+                    var resolvedSource: URL?
+                    coordinator.coordinate(readingItemAt: selected, options: .withoutChanges, error: &coordinationError) { coordinatedURL in
+                        do {
+                            let candidate = coordinatedURL.resolvingSymlinksInPath().standardizedFileURL
+                            let guardValue = try IOSManagedFiles(root: candidate).guardValue(candidate)
+                            guard guardValue.isDirectory else { throw IOSFileError.invalid("Select a directory") }
+                            resolvedSource = candidate
+                        } catch {
+                            accessorError = error
+                        }
+                    }
+                    if let error = coordinationError ?? accessorError { throw error }
+                    guard let source = resolvedSource else {
+                        throw IOSFileError.invalid("The file provider did not provide an authorized directory URL")
+                    }
+                    if scoped { releaseScope = false }
+                    DispatchQueue.main.async {
+                        if scoped { self.rememberScopedDirectory(selected, at: source.path) }
+                        call.resolve(["name": source.lastPathComponent, "path": source.path])
+                    }
+                } catch {
+                    let message = error.localizedDescription
+                    DispatchQueue.main.async { call.reject(message) }
+                }
             }
-            call.resolve(["name": source.lastPathComponent, "path": source.path])
             return
         }
         io.async {
+            let scoped = selected.startAccessingSecurityScopedResource()
             defer { if scoped { selected.stopAccessingSecurityScopedResource() } }
             do {
-                let sourceFiles = IOSManagedFiles(root: source.deletingLastPathComponent())
-                if action == "readText" {
-                    guard let content = String(data: try sourceFiles.data(source, maximum: 2 * 1024 * 1024), encoding: .utf8) else {
-                        throw IOSFileError.invalid("Text file is not valid UTF-8")
+                let coordinator = NSFileCoordinator(filePresenter: nil)
+                var coordinationError: NSError?
+                var accessorError: Error?
+                var payload: [String: Any]?
+                coordinator.coordinate(readingItemAt: selected, options: .withoutChanges, error: &coordinationError) { coordinatedURL in
+                    do {
+                        let source = coordinatedURL.resolvingSymlinksInPath().standardizedFileURL
+                        let sourceFiles = IOSManagedFiles(root: source.deletingLastPathComponent())
+                        if action == "readText" {
+                            guard let content = String(data: try sourceFiles.data(source, maximum: 2 * 1024 * 1024), encoding: .utf8) else {
+                                throw IOSFileError.invalid("Text file is not valid UTF-8")
+                            }
+                            payload = ["content": content, "fileName": source.lastPathComponent]
+                            return
+                        }
+                        let maximum = action == "image" ? 16 * 1024 * 1024 : 256 * 1024 * 1024
+                        let sourceGuard = try sourceFiles.guardValue(source)
+                        guard !sourceGuard.isDirectory, sourceGuard.size >= 0, sourceGuard.size <= maximum else {
+                            throw IOSFileError.invalid("Selected file exceeds its size limit")
+                        }
+                        let root = action == "image" ? self.store.documents
+                            : FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                        let files = IOSManagedFiles(root: root)
+                        let ext = source.pathExtension.isEmpty ? "png" : source.pathExtension
+                        let destination = action == "image" ? root.appendingPathComponent("covers/\(try IOSInstanceStore.identity(instance))-\(UUID().uuidString).\(ext)")
+                            : root.appendingPathComponent("sillyclient-import-\(UUID().uuidString).zip")
+                        try files.createDirectory(destination.deletingLastPathComponent())
+                        try sourceFiles.copyTree(source, to: destination, destination: files,
+                                                 budget: IOSInspectionBudget(maxEntries: 1, maxBytes: Int64(maximum)))
+                        payload = ["path": destination.path, "url": destination.absoluteString, "sizeBytes": sourceGuard.size]
+                    } catch {
+                        accessorError = error
                     }
-                    call.resolve(["content": content, "fileName": source.lastPathComponent])
-                    return
                 }
-                let maximum = action == "image" ? 16 * 1024 * 1024 : 256 * 1024 * 1024
-                let sourceGuard = try sourceFiles.guardValue(source)
-                guard !sourceGuard.isDirectory, sourceGuard.size >= 0, sourceGuard.size <= maximum else {
-                    throw IOSFileError.invalid("Selected file exceeds its size limit")
-                }
-                let root = action == "image" ? self.store.documents
-                    : FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
-                let files = IOSManagedFiles(root: root)
-                let destination = action == "image" ? root.appendingPathComponent("covers/\(try IOSInstanceStore.identity(instance))-\(UUID().uuidString).\(source.pathExtension)")
-                    : root.appendingPathComponent("sillyclient-import-\(UUID().uuidString).zip")
-                try files.createDirectory(destination.deletingLastPathComponent())
-                try sourceFiles.copyTree(source, to: destination, destination: files,
-                                         budget: IOSInspectionBudget(maxEntries: 1, maxBytes: Int64(maximum)))
-                call.resolve(["path": destination.path, "url": destination.absoluteString, "sizeBytes": sourceGuard.size])
-            } catch { call.reject(error.localizedDescription) }
+                if let error = coordinationError ?? accessorError { throw error }
+                guard let resolvedPayload = payload else { throw IOSFileError.invalid("No file was selected") }
+                DispatchQueue.main.async { call.resolve(resolvedPayload) }
+            } catch {
+                let message = error.localizedDescription
+                DispatchQueue.main.async { call.reject(message) }
+            }
         }
     }
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        pendingPickerCall?.reject("PICKER_CANCELLED")
-        pendingPickerCall = nil
+        cancelPendingPicker()
+    }
+    public func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        if self.pendingPickerCall != nil && (presentationController.presentedViewController is UIDocumentPickerViewController
+            || presentationController.presentedViewController === activePickerController) {
+            cancelPendingPicker()
+        }
     }
     @objc func checkLegacyInstances(_ call: CAPPluginCall) {
         perform(call) { ["instances": try self.store.legacyInstances()] }
@@ -755,7 +905,13 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         let configured = UserDefaults.standard.string(forKey: "configuredInstancesRoot")?.trimmingCharacters(in: .whitespacesAndNewlines)
         var result: [String: Any] = [:]
         if let conf = configured, !conf.isEmpty {
-            result["configuredInstancesRoot"] = conf
+            if let rootURL = try? IOSInstallationLocations.path(conf),
+               let location = try? self.store.locations.acquire(rootURL) {
+                withExtendedLifetime(location) {}
+                result["configuredInstancesRoot"] = location.directory.path
+            } else {
+                UserDefaults.standard.removeObject(forKey: "configuredInstancesRoot")
+            }
         }
         call.resolve(result)
     }
@@ -822,9 +978,10 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     @objc func dismissPickerForTesting(_ call: CAPPluginCall) {
         guard ProcessInfo.processInfo.arguments.contains("--sillyclient-test") else { call.reject("Test harness is not enabled"); return }
         DispatchQueue.main.async {
-            self.pendingPickerCall?.reject("Test cancelled the picker")
-            self.pendingPickerCall = nil
-            self.bridge?.viewController?.dismiss(animated: false)
+            let picker = self.activePickerController
+            self.cancelPendingPicker(message: "Test cancelled the picker", code: nil)
+            if let picker { picker.dismiss(animated: false) }
+            else { self.activePresentationRoot()?.dismiss(animated: false) }
             call.resolve(["dismissed": true])
         }
     }

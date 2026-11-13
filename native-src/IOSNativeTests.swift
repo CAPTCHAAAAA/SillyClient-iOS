@@ -281,9 +281,13 @@ enum IOSNativeTests {
             var stale = false
             var permitted = true
             var moved = false
+            var bookmarkRevision = 1
             func authorizations() -> IOSInstallationLocations {
-                IOSInstallationLocations(documents: documents, makeBookmark: { Data($0.path.utf8) },
-                    resolveBookmark: { (moved ? root : URL(fileURLWithPath: String(decoding: $0, as: UTF8.self)), stale) },
+                IOSInstallationLocations(documents: documents, makeBookmark: { Data("\($0.path)#v\(bookmarkRevision)".utf8) },
+                    resolveBookmark: { data in
+                        let raw = String(decoding: data, as: UTF8.self).split(separator: "#", maxSplits: 1).first.map(String.init) ?? ""
+                        return (moved ? root : URL(fileURLWithPath: raw), stale)
+                    },
                     startScope: { _ in if permitted { scopes += 1 }; return permitted },
                     stopScope: { _ in scopes -= 1 }, externalCapability: { _ in })
             }
@@ -294,13 +298,22 @@ enum IOSNativeTests {
             try rejects("External lease authorized a sibling path") { _ = try lease!.files.checked(documents, allowMissing: true) }
             lease = nil
             try require(scopes == 0, "Stopped lease did not release security scope")
+            bookmarkRevision = 2
             stale = true
-            try rejects("Stale bookmark used another runtime") { _ = try authorizations().acquire(selected.appendingPathComponent("instance")) }
-            stale = false
+            var staleLease: IOSInstallationLocation? = try authorizations().acquire(selected.appendingPathComponent("instance"))
+            try require(scopes == 1 && staleLease?.root.path == selected.path, "Stale bookmark with matching identity did not recover")
+            let registryJSON = try files.json(documents.appendingPathComponent(".sillyclient-installation-roots.json"))
+            let savedRoots = registryJSON["roots"] as? [String: [String: Any]]
+            let refreshedBookmark = savedRoots?.values.first?["bookmark"] as? String
+            try require(refreshedBookmark == Data("\(selected.path)#v2".utf8).base64EncodedString(), "Stale bookmark was not refreshed on recovery")
+            staleLease = nil
+            try require(scopes == 0, "Recovered stale lease did not release security scope")
             permitted = false
             try rejects("Lost authorization fell back internally") { _ = try authorizations().acquire(selected.appendingPathComponent("instance")) }
             permitted = true
             moved = true
+            try rejects("Moved stale bookmark substituted another directory") { _ = try authorizations().acquire(selected.appendingPathComponent("instance")) }
+            stale = false
             try rejects("Moved bookmark substituted another directory") { _ = try authorizations().acquire(selected.appendingPathComponent("instance")) }
             moved = false
             let old = root.appendingPathComponent("original-root")

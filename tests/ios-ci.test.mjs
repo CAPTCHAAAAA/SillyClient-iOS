@@ -113,10 +113,10 @@ test('capability probe returns before creating the real console and stays isolat
 test('unsigned artifact version and monotonic native build agree', () => {
     const plist = read('native-src/Info.plist');
     const workflow = read('.github/workflows/build-ipa.yml');
-    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.2<\/string>/);
+    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.3<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 47);
-    assert.match(workflow, /SillyClient-iOS-v1\.14\.2-unsigned/);
+    assert.equal(build, 48);
+    assert.match(workflow, /SillyClient-iOS-v1\.14\.3-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
 
@@ -313,11 +313,12 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     const maintenance = read('native-src/IOSInstanceMaintenance.swift');
     const runner = read('native-src/NodeRunner.swift');
     const plugin = read('native-src/TarvenEnvPlugin.swift');
-    assert.match(locations, /bookmarkData\(options: \.minimalBookmark/);
+    assert.match(locations, /bookmarkData\(options: \[\]/);
     assert.match(locations, /URL\(resolvingBookmarkData: \$0, bookmarkDataIsStale: &stale\)/);
     assert.doesNotMatch(locations, /BookmarkCreationOptions\(rawValue:/);
     assert.doesNotMatch(locations, /BookmarkResolutionOptions\(rawValue:/);
-    assert.match(locations, /guard !stale, scopedURL\.isFileURL/);
+    assert.match(locations, /guard scopedURL\.isFileURL/);
+    assert.match(locations, /if stale,[\s\S]*refreshBookmark\(/);
     assert.match(locations, /guard scopeStarted/);
     assert.doesNotMatch(locations, /root\.path == expectedPath/);
     assert.match(locations, /rootGuard\.identity == identity/);
@@ -325,7 +326,7 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(locations, /appendingPathComponent\(relativePath/);
     assert.match(locations, /ubiquitousItemDownloadingStatusKey/);
     assert.match(locations, /downloadingStatus != \.notDownloaded/);
-    assert.match(locations, /coordinator\.coordinate\(readingItemAt: url/);
+    assert.match(locations, /coordinator\.coordinate\(readingItemAt: url, options: \.withoutChanges/);
     assert.match(locations, /coordinateRead\(selected\) \{ coordinatedURL in/);
     assert.doesNotMatch(locations, /NSFileCoordinator\(\)\.coordinate\(writingItemAt: selected/);
     assert.match(locations, /validateExternalCapability/);
@@ -342,6 +343,11 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(maintenance, /withExtendedLifetime\(location\)/);
     assert.match(runner, /private var activeLocation: IOSInstallationLocation\?/);
     assert.match(runner, /locations\.json/);
+    assert.match(plugin, /UIAdaptivePresentationControllerDelegate/);
+    assert.match(plugin, /picker\.presentationController\?\.delegate = self/);
+    assert.match(plugin, /func presentationControllerDidDismiss\(/);
+    assert.match(plugin, /call\?\.reject\(message, code\)/);
+    assert.match(plugin, /coordinator\.coordinate\(readingItemAt: selected, options: \.withoutChanges/);
     assert.match(plugin, /call\.getString\("installPathMode"\)/);
     assert.match(plugin, /"installPath": directory\.path, "installPathMode": "exact"/);
     assert.match(plugin, /UIDocumentPickerViewController\(forOpeningContentTypes: \[\.folder\], asCopy: false\)/);
@@ -352,6 +358,7 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(plugin, /DispatchQueue\.main\.async \{ call\.resolve\(result\) \}/);
     assert.match(read('native-src/IOSNativeTests.swift'), /Create path was not remapped to the coordinated root/);
     assert.match(read('native-src/IOSNativeTests.swift'), /A bookmark resolving to a different directory identity was trusted/);
+    assert.match(read('native-src/IOSNativeTests.swift'), /Stale bookmark was not refreshed on recovery/);
     assert.match(read('native-src/IOSNativeTests.swift'), /Repeated preflight and creation lookups did not resolve the original selected path/);
     assert.equal(plugin, read('ios/App/App/TarvenEnvPlugin.swift'));
 });
@@ -542,7 +549,7 @@ async function simulateDriver(scenario = 'success') {
         const reject = error => ({ success: false, error });
         switch (request.method) {
         case 'getPlatform': return success({ platform: 'ios' });
-        case 'getAppVersion': return success({ version: '1.14.2' });
+        case 'getAppVersion': return success({ version: '1.14.3' });
         case 'getInstanceInfo': {
             const record = registry[options.instanceId];
             return record ? success({ ...record, installPath: record.path }) : reject('Instance directory is unavailable');
