@@ -604,13 +604,14 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         if let bridgeVC = self.bridge?.viewController, bridgeVC.viewIfLoaded?.window != nil {
             return bridgeVC.viewIfLoaded?.window?.rootViewController ?? bridgeVC
         }
-        if let shared = TavernViewController.shared, shared.viewIfLoaded?.window != nil {
+        let shared = TavernViewController.shared
+        if shared.viewIfLoaded?.window != nil {
             return shared
         }
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let keyWindow = scenes.flatMap { $0.windows }.first { $0.isKeyWindow }
             ?? scenes.flatMap { $0.windows }.first { !$0.isHidden }
-        return keyWindow?.rootViewController ?? TavernViewController.shared ?? self.bridge?.viewController
+        return keyWindow?.rootViewController ?? self.bridge?.viewController ?? shared
     }
 
     private func rememberScopedDirectory(_ selected: URL, at path: String) {
