@@ -23,7 +23,7 @@ const port = 8000;
 const origin = `http://127.0.0.1:${port}`;
 const firstOperation = `simulator-${randomUUID()}`;
 const secondOperation = `simulator-${randomUUID()}`;
-const nativeFixtureGroups = 46;
+const nativeFixtureGroups = 47;
 const simctl = (...args) => execFileSync('xcrun', ['simctl', ...args], {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120000,
 });

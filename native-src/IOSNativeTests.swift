@@ -335,6 +335,43 @@ enum IOSNativeTests {
             lease = nil
             try require(scopeStarts == 2 && scopeStops == 2, "Bookmark round trip leaked a synthetic security-scope lease")
         }
+        test("External folder selection uses the coordinated provider URL and releases failed scopes") { root, _ in
+            let documents = root.appendingPathComponent("documents", isDirectory: true)
+            let pickerURL = root.appendingPathComponent("provider-entry", isDirectory: true)
+            let coordinatedURL = root.appendingPathComponent("coordinated-entry", isDirectory: true)
+            try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: coordinatedURL, withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(at: pickerURL, withDestinationURL: coordinatedURL)
+            var bookmarkURL: URL?
+            var scopeStarts = 0
+            var scopeStops = 0
+            let locations = IOSInstallationLocations(documents: documents,
+                makeBookmark: { url in bookmarkURL = url; return Data([1]) },
+                resolveBookmark: { _ in (pickerURL, false) },
+                startScope: { _ in scopeStarts += 1; return true },
+                stopScope: { _ in scopeStops += 1 },
+                coordinateRead: { selected, accessor in
+                    try require(selected == pickerURL, "Coordinator did not receive the picker URL")
+                    try accessor(coordinatedURL)
+                },
+                externalCapability: { _ in })
+
+            let selectedRoot = try locations.select(pickerURL)
+            try require(selectedRoot.path == coordinatedURL.path, "Selection ignored the provider accessor URL")
+            try require(bookmarkURL == pickerURL, "Bookmark did not retain the original picker authorization")
+            let lease = try locations.acquire(coordinatedURL.appendingPathComponent("instance"))
+            try require(lease.root.path == coordinatedURL.path, "Persistent authorization changed the coordinated root")
+
+            let denied = IOSInstallationLocations(documents: documents,
+                startScope: { _ in scopeStarts += 1; return true },
+                stopScope: { _ in scopeStops += 1 },
+                coordinateRead: { _, _ in throw IOSFileError.invalid("Provider coordination denied") })
+            let startsBeforeDenial = scopeStarts
+            let stopsBeforeDenial = scopeStops
+            try rejects("Failed provider coordination returned a selectable path") { _ = try denied.select(pickerURL) }
+            try require(scopeStarts == startsBeforeDenial + 1 && scopeStops == stopsBeforeDenial + 1,
+                        "Failed coordination leaked the picker security scope")
+        }
         test("Custom installation commits at the selected root and can recover registration without replacing data") { root, files in
             let store = IOSInstanceStore(root: root)
             let selected = root.appendingPathComponent("selected-root")

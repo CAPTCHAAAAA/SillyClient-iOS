@@ -1,5 +1,7 @@
 import Foundation
 
+typealias IOSCoordinatedRead = (URL, (URL) throws -> Void) throws -> Void
+
 final class IOSInstallationLocation {
     let root: URL
     let directory: URL
@@ -26,6 +28,7 @@ final class IOSInstallationLocations {
     private let resolveBookmark: (Data) throws -> (URL, Bool)
     private let startScope: (URL) -> Bool
     private let stopScope: (URL) -> Void
+    private let coordinateRead: IOSCoordinatedRead
     private let externalCapability: (URL) throws -> Void
     private var registryURL: URL { documents.appendingPathComponent(".sillyclient-installation-roots.json") }
 
@@ -41,6 +44,17 @@ final class IOSInstallationLocations {
          },
          startScope: @escaping (URL) -> Bool = { $0.startAccessingSecurityScopedResource() },
          stopScope: @escaping (URL) -> Void = { $0.stopAccessingSecurityScopedResource() },
+         coordinateRead: @escaping IOSCoordinatedRead = { url, accessor in
+             let coordinator = NSFileCoordinator(filePresenter: nil)
+             var coordinationError: NSError?
+             var accessorError: Error?
+             coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+                 do { try accessor(coordinatedURL) }
+                 catch { accessorError = error }
+             }
+             if let coordinationError { throw coordinationError }
+             if let accessorError { throw accessorError }
+         },
          externalCapability: @escaping (URL) throws -> Void = IOSInstallationLocations.requireLocalRuntime) {
         self.documents = documents
         files = IOSManagedFiles(root: documents)
@@ -48,6 +62,7 @@ final class IOSInstallationLocations {
         self.resolveBookmark = resolveBookmark
         self.startScope = startScope
         self.stopScope = stopScope
+        self.coordinateRead = coordinateRead
         self.externalCapability = externalCapability
     }
 
@@ -114,16 +129,21 @@ final class IOSInstallationLocations {
             scoped = startScope(selected)
             NSLog("[IOSInstallationLocations] stage=%@ scope=%@", stage, String(scoped))
             defer { if scoped { stopScope(selected) } }
-            stage = "inspect-selected-directory"
-            _ = try IOSManagedFiles(root: selected.standardizedFileURL).guardValue(selected.standardizedFileURL)
-            let root = selected.resolvingSymlinksInPath().standardizedFileURL
-            guard root.path != "/", root.path == documents.path || !Self.contains(root, documents) else {
-                throw IOSFileError.invalid("A filesystem root or sandbox ancestor cannot be an installation root")
+            var root: URL?
+            var rootIdentity: String?
+            stage = "coordinate-selected-directory"
+            try coordinateRead(selected) { coordinatedURL in
+                stage = "inspect-coordinated-directory"
+                let candidate = coordinatedURL.resolvingSymlinksInPath().standardizedFileURL
+                guard candidate.path != "/", candidate.path == self.documents.path || !Self.contains(candidate, self.documents) else {
+                    throw IOSFileError.invalid("A filesystem root or sandbox ancestor cannot be an installation root")
+                }
+                let identity = try IOSManagedFiles(root: candidate).guardValue(candidate)
+                guard identity.isDirectory else { throw IOSFileError.invalid("Select an installation directory") }
+                root = candidate
+                rootIdentity = identity.identity
             }
-            stage = "inspect-root-identity"
-            let managed = IOSManagedFiles(root: root)
-            let identity = try managed.guardValue(root)
-            guard identity.isDirectory else { throw IOSFileError.invalid("Select an installation directory") }
+            guard let root, let rootIdentity else { throw IOSFileError.invalid("The file provider did not provide an authorized directory URL") }
             let internalRoot = Self.contains(documents, root)
             guard internalRoot || scoped else { throw IOSFileError.invalid("The selected installation root has no security-scoped authorization") }
             // Keep selection lightweight; validate provider write capabilities only when creating an instance.
@@ -131,7 +151,7 @@ final class IOSInstallationLocations {
             var roots = try records()
             let key = roots.first(where: { $0.value["path"] as? String == root.path })?.key ?? UUID().uuidString
             guard roots[key] != nil || roots.count < 32 else { throw IOSFileError.invalid("Installation root authorization capacity reached") }
-            var record: [String: Any] = ["path": root.path, "rootIdentity": identity.identity]
+            var record: [String: Any] = ["path": root.path, "rootIdentity": rootIdentity]
             if internalRoot {
                 record["kind"] = "documents"
                 record["relativePath"] = root.path == documents.path ? "" : String(root.path.dropFirst(documents.path.count + 1))
