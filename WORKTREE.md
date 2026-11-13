@@ -7,7 +7,7 @@
 - **Build 46 的漏测断点**：选择时保存的是 `NSFileCoordinator` accessor 路径，bookmark 却指向 picker URL；恢复时旧代码要求两者路径相等。现有回归用符号链接模拟差异，`resolvingSymlinksInPath()` 把路径合并，漏掉了真实 provider 可能返回不同 accessor URL 的情形。
 - **修复**：bookmark 继续作为安全作用域授权来源；恢复时重新协调取得当前 accessor URL，验证原目录 inode 身份，再将授权根下的相对实例路径映射至当前 accessor 根。实例记录持久化授权相对路径，因此 provider 后续改变 accessor 前缀后，既有实例仍可重新打开；不匹配的手动路径仍拒绝。iCloud 仅在明确 `notDownloaded` 时拒绝，已下载目录仍需通过实际本地读写能力探针。
 - **回归**：使用互不相关目录覆盖选择、实例目录创建、provider 根路径变化后重开已有实例、持久化 grant 映射、错误路径拒绝和被替换目录身份拒绝；不再用符号链接模拟 accessor 差异。
-- **验证边界**：本地 iOS Node 回归 `118/118` 通过；Windows 主机没有 Swift/Xcode，原生测试与 hosted simulator 必须由 macOS CI 执行。CI 不点击真实 Files picker，真实 iPhone provider 仍需安装 Build 47 复测。
+- **验证边界**：本地 iOS Node 回归 `118/118` 通过；Actions Run `43432609330` 的设备 archive 成功，simulator 编译因新增 fixture 闭包误写 `_` 而未编译通过，已修正为传入 `files`，等待重跑。CI 不点击真实 Files picker，真实 iPhone provider 仍需安装 Build 47 复测。
 - **版本/发布**：保持 `1.14.2`，Build `47`；CI、IPA 校验值及 GitHub Release 替换结果待完成后补记。
 
 ---

@@ -343,7 +343,7 @@ enum IOSNativeTests {
             lease = nil
             try require(scopeStarts == 2 && scopeStops == 2, "Bookmark round trip leaked a synthetic security-scope lease")
         }
-        test("External folder selection uses the coordinated provider URL and releases failed scopes") { root, _ in
+        test("External folder selection uses the coordinated provider URL and releases failed scopes") { root, files in
             let documents = root.appendingPathComponent("documents", isDirectory: true)
             let pickerURL = root.appendingPathComponent("provider-entry", isDirectory: true)
             let coordinatedURL = root.appendingPathComponent("coordinated-entry", isDirectory: true)
