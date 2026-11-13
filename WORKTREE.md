@@ -9,6 +9,7 @@
 - **回归**：使用互不相关目录覆盖选择、实例目录创建、provider 根路径变化后以同一个原始路径连续重开已有实例、持久化 grant 映射、错误路径拒绝和被替换目录身份拒绝；不再用符号链接模拟 accessor 差异。
 - **验证边界**：Actions Run `43440138754` 全绿：48 组原生 fixture、24 项 hosted simulator E2E、arm64 Archive 与 IPA 打包通过。provider accessor 路径变化后重复使用原 exact 路径的回归通过。CI 没有点击真实 Files picker UI，真机 Files provider 仍需设备复测。
 - **版本/发布**：保持 `1.14.2`，Build `47`；Release `v1.14.2` 的 iOS IPA 与 SHA-256 附件及文案已替换，IPA SHA-256 为 `545e1ca4e5dcb08714a04da2b34b35ea58e487571e428c4aa7b3b4f3185a4c17`。Windows / Android 未更新。
+- **提交/推送/合并**：Build 47 实现与发布记录提交 `8fc20e2` 已推送到 `origin/lts/ios-release-hardening`，并 fast-forward 合入、推送至 `SillyClient_iOS` 的 `main`；随后本条合并记录也同步到两条分支。仅处理 iOS。
 
 ---
 
