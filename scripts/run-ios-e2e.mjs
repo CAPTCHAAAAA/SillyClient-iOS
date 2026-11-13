@@ -25,7 +25,7 @@ const firstOperation = `simulator-${randomUUID()}`;
 const secondOperation = `simulator-${randomUUID()}`;
 const nativeFixtureGroups = 48;
 const simctl = (...args) => execFileSync('xcrun', ['simctl', ...args], {
-    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120000,
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 300000,
 });
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const uiDelay = milliseconds => device.startsWith('virtual') ? Promise.resolve() : sleep(milliseconds);

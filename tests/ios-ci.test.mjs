@@ -56,6 +56,7 @@ test('simulator acceptance does not claim synthetic showcase interactions', () =
     assert.doesNotMatch(runner, /__SC_TEST__|evalInConsole|uiStepsShowcased|setWizardMode|setManageTab/);
     assert.match(runner, /uiInteractionTested: false/);
     assert.match(runner, /const nativeFixtureGroups = 48;/);
+    assert.match(runner, /maxBuffer: 64 \* 1024 \* 1024, timeout: 300000/);
 });
 
 test('copy migration is explicitly whitelisted only in the Debug test harness', () => {
