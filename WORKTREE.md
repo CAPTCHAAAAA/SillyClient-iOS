@@ -9,7 +9,11 @@
   2. `TarvenEnvPlugin.swift` 的 `documentPicker(_:didPickDocumentsAt:)` 先返回 UIKit 再在 `io.async` 异步请求 `startAccessingSecurityScopedResource()`，选择 `Documents/instances` 内部路径因跳过 scope 可通过，而外置「我的 iPhone」/ iCloud 目录可能受远程 picker XPC 回收时序影响丢失临时权限；
   3. `presentPicker` 中 `picker.presentationController?.delegate = self` 先于 `picker.modalPresentationStyle = .formSheet` 设置，且非 `installDir` 操作强行设置了 `picker.directoryURL = self.store.documents`；
   4. `routes/index.tsx` 与 `RelocateInstanceModal.tsx` 部分错误出口与 `native-errors.ts` 缺少身份校验中文翻译。
-- **修复与升版**：已修复上述 4 处前端/原生逻辑与回归测试，升版至 `1.14.4`（Build `49`），准备推送运行 macOS CI（Hosted Simulator `uiInteractionTested: false`；真机 27.2.1 是否仍有系统文件界面「打开」交互异常待新包真机反馈）。
+- **修复与升版**：已修复上述 4 处前端/原生逻辑与回归测试，升版至 `1.14.4`（Build `49`），提交 `b6f1786` 推送至 `origin/lts/ios-release-hardening`。
+- **CI 与合干交付**：
+  - GitHub Actions `macos-15` Run `43585628585`（耗时 20m55s）全绿通过：React 生产构建、Server No-WASM Smoke、48/48 组 Swift 原生 fixture、24/24 阶段 Hosted Simulator E2E（`uiInteractionTested: false`、`physicalDeviceTested: false`）、arm64 Release Archive 与 IPA 打包全部通过；
+  - 交付产物 `Local/artifacts/v1.14.4/SillyClient-iOS-v1.14.4-unsigned.ipa`（194,221,839 字节，SHA-256 `77925def11b4c864818d9d5c1a6abf063997f0ce7db534fef1ed64167c530d18`，与 CI `ipa-sha256.txt` 一致）；
+  - 随后快进合入并推送 `SillyClient_iOS/main`，在 `SillyClient_Main` 打 `v1.14.4` Tag 并发布 GitHub Release（继续跳过 Windows 与 Android）；真机（含 27.2.1）Files / iCloud UI 表现待用户侧载本版复测。
 
 ## 2026-11-14 iOS v1.14.3 (Build 48) 路径/文件选择失败紧急修复与升版
 
