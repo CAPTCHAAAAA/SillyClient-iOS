@@ -85,4 +85,5 @@ test("humanizeNativeError translates iOS provider and bookmark diagnostics clean
   assert.match(nativeErrors.humanizeNativeError("This iCloud installation folder is not downloaded locally; download it or choose a local folder"), /iCloud 文件夹尚未下载/);
   assert.match(nativeErrors.humanizeNativeError("The selected provider cannot retain local runtime files [NSPOSIXErrorDomain:45]: Operation not supported"), /不支持直接运行本地酒馆文件/);
   assert.match(nativeErrors.humanizeNativeError("Installation folder selection failed at coordinate-selected-directory [NSCocoaErrorDomain:257]: Permission denied"), /目录选择失败（coordinate-selected-directory NSCocoaErrorDomain:257）/);
+  assert.match(nativeErrors.humanizeNativeError("An explicit valid instance identity is required"), /实例目录标识仅支持英文字母/);
 });

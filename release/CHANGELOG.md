@@ -2,6 +2,14 @@
 
 这里只保留已经发布版本的用户可见变化。完整实现历史以 Git 提交和各版本 Release 说明为准。
 
+## 1.14.4 - 2026-11-14
+
+- 恢复 iOS 端创建实例时的安全目录标识生成（`normalizeInstanceIdentity`），修复留空、中文或含空格实例名在原生存储校验失败（`An explicit valid instance identity is required`）的问题，同时保留用户设定的中文展示名。
+- `UIDocumentPickerViewController` 选择回调改为在返回 UIKit 前于主线程同步获取安全作用域（`preScoped`）后再转入后台文件协调与 bookmark 持久化，避免外置 Files / iCloud 目录在选择器 XPC 会话销毁瞬间回收临时授权。
+- 调整文件窗 `modalPresentationStyle = .formSheet` 与 `presentationController?.delegate = self` 的设置顺序；非安装目录类选择器不再强制固定打开沙盒 `Documents`。
+- 补充 `An explicit valid instance identity is required` 中文提示，并在实例创建、启动与迁移目录选择错误路径统一接入 `humanizeNativeError`。
+- 应用版本升至 `1.14.4`（Build `49`），仅更新 iOS，跳过 Windows 与 Android。
+
 ## 1.14.3 - 2026-11-14
 
 - 修复 `UIDocumentPickerViewController` 下滑或点击外部关闭后 `pendingPickerCall` 未清理导致的后续目录/文件选择永久卡死，同时补齐正在退场过渡重试、孤立回调清理与 `PICKER_CANCELLED` 错误码。

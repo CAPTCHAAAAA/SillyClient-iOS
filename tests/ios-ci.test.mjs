@@ -113,10 +113,10 @@ test('capability probe returns before creating the real console and stays isolat
 test('unsigned artifact version and monotonic native build agree', () => {
     const plist = read('native-src/Info.plist');
     const workflow = read('.github/workflows/build-ipa.yml');
-    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.3<\/string>/);
+    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.4<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 48);
-    assert.match(workflow, /SillyClient-iOS-v1\.14\.3-unsigned/);
+    assert.equal(build, 49);
+    assert.match(workflow, /SillyClient-iOS-v1\.14\.4-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
 
@@ -344,7 +344,9 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(runner, /private var activeLocation: IOSInstallationLocation\?/);
     assert.match(runner, /locations\.json/);
     assert.match(plugin, /UIAdaptivePresentationControllerDelegate/);
+    assert.match(plugin, /picker\.modalPresentationStyle = \.formSheet[\s\S]*picker\.presentationController\?\.delegate = self/);
     assert.match(plugin, /picker\.presentationController\?\.delegate = self/);
+    assert.match(plugin, /func documentPicker\([\s\S]*let preScoped = selected\.startAccessingSecurityScopedResource\(\)[\s\S]*if action == "installDir"[\s\S]*io\.async/);
     assert.match(plugin, /func presentationControllerDidDismiss\(/);
     assert.match(plugin, /call\?\.reject\(message, code\)/);
     assert.match(plugin, /coordinator\.coordinate\(readingItemAt: selected, options: \.withoutChanges/);
@@ -549,7 +551,7 @@ async function simulateDriver(scenario = 'success') {
         const reject = error => ({ success: false, error });
         switch (request.method) {
         case 'getPlatform': return success({ platform: 'ios' });
-        case 'getAppVersion': return success({ version: '1.14.3' });
+        case 'getAppVersion': return success({ version: '1.14.4' });
         case 'getInstanceInfo': {
             const record = registry[options.instanceId];
             return record ? success({ ...record, installPath: record.path }) : reject('Instance directory is unavailable');

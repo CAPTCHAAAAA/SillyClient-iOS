@@ -681,9 +681,9 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                     ? UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
                     : UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true))
             picker.delegate = self
-            picker.presentationController?.delegate = self
             picker.allowsMultipleSelection = false
             picker.modalPresentationStyle = .formSheet
+            picker.presentationController?.delegate = self
             if let popover = picker.popoverPresentationController {
                 popover.sourceView = presenter.view
                 popover.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 0, height: 0)
@@ -708,8 +708,6 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                     } else {
                         picker.directoryURL = defaultInstallRoot
                     }
-                } else {
-                    picker.directoryURL = self.store.documents
                 }
             }
             self.pendingPickerCall = call
@@ -772,8 +770,13 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             call.resolve(["success": true])
             return
         }
+        // Acquire security scope synchronously before returning to UIKit so remote picker XPC
+        // teardown cannot revoke transient folder/file grants before io.async executes.
+        let preScoped = selected.startAccessingSecurityScopedResource()
+        NSLog("[TarvenEnvPlugin] didPickDocumentsAt action=%@ preScoped=%@", action, preScoped ? "true" : "false")
         if action == "installDir" {
             io.async {
+                defer { if preScoped { selected.stopAccessingSecurityScopedResource() } }
                 do {
                     let root = try self.store.locations.select(selected)
                     let result: [String: Any] = ["name": root.lastPathComponent, "path": root.path, "installPathMode": "root",
@@ -781,6 +784,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                     DispatchQueue.main.async { call.resolve(result) }
                 } catch {
                     let message = error.localizedDescription
+                    NSLog("[TarvenEnvPlugin] installDir selection failed: %@", message)
                     DispatchQueue.main.async { call.reject(message) }
                 }
             }
@@ -788,9 +792,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         }
         if action == "dir" {
             io.async {
-                let scoped = selected.startAccessingSecurityScopedResource()
                 var releaseScope = true
-                defer { if scoped && releaseScope { selected.stopAccessingSecurityScopedResource() } }
+                defer { if preScoped && releaseScope { selected.stopAccessingSecurityScopedResource() } }
                 do {
                     let coordinator = NSFileCoordinator(filePresenter: nil)
                     var coordinationError: NSError?
@@ -810,21 +813,21 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                     guard let source = resolvedSource else {
                         throw IOSFileError.invalid("The file provider did not provide an authorized directory URL")
                     }
-                    if scoped { releaseScope = false }
+                    if preScoped { releaseScope = false }
                     DispatchQueue.main.async {
-                        if scoped { self.rememberScopedDirectory(selected, at: source.path) }
+                        if preScoped { self.rememberScopedDirectory(selected, at: source.path) }
                         call.resolve(["name": source.lastPathComponent, "path": source.path])
                     }
                 } catch {
                     let message = error.localizedDescription
+                    NSLog("[TarvenEnvPlugin] dir selection failed: %@", message)
                     DispatchQueue.main.async { call.reject(message) }
                 }
             }
             return
         }
         io.async {
-            let scoped = selected.startAccessingSecurityScopedResource()
-            defer { if scoped { selected.stopAccessingSecurityScopedResource() } }
+            defer { if preScoped { selected.stopAccessingSecurityScopedResource() } }
             do {
                 let coordinator = NSFileCoordinator(filePresenter: nil)
                 var coordinationError: NSError?

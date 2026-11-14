@@ -2,6 +2,15 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-14 iOS v1.14.4 (Build 49) 目录与名称创建分化故障修复
+
+- **问题原因**：`v1.14.3` 上线后出现部分用户可用、iPhone 12 Pro Max（27.2.1）等仍反馈失败的分化情况。逐链核查发现：
+  1. `web/capacitor-ui/src/routes/index.tsx` 自 `v1.14.0` 通用前端同步起遗漏了 `normalizeInstanceIdentity`，留空（「新实例」）、中文或带空格实例名传给 `IOSInstanceStore.identity(_:)` 直接抛出 `"An explicit valid instance identity is required"`，仅纯英文 `[A-Za-z0-9_-]` 名称可通过；
+  2. `TarvenEnvPlugin.swift` 的 `documentPicker(_:didPickDocumentsAt:)` 先返回 UIKit 再在 `io.async` 异步请求 `startAccessingSecurityScopedResource()`，选择 `Documents/instances` 内部路径因跳过 scope 可通过，而外置「我的 iPhone」/ iCloud 目录可能受远程 picker XPC 回收时序影响丢失临时权限；
+  3. `presentPicker` 中 `picker.presentationController?.delegate = self` 先于 `picker.modalPresentationStyle = .formSheet` 设置，且非 `installDir` 操作强行设置了 `picker.directoryURL = self.store.documents`；
+  4. `routes/index.tsx` 与 `RelocateInstanceModal.tsx` 部分错误出口与 `native-errors.ts` 缺少身份校验中文翻译。
+- **修复与升版**：已修复上述 4 处前端/原生逻辑与回归测试，升版至 `1.14.4`（Build `49`），准备推送运行 macOS CI（Hosted Simulator `uiInteractionTested: false`；真机 27.2.1 是否仍有系统文件界面「打开」交互异常待新包真机反馈）。
+
 ## 2026-11-14 iOS v1.14.3 (Build 48) 路径/文件选择失败紧急修复与升版
 
 - **本地记录核对结果**：

@@ -54,6 +54,10 @@ const NATIVE_ERROR_HINTS: Array<[RegExp, string | ((match: RegExpMatchArray) => 
     "系统文件选择器尚未关闭或正忙，请稍候重试",
   ],
   [
+    /An explicit valid instance identity is required/i,
+    "实例目录标识仅支持英文字母、数字、下划线或短横线，请重试或更换名称",
+  ],
+  [
     /Links and non-regular files were preserved/i,
     "所选目标包含不受支持的替身/符号链接或特殊文件，请选择常规本地文件夹或文件",
   ],

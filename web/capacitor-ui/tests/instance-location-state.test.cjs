@@ -106,6 +106,8 @@ test("iOS storage wiring preserves platform affordances and requests installatio
   assert.ok(route.includes('isWindows={isWindows}'));
   assert.match(route, /const configured = settings\?\.configuredInstancesRoot\?\.trim\(\);[\s\S]*setNewInstanceDir\(current => \{[\s\S]*if \(cancelled \|\| current\.trim\(\)\) return current;[\s\S]*setNewInstancePathMode\("root"\);[\s\S]*return configured;[\s\S]*\}\);/);
   assert.doesNotMatch(route, /LegacyMigration|migrateLegacy|migrateInstance|checkLegacyInstances|createInstanceBackup|parseInstanceBackup/);
+  assert.match(route, /isIOS\s*\?\s*normalizeInstanceIdentity\(/);
+  assert.match(route, /isIOS\s*\?\s*`\$\{safeCandidateId\.slice\(0,\s*120\)\}-\$\{counter\+\+\}`/);
   const wizard = read("components/modals/NewInstanceWizardModal.tsx");
   assert.ok(wizard.includes('右上角「打开」'));
   const relocate = read("components/modals/RelocateInstanceModal.tsx");

@@ -143,7 +143,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
       setCustomPath(exactInstallTarget(selected.path, selected.mode, instance.subtitle || instance.name) || "");
     } catch (error) {
       if (session === sessionRef.current && shouldShowDirectoryPickerError(error, isIOS)) {
-        setErrorMsg(error instanceof Error ? error.message : String(error));
+        setErrorMsg(humanizeNativeError(error instanceof Error ? error.message : String(error)));
       }
     }
   };

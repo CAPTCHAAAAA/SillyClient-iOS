@@ -15,7 +15,7 @@ import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG, normalizeRenderEngineSettings } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
 import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId, RenderEngineSettings } from "@/capacitor-plugin";
-import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection, instanceParentPath, sanitizeFolderName, shouldShowDirectoryPickerError } from "@/lib/install-location";
+import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection, instanceParentPath, normalizeInstanceIdentity, sanitizeFolderName, shouldShowDirectoryPickerError } from "@/lib/install-location";
 import { humanizeNativeError } from "@/lib/native-errors";
 import { selectTavernRelease } from "@/lib/tavern-release";
 import { normalizeStoredInstances, serializeInstanceRecords, type StoredInstance } from "@/lib/instance-persistence";
@@ -1309,7 +1309,7 @@ function SillyClientLauncher() {
       }
     } catch (err: any) {
       if (!operation.isCurrent || err instanceof OperationCancelledError) return;
-      const msg = err?.message || String(err);
+      const msg = humanizeNativeError(err?.message || String(err));
       setLaunchError(msg);
       setLaunchProgress(null);
       setLaunchLogs(prev => [...prev, { msg: `失败: ${msg}`, level: "error" }]);
@@ -1445,7 +1445,7 @@ function SillyClientLauncher() {
         return;
       }
       instanceDisplayName = rawGivenName;
-      safeCandidateId = sanitizeFolderName(rawGivenName);
+      safeCandidateId = isIOS ? normalizeInstanceIdentity(rawGivenName) : sanitizeFolderName(rawGivenName);
     } else {
       // 未输入名称时自动编号：新实例、新实例 (2)、新实例 (3)...
       const baseName = "新实例";
@@ -1458,14 +1458,14 @@ function SillyClientLauncher() {
         chosenName = `${baseName} (${counter++})`;
       }
       instanceDisplayName = chosenName;
-      safeCandidateId = sanitizeFolderName(chosenName);
+      safeCandidateId = isIOS ? normalizeInstanceIdentity(chosenName) : sanitizeFolderName(chosenName);
     }
 
     let candidateId = safeCandidateId;
     let counter = 2;
     const existingIds = new Set(instances.map(i => (i.installDir || i.id).toLowerCase()));
     while (existingIds.has(candidateId.toLowerCase())) {
-      candidateId = `${safeCandidateId} (${counter++})`;
+      candidateId = isIOS ? `${safeCandidateId.slice(0, 120)}-${counter++}` : `${safeCandidateId} (${counter++})`;
     }
     const instanceId = candidateId;
     // iOS/desktop custom installs must have an explicit selected path; never silently fall back to Documents.
@@ -1633,7 +1633,7 @@ function SillyClientLauncher() {
       setNewInstanceLocalZip(null);
     } catch (err: any) {
       if (!operation.isCurrent || err instanceof OperationCancelledError) return;
-      const message = err?.message || String(err);
+      const message = humanizeNativeError(err?.message || String(err));
       if (!operationStarted) {
         if (remoteCredentialsSaved && pendingInstanceId) {
           try { await operation.wait(TarvenEnv.clearRemoteBasicAuth({ instanceId: pendingInstanceId })); } catch {}
