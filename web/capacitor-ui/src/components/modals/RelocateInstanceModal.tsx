@@ -10,7 +10,7 @@ import { LAYERS } from "../../constants/layers";
 import { LayerBackdrop } from "../common/LayerBackdrop";
 import { TarvenEnv } from "../../capacitor-plugin";
 import type { InstanceRelocationResult } from "../../capacitor-plugin";
-import { exactInstallTarget, installationSelection, shouldShowDirectoryPickerError } from "../../lib/install-location";
+import { exactInstallTarget, installationSelection, shouldShowDirectoryPickerError, validateInstallPathInput } from "../../lib/install-location";
 import { requireRelocationResult } from "../../lib/instance-location-state";
 import type { TavernInstance } from "../../types";
 import { humanizeNativeError } from "../../lib/native-errors";
@@ -158,6 +158,12 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
 
     try {
       const safeId = instance.installDir || instance.id;
+      if (targetMode === "custom") {
+        const pathIssue = validateInstallPathInput(customPath, { isIOS });
+        if (pathIssue) {
+          throw new Error(pathIssue);
+        }
+      }
       const target = targetMode === "custom" ? exactInstallTarget(customPath, "exact", instance.id) : undefined;
 
       if (targetMode === "custom" && !target) {
@@ -176,7 +182,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
         setCurrentRealPath(res.newPath);
       }
     } catch (err: any) {
-      if (session === sessionRef.current) setErrorMsg(err?.message || "迁移失败，请检查路径权限后重试");
+      if (session === sessionRef.current) setErrorMsg(humanizeNativeError(err?.message || "迁移失败，请检查路径权限后重试"));
     } finally {
       busyRef.current = false;
       onBusyChange?.(false);

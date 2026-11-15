@@ -15,7 +15,7 @@ import { Capacitor } from "@capacitor/core";
 import { TarvenEnv, DEFAULT_CONFIG, normalizeRenderEngineSettings } from "@/capacitor-plugin";
 import { openExternalUrl } from "@/lib/external-links";
 import type { AppUpdateInfo, CompanionPresetSelection, ContentOpenMode, InstanceConfig, InstallPathMode, GithubRelease, GarbageItem, TarvenEvent, PreinstalledExtensionId, RenderEngineSettings } from "@/capacitor-plugin";
-import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection, instanceParentPath, normalizeInstanceIdentity, sanitizeFolderName, shouldShowDirectoryPickerError } from "@/lib/install-location";
+import { buildInstanceSubfolder, cleanInstallPath, exactInstallTarget, installationSelection, instanceParentPath, normalizeInstanceIdentity, sanitizeFolderName, shouldShowDirectoryPickerError, validateInstallPathInput } from "@/lib/install-location";
 import { humanizeNativeError } from "@/lib/native-errors";
 import { selectTavernRelease } from "@/lib/tavern-release";
 import { normalizeStoredInstances, serializeInstanceRecords, type StoredInstance } from "@/lib/instance-persistence";
@@ -1472,6 +1472,13 @@ function SillyClientLauncher() {
     if (newInstanceMode === "local" && !cleanInstallPath(newInstanceDir)) {
       setNewInstanceError("请先点「浏览」选择实例安装目录（必选）");
       return;
+    }
+    if (newInstanceMode === "local") {
+      const pathIssue = validateInstallPathInput(newInstanceDir, { isIOS });
+      if (pathIssue) {
+        setNewInstanceError(pathIssue);
+        return;
+      }
     }
     const operation = operations.begin(instanceId, "create");
     setNewInstanceError(null);

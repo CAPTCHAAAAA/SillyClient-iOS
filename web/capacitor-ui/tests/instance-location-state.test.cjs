@@ -88,6 +88,8 @@ test("new-instance wizard receives iOS identity and its installation picker call
   assert.match(source, /setNewInstancePathMode\("exact"\)/);
   assert.match(source, /if \(newInstanceMode === "local" && !cleanInstallPath\(newInstanceDir\)\)/);
   assert.match(source, /请先点「浏览」选择实例安装目录（必选）/);
+  assert.match(source, /validateInstallPathInput\(newInstanceDir, \{ isIOS \}\)/);
+  assert.ok(source.indexOf('validateInstallPathInput(newInstanceDir, { isIOS })') < source.indexOf('operations.begin(instanceId, "create")'));
 
   const picker = source.slice(source.indexOf("const handlePickInstallFolder"), source.indexOf("// 实例列表持久化", source.indexOf("const handlePickInstallFolder")));
   assert.match(picker, /shouldShowDirectoryPickerError\(error, isIOS\)/);
@@ -158,6 +160,8 @@ test("approved button palette, motion layers and inline async wiring remain pres
   assert.ok(relocate.includes("motion-panel-stack"));
   assert.ok(relocate.includes("retainedSourcePath"));
   assert.ok(relocate.includes("shouldShowDirectoryPickerError(error, isIOS)"));
+  assert.ok(relocate.includes("validateInstallPathInput(customPath, { isIOS })"));
+  assert.ok(relocate.includes("humanizeNativeError(err?.message"));
   const stopped = read("components/instance/InstanceStoppedCard.tsx");
   assert.ok(stopped.includes("await onRenameSave"));
   assert.ok(stopped.includes("motion-instance-card"));

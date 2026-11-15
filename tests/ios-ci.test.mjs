@@ -113,10 +113,11 @@ test('capability probe returns before creating the real console and stays isolat
 test('unsigned artifact version and monotonic native build agree', () => {
     const plist = read('native-src/Info.plist');
     const workflow = read('.github/workflows/build-ipa.yml');
-    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.4<\/string>/);
+    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.14\.5<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 49);
-    assert.match(workflow, /SillyClient-iOS-v1\.14\.4-unsigned/);
+    assert.equal(build, 50);
+    assert.equal(plist, read('ios/App/App/Info.plist'));
+    assert.match(workflow, /SillyClient-iOS-v1\.14\.5-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
 
@@ -343,11 +344,13 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(maintenance, /withExtendedLifetime\(location\)/);
     assert.match(runner, /private var activeLocation: IOSInstallationLocation\?/);
     assert.match(runner, /locations\.json/);
-    assert.match(plugin, /UIAdaptivePresentationControllerDelegate/);
-    assert.match(plugin, /picker\.modalPresentationStyle = \.formSheet[\s\S]*picker\.presentationController\?\.delegate = self/);
-    assert.match(plugin, /picker\.presentationController\?\.delegate = self/);
+    assert.doesNotMatch(plugin, /UIAdaptivePresentationControllerDelegate|presentationControllerDidDismiss/);
+    assert.doesNotMatch(plugin, /picker\.presentationController\?\.delegate = self|picker\.modalPresentationStyle = \.formSheet/);
+    assert.match(plugin, /picker\.modalPresentationStyle = \.automatic/);
     assert.match(plugin, /func documentPicker\([\s\S]*let preScoped = selected\.startAccessingSecurityScopedResource\(\)[\s\S]*if action == "installDir"[\s\S]*io\.async/);
-    assert.match(plugin, /func presentationControllerDidDismiss\(/);
+    assert.match(plugin, /startPickerDismissMonitor\(for: picker, call: call\)/);
+    assert.match(plugin, /PICKER_DISMISSED_WITHOUT_RESULT/);
+    assert.match(plugin, /stopPickerDismissMonitor\(\)/);
     assert.match(plugin, /call\?\.reject\(message, code\)/);
     assert.match(plugin, /coordinator\.coordinate\(readingItemAt: selected, options: \.withoutChanges/);
     assert.match(plugin, /call\.getString\("installPathMode"\)/);
@@ -363,6 +366,12 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(read('native-src/IOSNativeTests.swift'), /Stale bookmark was not refreshed on recovery/);
     assert.match(read('native-src/IOSNativeTests.swift'), /Repeated preflight and creation lookups did not resolve the original selected path/);
     assert.equal(plugin, read('ios/App/App/TarvenEnvPlugin.swift'));
+    assert.equal(read('native-src/AppDelegate.swift'), read('ios/App/App/AppDelegate.swift'));
+    assert.doesNotMatch(read('native-src/AppDelegate.swift'), /registerPluginType:/);
+    assert.deepEqual(JSON.parse(read('capacitor.config.json')).packageClassList, ['TarvenEnvPlugin']);
+    assert.deepEqual(JSON.parse(read('web/capacitor-ui/capacitor.config.json')).packageClassList, ['TarvenEnvPlugin']);
+    assert.match(read('.github/workflows/build-ipa.yml'), /config\.packageClassList = \['TarvenEnvPlugin'\];/);
+    assert.doesNotMatch(read('.github/workflows/build-ipa.yml'), /SillyClientCore\.TarvenEnvPlugin/);
 });
 
 test('maintenance rejects terminal line controls before taking a recoverable snapshot', () => {
@@ -551,7 +560,7 @@ async function simulateDriver(scenario = 'success') {
         const reject = error => ({ success: false, error });
         switch (request.method) {
         case 'getPlatform': return success({ platform: 'ios' });
-        case 'getAppVersion': return success({ version: '1.14.4' });
+        case 'getAppVersion': return success({ version: '1.14.5' });
         case 'getInstanceInfo': {
             const record = registry[options.instanceId];
             return record ? success({ ...record, installPath: record.path }) : reject('Instance directory is unavailable');

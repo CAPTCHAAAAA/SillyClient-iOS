@@ -62,6 +62,22 @@ const NATIVE_ERROR_HINTS: Array<[RegExp, string | ((match: RegExpMatchArray) => 
     "所选目标包含不受支持的替身/符号链接或特殊文件，请选择常规本地文件夹或文件",
   ],
   [
+    /PICKER_DISMISSED_WITHOUT_RESULT/i,
+    "系统文件选择窗口关闭了，但没有拿到所选文件夹；请点「浏览」进入目标文件夹后再点右上角「打开」",
+  ],
+  [
+    /An absolute local installation path is required/i,
+    "安装目录无效：请点击右侧「浏览」按钮选择文件夹，不要直接填写名称或界面文字",
+  ],
+  [
+    /Only absolute local paths and credential-free file URLs are supported/i,
+    "不支持该路径格式，请点击右侧「浏览」按钮选择设备上的本地文件夹",
+  ],
+  [
+    /Installation paths cannot be relative or contain parent traversal/i,
+    "不能使用相对路径或上级目录跳转，请点击「浏览」选择完整的本地文件夹",
+  ],
+  [
     /Installation folder selection failed at ([^\s:]+)(?:\s*\[([^\]]+)\])?:\s*(.+)/i,
     (match) => {
       const stage = match[1];

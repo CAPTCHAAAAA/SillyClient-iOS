@@ -10,13 +10,6 @@ class SillyBridgeViewController: CAPBridgeViewController {
         return descriptor
     }
 
-    override func capacitorDidLoad() {
-        super.capacitorDidLoad()
-        if let bridge = bridge {
-            _ = (bridge as AnyObject).perform(NSSelectorFromString("registerPluginType:"), with: TarvenEnvPlugin.self)
-        }
-    }
-
     override var prefersStatusBarHidden: Bool { TavernViewController.shared.prefersStatusBarHidden }
     override var prefersHomeIndicatorAutoHidden: Bool { TavernViewController.shared.prefersHomeIndicatorAutoHidden }
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
@@ -51,9 +44,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let rootVC = TavernViewController.shared
         let bridgeVC = SillyBridgeViewController()
         bridgeVC.loadViewIfNeeded()
-        if let bridge = bridgeVC.bridge {
-            _ = (bridge as AnyObject).perform(NSSelectorFromString("registerPluginType:"), with: TarvenEnvPlugin.self)
-        }
         rootVC.addChild(bridgeVC)
         if let webView = bridgeVC.webView { rootVC.registerConsoleWebView(webView) }
         bridgeVC.didMove(toParent: rootVC)

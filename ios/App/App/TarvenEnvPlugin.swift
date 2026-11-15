@@ -5,7 +5,7 @@ import WebKit
 import UniformTypeIdentifiers
 
 @objc(TarvenEnvPlugin)
-public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
+public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPickerDelegate {
     public let identifier = "TarvenEnv"
     public let jsName = "TarvenEnv"
     private let io = DispatchQueue(label: "com.sillyclient.instance-io", qos: .userInitiated)
@@ -14,6 +14,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     private var pendingPickerAction = ""
     private var pendingInstanceId = ""
     private weak var activePickerController: UIDocumentPickerViewController?
+    private var pickerDismissTimer: DispatchSourceTimer?
+    private var pickerDetachedTicks = 0
     private var pendingExportCleanupURL: URL?
     private var scopedDirectories: [String: URL] = [:]
     private var scopedDirectoryOrder: [String] = []
@@ -21,6 +23,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     private var pendingViewSession: (String, URL, Bool)?
     private var viewGeneration: UInt64 = 0
     deinit {
+        pickerDismissTimer?.cancel()
+        pickerDismissTimer = nil
         for directory in scopedDirectories.values { directory.stopAccessingSecurityScopedResource() }
         if let cleanup = pendingExportCleanupURL { try? FileManager.default.removeItem(at: cleanup) }
     }
@@ -577,7 +581,43 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         }
     }
 
+    private func stopPickerDismissMonitor() {
+        pickerDismissTimer?.cancel()
+        pickerDismissTimer = nil
+        pickerDetachedTicks = 0
+    }
+
+    private func startPickerDismissMonitor(for picker: UIDocumentPickerViewController, call: CAPPluginCall) {
+        stopPickerDismissMonitor()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        // Wait >= 0.5s after detachment before treating a silent dismissal as missing delegate delivery.
+        timer.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(250))
+        timer.setEventHandler { [weak self, weak picker] in
+            guard let self else { return }
+            guard self.pendingPickerCall === call else {
+                self.stopPickerDismissMonitor()
+                return
+            }
+            if let picker,
+               picker.presentingViewController != nil || picker.isBeingPresented || picker.isBeingDismissed {
+                self.pickerDetachedTicks = 0
+                return
+            }
+            self.pickerDetachedTicks += 1
+            if self.pickerDetachedTicks >= 2 {
+                NSLog("[TarvenEnvPlugin] picker dismissed without delegate callback action=%@", self.pendingPickerAction)
+                self.cancelPendingPicker(
+                    message: "PICKER_DISMISSED_WITHOUT_RESULT",
+                    code: "PICKER_DISMISSED_WITHOUT_RESULT"
+                )
+            }
+        }
+        pickerDismissTimer = timer
+        timer.resume()
+    }
+
     private func takePendingPicker() -> (call: CAPPluginCall?, action: String, instanceId: String) {
+        stopPickerDismissMonitor()
         let call = pendingPickerCall
         let action = pendingPickerAction
         let instance = pendingInstanceId
@@ -682,8 +722,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                     : UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true))
             picker.delegate = self
             picker.allowsMultipleSelection = false
-            picker.modalPresentationStyle = .formSheet
-            picker.presentationController?.delegate = self
+            // Keep UIKit's default presentation style and internal sheet delegate intact so XPC dismissal callbacks are delivered reliably.
+            picker.modalPresentationStyle = .automatic
             if let popover = picker.popoverPresentationController {
                 popover.sourceView = presenter.view
                 popover.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 0, height: 0)
@@ -715,7 +755,9 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             self.pendingInstanceId = call.getString("instanceId") ?? "default"
             self.activePickerController = picker
             self.pendingExportCleanupURL = cleanupDirectory
+            NSLog("[TarvenEnvPlugin] presenting picker action=%@ presenter=%@", action, String(describing: type(of: presenter)))
             presenter.present(picker, animated: true)
+            self.startPickerDismissMonitor(for: picker, call: call)
         }
     }
     @objc func pickDirectory(_ call: CAPPluginCall) {
@@ -759,6 +801,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         }
     }
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        NSLog("[TarvenEnvPlugin] didPickDocumentsAt count=%ld", urls.count)
         let (takenCall, action, instance) = takePendingPicker()
         guard let call = takenCall, let selected = urls.first else {
             cleanupPendingExport()
@@ -873,13 +916,8 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         }
     }
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        NSLog("[TarvenEnvPlugin] documentPickerWasCancelled action=%@", pendingPickerAction)
         cancelPendingPicker()
-    }
-    public func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
-        if self.pendingPickerCall != nil && (presentationController.presentedViewController is UIDocumentPickerViewController
-            || presentationController.presentedViewController === activePickerController) {
-            cancelPendingPicker()
-        }
     }
     @objc func checkLegacyInstances(_ call: CAPPluginCall) {
         perform(call) { ["instances": try self.store.legacyInstances()] }

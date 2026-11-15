@@ -2,6 +2,13 @@
 
 这里只保留已经发布版本的用户可见变化。完整实现历史以 Git 提交和各版本 Release 说明为准。
 
+## 1.14.5 - 2026-11-15
+
+- 移除 `TarvenEnvPlugin` 中覆盖 `UIDocumentPickerViewController` 内部代理的 `presentationController?.delegate = self` 与 `.formSheet` 强制设置，改为 `.automatic` 默认呈现，并用主队列分离检测定时器在未收到结果回调即关闭时明确返回 `PICKER_DISMISSED_WITHOUT_RESULT`（不再按 `PICKER_CANCELLED` 静默吞掉）。
+- 清理 `AppDelegate.swift` 无效 `registerPluginType:` 调用，并将 Capacitor `packageClassList` 统一收敛为 `["TarvenEnvPlugin"]`。
+- 新增 `validateInstallPathInput` 在创建与迁移前直接拦截「我的 iPhone ▸ ...」界面显示名称等非本地路径输入；`native-errors.ts` 补齐 `PICKER_DISMISSED_WITHOUT_RESULT` 与路径格式错误的中文引导提示。
+- 应用版本升至 `1.14.5`（Build `50`），仅更新 iOS，跳过 Windows 与 Android。
+
 ## 1.14.4 - 2026-11-14
 
 - 恢复 iOS 端创建实例时的安全目录标识生成（`normalizeInstanceIdentity`），修复留空、中文或含空格实例名在原生存储校验失败（`An explicit valid instance identity is required`）的问题，同时保留用户设定的中文展示名。

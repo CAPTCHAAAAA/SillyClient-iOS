@@ -2,6 +2,18 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-15 iOS v1.14.5 (Build 50) 文件选择器代理冲突与非路径输入修复
+
+- **问题原因**（基于 `v1.14.4` Build 49 真机录屏核查）：
+  1. 用户在系统「文件」弹窗内进入 `SillyClient > instances` 并点击右上角「打开」后，弹窗收起但「选择或输入路径」仍为空、无错误提示——`v1.14.3`–`v1.14.4` 为捕获下拉手势添加了 `picker.modalPresentationStyle = .formSheet` 与 `picker.presentationController?.delegate = self`，覆盖 UIKit / XPC 选择器内部代理并触发 `presentationControllerDidDismiss(_:)` 提前返回 `PICKER_CANCELLED`；
+  2. 用户手动粘贴「文件」面包屑文本 `"我的 iPhone ▸ SillyClient"` 点击「创建」后，直接进入 `LaunchConsoleModal` 在 `10%` 暴露原始英文 `"An absolute local installation path is required"`；
+  3. `capacitor.config.json` / `build-ipa.yml` 与 `AppDelegate.swift` 存在重复 `SillyClientCore.TarvenEnvPlugin` 与无效 `registerPluginType:` 注册代码。
+- **修复与升版**：
+  - `TarvenEnvPlugin.swift` 移除 `UIAdaptivePresentationControllerDelegate` / `presentationController?.delegate` / `.formSheet` 覆盖，改用主队列轻量级 `DispatchSourceTimer`（`>= 0.5s` 分离确认）在未收到结果或取消回调即关闭时返回 `PICKER_DISMISSED_WITHOUT_RESULT` 并补充生命周期 `NSLog`；
+  - 清理 `AppDelegate.swift` 与 `packageClassList` 重复插件注册；
+  - `install-location.ts` 新增 `validateInstallPathInput` 并接入 `routes/index.tsx` 与 `RelocateInstanceModal.tsx`，`native-errors.ts` 补齐对应中文错误映射；
+  - 同步升级至 `1.14.5`（Build `50`），本地回归测试与生产构建通过，准备推送触发 macOS CI 构建与测试计划发布。
+
 ## 2026-11-14 iOS v1.14.4 (Build 49) 目录与名称创建分化故障修复
 
 - **问题原因**：`v1.14.3` 上线后出现部分用户可用、iPhone 12 Pro Max（27.2.1）等仍反馈失败的分化情况。逐链核查发现：
