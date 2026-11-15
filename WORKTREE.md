@@ -12,7 +12,11 @@
   - `TarvenEnvPlugin.swift` 移除 `UIAdaptivePresentationControllerDelegate` / `presentationController?.delegate` / `.formSheet` 覆盖，改用主队列轻量级 `DispatchSourceTimer`（`>= 0.5s` 分离确认）在未收到结果或取消回调即关闭时返回 `PICKER_DISMISSED_WITHOUT_RESULT` 并补充生命周期 `NSLog`；
   - 清理 `AppDelegate.swift` 与 `packageClassList` 重复插件注册；
   - `install-location.ts` 新增 `validateInstallPathInput` 并接入 `routes/index.tsx` 与 `RelocateInstanceModal.tsx`，`native-errors.ts` 补齐对应中文错误映射；
-  - 同步升级至 `1.14.5`（Build `50`），本地回归测试与生产构建通过，准备推送触发 macOS CI 构建与测试计划发布。
+  - 同步升级至 `1.14.5`（Build `50`），提交 `a0b65e3` 推送至 `origin/lts/ios-release-hardening`。
+- **CI 与合干交付**：
+  - GitHub Actions `macos-15` Run `43715908309`（attempt 2，耗时 16m33s；attempt 1 因冷启动 `xcrun simctl launch` 300s 超时未进入应用）全绿通过：React 生产构建、Server No-WASM Smoke、48/48 组 Swift 原生 fixture、24/24 阶段 Hosted Simulator E2E（`uiInteractionTested: false`、`physicalDeviceTested: false`）、arm64 Release Archive 与 IPA 打包全部通过；
+  - 交付产物 `Local/artifacts/v1.14.5/SillyClient-iOS-v1.14.5-unsigned.ipa`（194,223,855 字节，SHA-256 `4f874d1e83d12249bf51e2a310dcb7e7f5be5ef0b37191fe3e9c6b6b6bb33d62`，与 CI `ipa-sha256.txt` 一致）；
+  - 随后快进合入并推送 `SillyClient_iOS/main`，在 `SillyClient_Main` 打 `v1.14.5` Tag 并发布 GitHub Release（继续跳过 Windows 与 Android）；真机 Files / iCloud UI 选择表现待用户侧载本版复测。
 
 ## 2026-11-14 iOS v1.14.4 (Build 49) 目录与名称创建分化故障修复
 
