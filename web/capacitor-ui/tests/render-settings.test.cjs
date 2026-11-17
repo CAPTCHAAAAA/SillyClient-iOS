@@ -14,6 +14,7 @@ test("normalizeRenderEngineSettings defaults all options to enabled with realtim
     immersiveColor: true,
     colorExtractionMode: "realtime",
     clickEffect: true,
+    performancePreset: true,
   });
 });
 

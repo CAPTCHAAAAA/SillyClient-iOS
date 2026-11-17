@@ -52,11 +52,23 @@ export function shouldShowDirectoryPickerError(error: unknown, isIOS: boolean): 
     ));
   }
   const message = error instanceof Error ? error.message : String(error);
-  return !/cancel/i.test(message);
+  return !/cancel|取消/i.test(message);
 }
 
 export function instanceParentPath(value: string): string | undefined {
   return executablePath(value);
+}
+
+/** Relocation selects a parent, even when it has the same name as the instance. */
+export function relocationTargetInParent(parentPath: string, instancePath: string): string {
+  const parent = executablePath(parentPath);
+  const source = executablePath(instancePath);
+  const name = source?.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+  if (!parent || !name || name === "." || name === "..") {
+    throw new Error("无法确认实例目录，请重新打开存储迁移");
+  }
+  const separator = parent.includes("\\") || /^[a-z]:/i.test(parent) ? "\\" : "/";
+  return `${parent.replace(/[\\/]+$/, "")}${separator}${name}`;
 }
 
 /** Migration targets are exact; the native installer owns root resolution for new installs. */
@@ -75,18 +87,11 @@ export function sanitizeFolderName(name: string): string {
     .slice(0, 100) || "instance";
 }
 
-/**
- * Builds a dedicated subfolder for the instance under the parent directory.
- * If the path already ends with the instance name, avoids duplicating.
- */
+/** The selected directory is always a parent, never the instance itself. */
 export function buildInstanceSubfolder(parentDir: string, instanceName: string): string {
   const clean = parentDir.trim().replace(/^["']|["']$/g, "").trim().replace(/[\\/]+$/, "");
   const separator = clean.includes("\\") || /^[a-z]:/i.test(clean) ? "\\" : "/";
   const safeName = sanitizeFolderName(instanceName);
-  const currentBase = clean.slice(clean.lastIndexOf(separator) + 1);
-  if (currentBase.toLowerCase() === safeName.toLowerCase()) {
-    return clean;
-  }
   return `${clean}${separator}${safeName}`;
 }
 
@@ -108,4 +113,3 @@ export function normalizeInstanceIdentity(name: string, fallback?: string): stri
     : `inst-${Date.now().toString(36)}`;
   return defaultFallback;
 }
-

@@ -86,14 +86,14 @@ test("new-instance wizard receives iOS identity and its installation picker call
   assert.match(source, /setNewInstancePathMode\(selection\.mode\)/);
   assert.match(source, /exactInstallTarget\(customParentDir, newInstancePathMode, instanceId\)/);
   assert.match(source, /setNewInstancePathMode\("exact"\)/);
-  assert.match(source, /if \(newInstanceMode === "local" && !cleanInstallPath\(newInstanceDir\)\)/);
+  assert.match(source, /if \(\(isAndroid \|\| isIOS\) && newInstanceMode === "local" && !cleanInstallPath\(newInstanceDir\)\)/);
   assert.match(source, /请先点「浏览」选择实例安装目录（必选）/);
   assert.match(source, /validateInstallPathInput\(newInstanceDir, \{ isIOS \}\)/);
   assert.ok(source.indexOf('validateInstallPathInput(newInstanceDir, { isIOS })') < source.indexOf('operations.begin(instanceId, "create")'));
 
   const picker = source.slice(source.indexOf("const handlePickInstallFolder"), source.indexOf("// 实例列表持久化", source.indexOf("const handlePickInstallFolder")));
   assert.match(picker, /shouldShowDirectoryPickerError\(error, isIOS\)/);
-  assert.match(picker, /\}, \[isAndroid, isIOS\]\)/);
+  assert.match(picker, /\}, \[isAndroid, isIOS, newInstanceDir, newInstanceName, platformTag\]\)/);
   const pickerErrorHandler = picker.slice(picker.lastIndexOf("} catch (error)"));
   assert.doesNotMatch(pickerErrorHandler, /setNewInstanceDir\(""\)/);
 });
@@ -106,7 +106,7 @@ test("iOS storage wiring preserves platform affordances and requests installatio
   assert.ok(route.includes('"ios >"'));
   assert.ok(route.includes('isIOS={isIOS}'));
   assert.ok(route.includes('isWindows={isWindows}'));
-  assert.match(route, /const configured = settings\?\.configuredInstancesRoot\?\.trim\(\);[\s\S]*setNewInstanceDir\(current => \{[\s\S]*if \(cancelled \|\| current\.trim\(\)\) return current;[\s\S]*setNewInstancePathMode\("root"\);[\s\S]*return configured;[\s\S]*\}\);/);
+  assert.match(route, /const raw = settings\?\.configuredInstancesRoot\?\.trim\(\);[\s\S]*const saved = isIOS \? raw : cleanInstallPath\(raw\);[\s\S]*setNewInstanceDir\(\(current\) => \{[\s\S]*if \(cancelled \|\| current\.trim\(\)\) return current;[\s\S]*if \(isIOS\) setNewInstancePathMode\("root"\);[\s\S]*return saved;[\s\S]*\}\);/);
   assert.doesNotMatch(route, /LegacyMigration|migrateLegacy|migrateInstance|checkLegacyInstances|createInstanceBackup|parseInstanceBackup/);
   assert.match(route, /isIOS\s*\?\s*normalizeInstanceIdentity\(/);
   assert.match(route, /isIOS\s*\?\s*`\$\{safeCandidateId\.slice\(0,\s*120\)\}-\$\{counter\+\+\}`/);
@@ -114,8 +114,8 @@ test("iOS storage wiring preserves platform affordances and requests installatio
   assert.ok(wizard.includes('右上角「打开」'));
   const relocate = read("components/modals/RelocateInstanceModal.tsx");
   assert.ok(relocate.includes('purpose: "installation"'));
-  assert.ok(relocate.includes('应用 Documents 下的'));
-  assert.ok(relocate.includes('右上角「打开」'));
+  assert.ok(relocate.includes('选择或输入完整目标目录绝对路径'));
+  assert.ok(relocate.includes('请点击「浏览」进入目标文件夹后点击右上角「打开」确认'));
   assert.ok(relocate.includes('retainedSourcePath'));
   assert.equal(fs.existsSync(path.join(__dirname, "../src/components/modals/LegacyMigrationModal.tsx")), false);
   const manage = read("components/modals/ManageInstanceModal.tsx");
@@ -128,7 +128,7 @@ test("iOS storage wiring preserves platform affordances and requests installatio
   assert.ok(running.includes("isIOS?: boolean"));
   assert.match(running, /isIOS[\s\S]*"ios >"/);
   assert.ok(running.includes("iOS 进程内环境（可查看服务运行日志）"));
-  assert.ok(running.includes("输入 Android shell 命令..."));
+  assert.ok(running.includes("输入 shell 命令..."));
   const card = read("components/instance/InstanceCard.tsx");
   const carousel = read("components/instance/InstanceCarousel.tsx");
   assert.ok(card.includes("isIOS={props.isIOS}"));
@@ -157,11 +157,11 @@ test("approved button palette, motion layers and inline async wiring remain pres
   assert.ok(running.includes("text-red-300/70 hover:text-red-200"));
   const relocate = read("components/modals/RelocateInstanceModal.tsx");
   assert.ok(relocate.includes("LAYERS.DIALOG_SURFACE"));
-  assert.ok(relocate.includes("motion-panel-stack"));
+  assert.ok(relocate.includes("animate-modal-dialog"));
   assert.ok(relocate.includes("retainedSourcePath"));
-  assert.ok(relocate.includes("shouldShowDirectoryPickerError(error, isIOS)"));
-  assert.ok(relocate.includes("validateInstallPathInput(customPath, { isIOS })"));
-  assert.ok(relocate.includes("humanizeNativeError(err?.message"));
+  assert.ok(relocate.includes("shouldShowDirectoryPickerError(error, effectiveIOS)"));
+  assert.ok(relocate.includes("validateInstallPathInput(rawTarget, { isIOS: effectiveIOS })"));
+  assert.ok(relocate.includes("humanizeNativeError(err)"));
   const stopped = read("components/instance/InstanceStoppedCard.tsx");
   assert.ok(stopped.includes("await onRenameSave"));
   assert.ok(stopped.includes("motion-instance-card"));

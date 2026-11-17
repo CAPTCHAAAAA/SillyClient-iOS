@@ -2,6 +2,13 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-17 iOS 1.15.0 前端同步与本机验证（未提交）
+
+- **同步基线**：将 common frontend `a4308d9`（功能 `8b8982a`、遮罩修正 `d8c7e63`）及此前尚未同步的 `3b78ac0` 接入本工作树，保留 iOS Picker、路径安全、NodeMobile 与平台分支；保留 iOS 专用 onboarding 视口滚动实现，并修正与新路径契约冲突的测试断言。
+- **版本面**：前端、CI `APP_VERSION` 与 `Info.plist` 统一为 `1.15.0`；iOS `CFBundleVersion` 从 50 递增到 51，`native-src/Info.plist` 与 `ios/App/App/Info.plist` 字节一致。`pnpm-lock.yaml` 未变，未新增依赖。
+- **本机验证**：`pnpm run typecheck`、`pnpm run build`（Vite 1951 modules）、前端测试 106/106、iOS 定向 Node 测试 118/118、全量 `tests/*.test.mjs` 118 PASS / 2 环境可选 SKIP / 0 FAIL、`verify-ios-cloud.mjs --mock-mode` 7/7 套件及 `git diff --check` 均通过。构建仅出现现有静态脚本、字体解析与 chunk 大小提示。
+- **边界与状态**：本机为 Windows，未执行 Xcode / macOS Archive、真实模拟器 UI 或真机验收；没有新 IPA。当前改动保留在工作树，未提交、未推送、未合入 main，未创建 Tag / Release；等待后续明确提交指令后再进入远端 macOS CI 构建。
+
 ## 2026-11-15 iOS v1.14.5 (Build 50) 文件选择器代理冲突与非路径输入修复
 
 - **问题原因**（基于 `v1.14.4` Build 49 真机录屏核查）：

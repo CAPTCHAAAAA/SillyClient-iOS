@@ -3,6 +3,8 @@ import { Play, MoreVertical } from "lucide-react";
 import { cn, formatDisplayVersion } from "../../lib/utils";
 import { TarvenEnv } from "../../capacitor-plugin";
 import type { TavernInstance } from "../../types";
+import { reportGlobalError } from "../../lib/global-error-store";
+import { humanizeNativeError } from "../../lib/native-errors";
 import { useInstanceLogs } from "../../hooks/useInstanceLogs";
 import { instanceLogs } from "../../lib/log-store";
 import { TerminalWell } from "../common/TerminalWell";
@@ -23,8 +25,6 @@ export interface RunningConsoleCardProps {
   isWindows?: boolean;
   isIOS?: boolean;
 }
-
-export { formatDisplayVersion };
 
 /**
  * 运行态控制台卡片组件 (RunningConsoleCard)
@@ -60,7 +60,7 @@ const RunningConsoleCardComponent: React.FC<RunningConsoleCardProps> = ({
     ? "输入 Windows 命令..."
     : isIOS
       ? "iOS 进程内环境（可查看服务运行日志）"
-      : "输入 Android shell 命令...";
+      : "输入 shell 命令...";
 
   useEffect(() => {
     if (active && logsContainerRef.current) {
@@ -94,9 +94,16 @@ const RunningConsoleCardComponent: React.FC<RunningConsoleCardProps> = ({
       text: command,
       instanceId,
     }).catch(error => {
+      const friendly = humanizeNativeError(error);
       instanceLogs.append(instanceId, {
-        msg: `命令失败: ${error instanceof Error ? error.message : String(error)}`,
+        msg: `命令失败: ${friendly}`,
         level: "error",
+      });
+      reportGlobalError(error, {
+        area: "terminal",
+        stage: "card-send-command",
+        userMessage: `终端命令失败：${friendly}`,
+        extraSecrets: [instance.subtitle, instance.name, instance.installPath],
       });
     });
     setTerminalInput("");
