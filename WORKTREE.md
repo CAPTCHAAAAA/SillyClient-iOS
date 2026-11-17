@@ -6,8 +6,10 @@
 
 - **清理范围**：删除首页 `DEV_FAULT_TEST_INSTANCE_ID` / `__dev-fault-test-card__`、虚构异常卡片及其持久化、探活、启动和错误展示特殊分支；删除 Logo 长按 620ms 生成 `servicePort` 异常的预览函数、计时 refs、pointer handlers 与提示。普通运行演示、新手引导、Logo 点击切换字体和真实错误诊断 / Sentry 上报保留。
 - **平台与版本边界**：保持 `1.15.0 / Build 51`；Swift / ObjC、NodeMobile、两份 `Info.plist` 和其他平台未改。没有独立的仅故障预览测试文件，真实诊断与上报测试继续保留。
-- **本地门禁**：`pnpm run build`（含 TypeScript 检查，1951 modules）、前端 106/106、Node 118 PASS / 2 环境可选 SKIP / 0 FAIL、云端 mock 7/7 及 `git diff --check` 通过。证据在 `Local/evidence/ios-no-fault-demo-20261118/`。正式 Capacitor sync、Xcode Archive、IPA 和 hosted simulator 验证由既有 GitHub `build-ipa.yml` 执行；本条提交触发该 CI，尚不构成新 IPA 已通过的声明。
-- **交付顺序**：本地门禁通过后提交并推送 LTS 触发 macOS CI；CI 成功且新 IPA 验证完成后才快进并推送 iOS `main`。不在 iOS 仓库创建 Tag / Release，统一发布由主仓处理。
+- **本地门禁**：`pnpm run build`（含 TypeScript 检查，1951 modules）、前端 106/106、Node 118 PASS / 2 环境可选 SKIP / 0 FAIL、云端 mock 7/7 及 `git diff --check` 通过。证据在 `Local/evidence/ios-no-fault-demo-20261118/`。
+- **GitHub 正式构建**：功能提交 `057113dcef0dded654db40ccf1affbcae901297a` 已推送 LTS；`macos-15` Run `44135666970`（16m00s）全绿，完成正式 Capacitor 同步、arm64 Release Archive、未签名 IPA 与 Hosted Simulator 构建验证。模拟器 24/24 阶段、Swift 原生沙盒 fixture 48/48 组全部通过；完整 run JSON、日志、官方 artifact 元数据与测试证据均已归档。
+- **新包验真与归档**：`Local/artifacts/v1.15.0/ios-no-fault-demo-20261118/SillyClient-iOS-v1.15.0-unsigned.ipa`，194,244,142 字节，SHA-256 `dfce0f84c730d5f5c13a4c887af6bcda5d20329cd288b09ddef21637032a2083`。官方 IPA / evidence artifact ZIP 摘要、IPA 全部 CRC、包内 `1.15.0 / Build 51 / com.sillyclient.ios` 均已核验；包内三份前端 JS 与本地构建摘要一致，故障卡片和 Logo 注入标记为零。
+- **交付顺序与边界**：本地门禁通过后提交并推送 LTS 触发 macOS CI；CI 成功且新 IPA 验证完成后，以 `[skip ci]` 记录提交快进并推送 iOS `main`。不在 iOS 仓库创建 Tag / Release，版本根目录成品及三端总校验清单由主仓统一发布步骤提升。没有真机或点击式 UI 验收，`physicalDeviceTested` / `uiInteractionTested` 均为 false。
 - **后续边界**：前端、三端及交接工作流复查只登记为 `1.15.1` 待办，必须等本阶段 `1.15.0` 发布完成后再提上日程，本次未开展该审计。
 
 ## 2026-11-17 iOS 1.15.0 前端同步与 GitHub Xcode 自动测试通过
