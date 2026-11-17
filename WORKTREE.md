@@ -2,12 +2,15 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
-## 2026-11-18 iOS 1.15.0 SC Bordeaux 紧急同步（重新构建中）
+## 2026-11-18 iOS 1.15.0 SC Bordeaux 紧急同步（正式 IPA 已通过验证）
 
 - **授权与版本**：按用户紧急指令修复当前 `1.15.0`，提交推送、同步 main、重建并替换现有 Release 安装包；保持 `1.15.0 / Build 51`，不推迟至 `1.15.1`。
 - **修复内容**：两份发布资源 `resources/` 与 CocoaPods 实际使用的 `native-src/Resources/` 同步最新 SC Bordeaux，SHA-256 `8253F83DA43971F489A48CDD94F1050A3DD3BABDA0772C1AA5D85300029544F2`；manifest 与原生安装器 companion revision 统一为 `3`，匹配前端既有 revision 3。扩展安装选择 revision 保持为 1，壁纸与用户实例不改。
 - **本地验证**：生产前端构建及 TypeScript 检查、前端 106/106、Node 119 PASS / 2 环境可选 SKIP / 0 FAIL、云端 mock 7/7 和 `git diff --check` 通过；新增回归校验两个资源入口的实际主题摘要、前后端 revision 与扩展 revision 边界。证据：`Local/evidence/ios-theme-hotfix-20261118/`。
 - **交付流程**：本地门禁后推送 LTS 触发 GitHub macOS Xcode 构建，只有正式 CI 与 IPA 包内主题验真完成后，才将本轮记为已构建；记录提交使用 `[skip ci]` 并快进同步 iOS main，主仓统一替换 `v1.15.0` Release 资产和校验清单。
+- **正式构建结果**：功能提交 `07f5488ee27be123de70c0aa6e55d7b2e061ef59` 的 GitHub macOS Run `44164304449` 全绿；arm64 Release Archive、IPA、Hosted Simulator 24/24 阶段与 Swift fixture 48/48 组通过。官方 artifact ZIP 大小、SHA-256 及 CRC 已与 GitHub 元数据核对。
+- **新 IPA 与包内证据**：`Local/artifacts/v1.15.0/theme-hotfix-20261118/SillyClient-iOS-v1.15.0-unsigned.ipa`，194,298,059 字节，SHA-256 `8485ef53eea825f82895c4c7814523552471a8a7c69ab0be4b9de90fac6dcb6b`。包内 `1.15.0 / Build 51 / com.sillyclient.ios`、所有 CRC、3 份前端 JS 与本地生产构建一致性及故障注入标记零残留通过；framework 内 4 份主题均为 `8253F83D…029544F2`，3 份 SC Bordeaux manifest 均为 revision 3 且所引用主题/壁纸摘要正确。回执：`Local/evidence/ios-theme-hotfix-20261118/artifact-verification.json`。
+- **同步与验收边界**：本记录提交仅改 WORKTREE，使用 `[skip ci]`；随本次交付快进推送 iOS main，主仓统一发布步骤接收已验证 IPA 并替换现有 Release 同名资产。未作真机或点击式 UI 验收，`physicalDeviceTested` / `uiInteractionTested` 均为 false。
 
 ## 2026-11-18 iOS 1.15.0 故障演示清理与重新构建
 
