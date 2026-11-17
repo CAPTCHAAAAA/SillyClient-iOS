@@ -2,6 +2,14 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-18 iOS 1.15.0 故障演示清理与重新构建
+
+- **清理范围**：删除首页 `DEV_FAULT_TEST_INSTANCE_ID` / `__dev-fault-test-card__`、虚构异常卡片及其持久化、探活、启动和错误展示特殊分支；删除 Logo 长按 620ms 生成 `servicePort` 异常的预览函数、计时 refs、pointer handlers 与提示。普通运行演示、新手引导、Logo 点击切换字体和真实错误诊断 / Sentry 上报保留。
+- **平台与版本边界**：保持 `1.15.0 / Build 51`；Swift / ObjC、NodeMobile、两份 `Info.plist` 和其他平台未改。没有独立的仅故障预览测试文件，真实诊断与上报测试继续保留。
+- **本地门禁**：`pnpm run build`（含 TypeScript 检查，1951 modules）、前端 106/106、Node 118 PASS / 2 环境可选 SKIP / 0 FAIL、云端 mock 7/7 及 `git diff --check` 通过。证据在 `Local/evidence/ios-no-fault-demo-20261118/`。正式 Capacitor sync、Xcode Archive、IPA 和 hosted simulator 验证由既有 GitHub `build-ipa.yml` 执行；本条提交触发该 CI，尚不构成新 IPA 已通过的声明。
+- **交付顺序**：本地门禁通过后提交并推送 LTS 触发 macOS CI；CI 成功且新 IPA 验证完成后才快进并推送 iOS `main`。不在 iOS 仓库创建 Tag / Release，统一发布由主仓处理。
+- **后续边界**：前端、三端及交接工作流复查只登记为 `1.15.1` 待办，必须等本阶段 `1.15.0` 发布完成后再提上日程，本次未开展该审计。
+
 ## 2026-11-17 iOS 1.15.0 前端同步与 GitHub Xcode 自动测试通过
 
 - **同步基线**：将 common frontend `a4308d9`（功能 `8b8982a`、遮罩修正 `d8c7e63`）及此前尚未同步的 `3b78ac0` 接入本工作树，保留 iOS Picker、路径安全、NodeMobile 与平台分支；保留 iOS 专用 onboarding 视口滚动实现，并修正与新路径契约冲突的测试断言。
