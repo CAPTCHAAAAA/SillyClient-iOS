@@ -2,12 +2,16 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
-## 2026-11-17 iOS 1.15.0 前端同步与本机验证（未提交）
+## 2026-11-17 iOS 1.15.0 前端同步与 GitHub Xcode 自动测试通过
 
 - **同步基线**：将 common frontend `a4308d9`（功能 `8b8982a`、遮罩修正 `d8c7e63`）及此前尚未同步的 `3b78ac0` 接入本工作树，保留 iOS Picker、路径安全、NodeMobile 与平台分支；保留 iOS 专用 onboarding 视口滚动实现，并修正与新路径契约冲突的测试断言。
 - **版本面**：前端、CI `APP_VERSION` 与 `Info.plist` 统一为 `1.15.0`；iOS `CFBundleVersion` 从 50 递增到 51，`native-src/Info.plist` 与 `ios/App/App/Info.plist` 字节一致。`pnpm-lock.yaml` 未变，未新增依赖。
 - **本机验证**：`pnpm run typecheck`、`pnpm run build`（Vite 1951 modules）、前端测试 106/106、iOS 定向 Node 测试 118/118、全量 `tests/*.test.mjs` 118 PASS / 2 环境可选 SKIP / 0 FAIL、`verify-ios-cloud.mjs --mock-mode` 7/7 套件及 `git diff --check` 均通过。构建仅出现现有静态脚本、字体解析与 chunk 大小提示。
-- **边界与状态**：本机为 Windows，未执行 Xcode / macOS Archive、真实模拟器 UI 或真机验收；没有新 IPA。当前改动保留在工作树，未提交、未推送、未合入 main，未创建 Tag / Release；等待后续明确提交指令后再进入远端 macOS CI 构建。
+- **GitHub Xcode 构建**：按用户继续执行指令，将功能提交 `ef1a07412bec4b5c091a7fbe9cdead2e028626cb` 推送至 `lts/ios-release-hardening`，触发 `macos-15` Run `44115284251`（attempt 1）。整条作业 19m16s 成功：React 生产构建、iOS Node 回归、真实 Server No-WASM Smoke、arm64 Release Archive、未签名 IPA 和实际 Hosted Simulator 应用构建、测试及证据上传全部通过。
+- **自动测试证据**：本次 `simulator-results.json` 为 24/24 阶段，`native-module-results.json` 为 48/48 组 Swift 模块沙盒 fixture；NodeMobile 18.20.4 两轮 HTTP 200、终止后端口关闭，真实 Tavern WebView DOM 及桥接启动/停止/重启、迁移、维护恢复通过。证据在 `Local/evidence/ios-run-44115284251/`，对应源码始终为 `ef1a074`。
+- **成品归档（2026-11-18）**：`Local/artifacts/v1.15.0/SillyClient-iOS-v1.15.0-unsigned.ipa` 为 194,244,690 字节，SHA-256 `058f4cc7a1cb2e896ae1a0b7d4859af587d7667572305131a1490f304a689e60`，与 CI 一致；已验证 ZIP magic、全部 CRC 和包内 `Info.plist` 的 `1.15.0 / Build 51`（`com.sillyclient.ios`）。官方 IPA / Simulator artifact ZIP 的大小与 SHA-256 均匹配，模拟器包及完整测试证据已保存，`SHA256SUMS.txt` 仅新增 iOS 条目。
+- **交付流程**：本次构建后的提交仅更新本记录，功能源码保持为已通过 CI 的 `ef1a074`；记录提交使用 `[skip ci]`，随后按既有流程将 iOS LTS 快进同步至 `SillyClient_iOS/main`，最终本地及远端 SHA 记录在中央交接文档与本次证据回执中。
+- **验证边界**：`uiInteractionTested: false`、`physicalDeviceTested: false`、`visualReviewPerformed: false`、`paidApiTested: false`；未对真机或系统 Files picker 点击交互作通过声明。当前 Windows 主机负责本地预检及 GitHub CI 触发、下载与校验，Xcode 在 GitHub `macos-15` 执行；未创建 Tag / Release。
 
 ## 2026-11-15 iOS v1.14.5 (Build 50) 文件选择器代理冲突与非路径输入修复
 
