@@ -2,6 +2,13 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-18 iOS 1.15.0 SC Bordeaux 紧急同步（重新构建中）
+
+- **授权与版本**：按用户紧急指令修复当前 `1.15.0`，提交推送、同步 main、重建并替换现有 Release 安装包；保持 `1.15.0 / Build 51`，不推迟至 `1.15.1`。
+- **修复内容**：两份发布资源 `resources/` 与 CocoaPods 实际使用的 `native-src/Resources/` 同步最新 SC Bordeaux，SHA-256 `8253F83DA43971F489A48CDD94F1050A3DD3BABDA0772C1AA5D85300029544F2`；manifest 与原生安装器 companion revision 统一为 `3`，匹配前端既有 revision 3。扩展安装选择 revision 保持为 1，壁纸与用户实例不改。
+- **本地验证**：生产前端构建及 TypeScript 检查、前端 106/106、Node 119 PASS / 2 环境可选 SKIP / 0 FAIL、云端 mock 7/7 和 `git diff --check` 通过；新增回归校验两个资源入口的实际主题摘要、前后端 revision 与扩展 revision 边界。证据：`Local/evidence/ios-theme-hotfix-20261118/`。
+- **交付流程**：本地门禁后推送 LTS 触发 GitHub macOS Xcode 构建，只有正式 CI 与 IPA 包内主题验真完成后，才将本轮记为已构建；记录提交使用 `[skip ci]` 并快进同步 iOS main，主仓统一替换 `v1.15.0` Release 资产和校验清单。
+
 ## 2026-11-18 iOS 1.15.0 故障演示清理与重新构建
 
 - **清理范围**：删除首页 `DEV_FAULT_TEST_INSTANCE_ID` / `__dev-fault-test-card__`、虚构异常卡片及其持久化、探活、启动和错误展示特殊分支；删除 Logo 长按 620ms 生成 `servicePort` 异常的预览函数、计时 refs、pointer handlers 与提示。普通运行演示、新手引导、Logo 点击切换字体和真实错误诊断 / Sentry 上报保留。

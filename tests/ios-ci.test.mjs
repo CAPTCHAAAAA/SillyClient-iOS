@@ -121,6 +121,29 @@ test('unsigned artifact version and monotonic native build agree', () => {
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
 
+test('SC Bordeaux revision 3 matches the pinned preset files in both iOS resource sources', () => {
+    const route = read('web/capacitor-ui/src/routes/index.tsx');
+    const installer = read('native-src/IOSPreinstaller.swift');
+    assert.match(route, /SC_BORDEAUX_PRESET:[\s\S]*?revision:\s*3/);
+    assert.match(installer, /companion\["bundleId"\][\s\S]*?companion\["revision"\]\s+as\?\s+Int\s*==\s*3/);
+    assert.match(installer, /selection\["revision"\]\s+as\?\s+Int\s*==\s*1/);
+
+    const resourceRoots = [
+        'resources/companion-presets/sc-bordeaux',
+        'native-src/Resources/companion-presets/sc-bordeaux',
+    ];
+    const manifests = resourceRoots.map(relative => {
+        const manifest = JSON.parse(read(`${relative}/manifest.json`));
+        assert.equal(manifest.revision, 3, `${relative} manifest revision`);
+        const theme = fs.readFileSync(path.join(root, relative, manifest.theme.source));
+        const digest = createHash('sha256').update(theme).digest('hex').toUpperCase();
+        assert.equal(digest, manifest.theme.sha256.toUpperCase(), `${relative} theme digest`);
+        return { manifest, theme };
+    });
+    assert.deepEqual(manifests[0].theme, manifests[1].theme);
+    assert.equal(manifests[0].manifest.theme.sha256, '8253F83DA43971F489A48CDD94F1050A3DD3BABDA0772C1AA5D85300029544F2');
+});
+
 test('only the Debug simulator is ad-hoc signed without protected application claims', () => {
     const workflow = read('.github/workflows/build-ipa.yml');
     const simulator = workflow.slice(workflow.indexOf('- name: Build and verify the actual hosted simulator application'),

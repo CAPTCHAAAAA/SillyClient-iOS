@@ -193,7 +193,7 @@ enum IOSPreinstaller {
             }
         }
         if let companion = companion {
-            guard companion["bundleId"] as? String == "sc-bordeaux", companion["revision"] as? Int == 1 else {
+            guard companion["bundleId"] as? String == "sc-bordeaux", companion["revision"] as? Int == 3 else {
                 throw IOSFileError.invalid("Unsupported companion preset")
             }
             try cancelled()
