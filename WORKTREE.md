@@ -2,6 +2,13 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-19 iOS 1.15.1 前端同步与正式未签名 IPA 验证交付
+
+- **同步范围**：从 `common-frontend`（`d946b58`）同步统一前端更新（`ManageFolderShell` + `folder-tab-geometry.ts` 一体 SVG 文件夹耳标页签与 `manage-shared-transition.ts` 780ms 刚性同向平切、`HeaderClock`、`CornerResizeCurve` hover/激活态、`interactionLocks`、按需远程轮询、取消/未实现错误收敛、业务源码 `src/dev/` 物理隔离），并一并补齐此前遗漏的 `DeleteConfirmDialog.tsx`、`InstanceMaintenancePanel.tsx` 与 `.overlay-backdrop` 退场虚化收净修正；严格剔除 `src/dev/DevDebugOverlay.tsx` 与 `src/dev/dev-fixtures.tsx`（保持 `src/main.tsx` 无调试浮窗引用）；`src/routes/index.tsx` 三方合并保留首行 `// __SC_TEST__` 标记、`directoryPickerGeneration` 防抖守卫与 `provisionCreatedInstance` 后置 `!isAndroid` 的 `setInstancesRoot` 写入。Swift/ObjC 原生桥与 NodeMobile 未改。
+- **版本与本机验证**：`web/capacitor-ui/package.json`、`native-src/Info.plist`、`ios/App/App/Info.plist`、`.github/workflows/build-ipa.yml`、`scripts/run-ios-e2e.mjs` 与 `tests/ios-ci.test.mjs` 统一升至 `1.15.1` / Build `52`（两份 `Info.plist` 字节一致）。本机通过前端 `tsc --noEmit`、Vite 生产构建（1956 modules）、前后两次 `node --test web/capacitor-ui/tests/*.test.cjs`（118/118，含 `dev-isolation.test.cjs`）、iOS Node 回归 `119/119` 与云端 mock `7/7` 套件。
+- **GitHub Xcode CI 与成品验真**：功能提交 `9c25453f529e714bb2ccb6df39464a332f84ee68` 触发 `macos-15` Run `44470777902`（16m59s）全绿通过：arm64 Release Archive、未签名 IPA、Hosted Simulator 24/24 阶段与 Swift fixture 48/48 组全部通过。官方产物已归档至 `Local/artifacts/v1.15.1/SillyClient-iOS-v1.15.1-unsigned.ipa`（194,305,748 字节，SHA-256 `976615af47fc7691eb9617bffe3ba0bb87f4e93c74a6b0cc27a82e9eed31158a`）；`ipa-sha256.txt`、ZIP 全部 CRC、`Info.plist`（`1.15.1 / Build 52 / com.sillyclient.ios`）、SC Bordeaux Revision 3（`8253f83d…`）、3 份打包 JS 与本地构建一致性及开发/故障标记零残留全部核验通过（证据：`Local/evidence/v1.15.1-release/ios-package-audit.json` 与 `Local/evidence/v1.15.1-release/ios-run-44470777902/`）。
+- **同步与验收边界**：本记录提交仅更新本文件（`[skip ci]`），随后快进合入并推送 `SillyClient_iOS/main`。`uiInteractionTested: false`、`physicalDeviceTested: false`，未声明物理真机或点击式 UI 验收。
+
 ## 2026-11-18 iOS 1.15.0 SC Bordeaux 紧急同步（正式 IPA 已通过验证）
 
 - **授权与版本**：按用户紧急指令修复当前 `1.15.0`，提交推送、同步 main、重建并替换现有 Release 安装包；保持 `1.15.0 / Build 51`，不推迟至 `1.15.1`。
