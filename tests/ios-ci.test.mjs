@@ -113,11 +113,11 @@ test('capability probe returns before creating the real console and stays isolat
 test('unsigned artifact version and monotonic native build agree', () => {
     const plist = read('native-src/Info.plist');
     const workflow = read('.github/workflows/build-ipa.yml');
-    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.15\.1<\/string>/);
+    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.15\.2<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 52);
+    assert.equal(build, 53);
     assert.equal(plist, read('ios/App/App/Info.plist'));
-    assert.match(workflow, /SillyClient-iOS-v1\.15\.1-unsigned/);
+    assert.match(workflow, /SillyClient-iOS-v1\.15\.2-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
 
@@ -370,7 +370,12 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.doesNotMatch(plugin, /UIAdaptivePresentationControllerDelegate|presentationControllerDidDismiss/);
     assert.doesNotMatch(plugin, /picker\.presentationController\?\.delegate = self|picker\.modalPresentationStyle = \.formSheet/);
     assert.match(plugin, /picker\.modalPresentationStyle = \.automatic/);
-    assert.match(plugin, /func documentPicker\([\s\S]*let preScoped = selected\.startAccessingSecurityScopedResource\(\)[\s\S]*if action == "installDir"[\s\S]*io\.async/);
+    assert.match(plugin, /picker\.shouldShowFileExtensions = true/);
+    assert.match(plugin, /if picker\.modalPresentationStyle == \.popover, let popover = picker\.popoverPresentationController/);
+    assert.match(plugin, /private var retainedPickerController: UIDocumentPickerViewController\?/);
+    assert.match(plugin, /private func dismissPickerIfNeeded\(_ controller: UIDocumentPickerViewController\)/);
+    assert.match(plugin, /func documentPicker\([\s\S]*dismissPickerIfNeeded\(controller\)[\s\S]*let preScoped = selected\.startAccessingSecurityScopedResource\(\)[\s\S]*if action == "installDir"[\s\S]*io\.async/);
+    assert.match(plugin, /func documentPickerWasCancelled\([\s\S]*dismissPickerIfNeeded\(controller\)/);
     assert.match(plugin, /startPickerDismissMonitor\(for: picker, call: call\)/);
     assert.match(plugin, /PICKER_DISMISSED_WITHOUT_RESULT/);
     assert.match(plugin, /stopPickerDismissMonitor\(\)/);
@@ -384,6 +389,14 @@ test('installation paths keep authorization, ownership recovery, and per-instanc
     assert.match(plugin, /IOSInstallationLocations\.contains\(self\.store\.documents, candidate\)/);
     assert.match(plugin, /action == "installDir"[\s\S]*locations\.select\(selected\)/);
     assert.match(plugin, /DispatchQueue\.main\.async \{ call\.resolve\(result\) \}/);
+    assert.match(plugin, /"defaultInstancesRoot": defaultRoot\.path/);
+    assert.match(plugin, /result\["configuredInstancesRoot"\] = defaultRoot\.path/);
+    assert.match(locations, /record\["kind"\] = "direct"/);
+    assert.match(locations, /if kind == "direct"/);
+    const plist = read('native-src/Info.plist');
+    for (const key of ['CFBundleDocumentTypes', 'public.folder', 'public.directory', 'NSPhotoLibraryUsageDescription', 'NSPhotoLibraryAddUsageDescription', 'NSCameraUsageDescription', 'NSDocumentsFolderUsageDescription']) {
+        assert.ok(plist.includes(key), `Missing Info.plist key or type: ${key}`);
+    }
     assert.match(read('native-src/IOSNativeTests.swift'), /Create path was not remapped to the coordinated root/);
     assert.match(read('native-src/IOSNativeTests.swift'), /A bookmark resolving to a different directory identity was trusted/);
     assert.match(read('native-src/IOSNativeTests.swift'), /Stale bookmark was not refreshed on recovery/);
@@ -583,7 +596,7 @@ async function simulateDriver(scenario = 'success') {
         const reject = error => ({ success: false, error });
         switch (request.method) {
         case 'getPlatform': return success({ platform: 'ios' });
-        case 'getAppVersion': return success({ version: '1.15.1' });
+        case 'getAppVersion': return success({ version: '1.15.2' });
         case 'getInstanceInfo': {
             const record = registry[options.instanceId];
             return record ? success({ ...record, installPath: record.path }) : reject('Instance directory is unavailable');

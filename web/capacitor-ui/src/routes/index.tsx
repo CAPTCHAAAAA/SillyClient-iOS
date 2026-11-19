@@ -944,6 +944,38 @@ function SillyClientLauncher() {
     return buildInstanceSubfolder(parent, instanceName);
   }, []);
 
+  const handleUseDefaultInstallFolder = useCallback(async () => {
+    const generation = ++directoryPickerGeneration.current;
+    try {
+      await TarvenEnv.setInstancesRoot({ path: "" }).catch(() => undefined);
+      const settings = await TarvenEnv.getAppSettings();
+      if (generation !== directoryPickerGeneration.current) return;
+      const defaultRoot =
+        settings?.defaultInstancesRoot?.trim() ||
+        settings?.configuredInstancesRoot?.trim() ||
+        settings?.instancesRoot?.trim();
+      if (!defaultRoot) {
+        throw new Error("未能读取应用内默认实例目录");
+      }
+      setNewInstanceDir(defaultRoot);
+      setNewInstancePathMode("root");
+      setNewInstanceError(null);
+      setNewInstanceDiagnostic(null);
+    } catch (error) {
+      if (generation !== directoryPickerGeneration.current) return;
+      const friendly = humanizeNativeError(error);
+      const context = createDiagnosticContext(error, {
+        area: "picker",
+        stage: "default-instances-root",
+        platform: platformTag,
+        userMessage: friendly,
+        extraSecrets: [newInstanceName, newInstanceDir],
+      });
+      setNewInstanceError(friendly);
+      setNewInstanceDiagnostic(context);
+    }
+  }, [newInstanceDir, newInstanceName, platformTag]);
+
   const handlePickInstallFolder = useCallback(async () => {
     const generation = ++directoryPickerGeneration.current;
     const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -3363,6 +3395,7 @@ function SillyClientLauncher() {
         newInstanceDir={newInstanceDir}
         setNewInstanceDir={handleSetNewInstanceDir}
         onPickInstallFolder={handlePickInstallFolder}
+        onUseDefaultInstallFolder={isIOS ? handleUseDefaultInstallFolder : undefined}
         newInstanceVersion={newInstanceVersion}
         setNewInstanceVersion={setNewInstanceVersion}
         newInstanceLocalZip={newInstanceLocalZip}

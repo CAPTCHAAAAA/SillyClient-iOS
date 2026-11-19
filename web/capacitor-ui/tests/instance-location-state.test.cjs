@@ -81,6 +81,7 @@ test("new-instance wizard receives iOS identity and its installation picker call
     .map(attribute => [attribute.name.getText(route), attribute.initializer?.getText(route)]));
   assert.equal(attributes.get("isIOS"), "{isIOS}");
   assert.equal(attributes.get("onPickInstallFolder"), "{handlePickInstallFolder}");
+  assert.equal(attributes.get("onUseDefaultInstallFolder"), "{isIOS ? handleUseDefaultInstallFolder : undefined}");
 
   const source = fs.readFileSync(filename, "utf8");
   assert.match(source, /setNewInstancePathMode\(selection\.mode\)/);
@@ -112,10 +113,12 @@ test("iOS storage wiring preserves platform affordances and requests installatio
   assert.match(route, /isIOS\s*\?\s*`\$\{safeCandidateId\.slice\(0,\s*120\)\}-\$\{counter\+\+\}`/);
   const wizard = read("components/modals/NewInstanceWizardModal.tsx");
   assert.ok(wizard.includes('右上角「打开」'));
+  assert.ok(wizard.includes('应用目录'));
   const relocate = read("components/modals/RelocateInstanceModal.tsx");
   assert.ok(relocate.includes('purpose: "installation"'));
   assert.ok(relocate.includes('选择或输入完整目标目录绝对路径'));
   assert.ok(relocate.includes('请点击「浏览」进入目标文件夹后点击右上角「打开」确认'));
+  assert.ok(relocate.includes('应用目录'));
   assert.ok(relocate.includes('retainedSourcePath'));
   assert.equal(fs.existsSync(path.join(__dirname, "../src/components/modals/LegacyMigrationModal.tsx")), false);
   const manage = read("components/modals/ManageInstanceModal.tsx");

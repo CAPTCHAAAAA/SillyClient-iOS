@@ -212,6 +212,52 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
     currentRealPath,
   ];
 
+  const handleUseDefaultDirectory = async () => {
+    if (pickingDirectory || migrating || busyRef.current || isClosing) return;
+    const generation = ++directoryPickerGeneration.current;
+    const session = sessionRef.current;
+    setErrorMsg(null);
+    setErrorDiagnostic(null);
+    try {
+      const settings = await TarvenEnv.getAppSettings();
+      if (
+        generation !== directoryPickerGeneration.current ||
+        session !== sessionRef.current
+      ) {
+        return;
+      }
+      const root =
+        settings?.defaultInstancesRoot?.trim() ||
+        settings?.configuredInstancesRoot?.trim() ||
+        settings?.instancesRoot?.trim();
+      if (!root) {
+        throw new Error("未能读取应用内默认实例目录");
+      }
+      const nextTarget = relocationTargetInParent(
+        root,
+        currentRealPath || instance.installPath || instance.installDir || instance.id
+      );
+      setCustomPath(nextTarget);
+    } catch (error) {
+      if (
+        generation !== directoryPickerGeneration.current ||
+        session !== sessionRef.current
+      ) {
+        return;
+      }
+      const friendly = humanizeNativeError(error);
+      const context = createDiagnosticContext(error, {
+        area: "picker",
+        stage: "default-instances-root",
+        platform: platformName,
+        userMessage: friendly,
+        extraSecrets: secrets,
+      });
+      setErrorMsg(friendly);
+      setErrorDiagnostic(context);
+    }
+  };
+
   const handlePickDirectory = async () => {
     if (pickingDirectory || migrating || busyRef.current || isClosing) return;
     const generation = ++directoryPickerGeneration.current;
@@ -573,6 +619,21 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
                         : "bg-white/[0.04] text-white placeholder:text-white/30"
                     )}
                   />
+                  {effectiveIOS && (
+                    <button
+                      type="button"
+                      onClick={handleUseDefaultDirectory}
+                      disabled={pickingDirectory || migrating}
+                      className={cn(
+                        "flat-capsule motion-control h-9 px-2.5 rounded-full text-[11px] font-medium border-0 flex-shrink-0",
+                        isLight
+                          ? "text-[#1a1625]/60 hover:text-[#1a1625]"
+                          : "text-white/60 hover:text-white"
+                      )}
+                    >
+                      应用目录
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={handlePickDirectory}
@@ -591,7 +652,7 @@ export const RelocateInstanceModal: React.FC<RelocateInstanceModalProps> = ({
                   {isAndroid
                     ? "实例保留原目录名，搬迁到所选文件夹的一级子目录。"
                     : effectiveIOS
-                      ? "请点击「浏览」进入目标文件夹后点击右上角「打开」确认；跨存储迁移时将校验副本并在完成后列出保留目录。"
+                      ? "请点击「浏览」进入目标文件夹后点击右上角「打开」确认，或点「应用目录」迁回应用内共享目录；跨存储迁移时将校验副本并在完成后列出保留目录。"
                       : "支持任意磁盘或分区路径。跨盘迁移时将执行安全校验并自动清理原位置。"}
                 </p>
               </div>

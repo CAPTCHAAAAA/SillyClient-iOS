@@ -164,6 +164,7 @@ final class IOSInstallationLocations {
             var root: URL?
             var rootIdentity: String?
             var bookmarkData: Data?
+            var directWritable = false
             stage = "coordinate-selected-directory"
             try coordinateRead(selected) { coordinatedURL in
                 stage = "inspect-coordinated-directory"
@@ -175,6 +176,7 @@ final class IOSInstallationLocations {
                 guard identity.isDirectory else { throw IOSFileError.invalid("Select an installation directory") }
                 root = candidate
                 rootIdentity = identity.identity
+                directWritable = FileManager.default.isWritableFile(atPath: candidate.path)
                 if !Self.contains(self.documents, candidate) {
                     stage = "create-security-scoped-bookmark"
                     do {
@@ -182,7 +184,7 @@ final class IOSInstallationLocations {
                     } catch let primaryError {
                         if let coordinatedBookmark = try? self.makeBookmark(coordinatedURL), !coordinatedBookmark.isEmpty {
                             bookmarkData = coordinatedBookmark
-                        } else {
+                        } else if !directWritable {
                             throw primaryError
                         }
                     }
@@ -190,7 +192,7 @@ final class IOSInstallationLocations {
             }
             guard let root, let rootIdentity else { throw IOSFileError.invalid("The file provider did not provide an authorized directory URL") }
             let internalRoot = Self.contains(documents, root)
-            guard internalRoot || scoped else { throw IOSFileError.invalid("The selected installation root has no security-scoped authorization") }
+            guard internalRoot || scoped || directWritable else { throw IOSFileError.invalid("The selected installation root has no security-scoped authorization") }
             // Keep selection lightweight; validate provider write capabilities only when creating an instance.
             stage = "read-authorization-registry"
             var roots = try records()
@@ -200,12 +202,17 @@ final class IOSInstallationLocations {
             if internalRoot {
                 record["kind"] = "documents"
                 record["relativePath"] = root.path == documents.path ? "" : String(root.path.dropFirst(documents.path.count + 1))
-            } else {
-                guard let bookmark = bookmarkData, !bookmark.isEmpty, bookmark.count <= 16384 else {
+            } else if let bookmark = bookmarkData, !bookmark.isEmpty {
+                guard bookmark.count <= 16384 else {
                     throw IOSFileError.invalid("Installation root bookmark is invalid or oversized")
                 }
                 record["kind"] = "bookmark"
                 record["bookmark"] = bookmark.base64EncodedString()
+            } else {
+                guard directWritable else {
+                    throw IOSFileError.invalid("Installation root bookmark is invalid or oversized")
+                }
+                record["kind"] = "direct"
             }
             roots[key] = record
             stage = "write-authorization-registry"
@@ -232,13 +239,32 @@ final class IOSInstallationLocations {
             throw IOSFileError.invalid("The registered installation path is invalid")
         }
         let roots = try records()
-        guard let record = roots[grantId], record["kind"] as? String == "bookmark",
+        guard let record = roots[grantId],
+              let kind = record["kind"] as? String, kind == "bookmark" || kind == "direct",
               let path = record["path"] as? String else {
             throw IOSFileError.invalid("The registered installation root authorization is missing")
         }
         var target = URL(fileURLWithPath: path, isDirectory: true)
         for part in parts { target.appendPathComponent(String(part)) }
         return try acquire(target.standardizedFileURL, grantId: grantId)
+    }
+
+    private func verifiedLocation(at resolvedRoot: URL, expectedPath: String, expectedIdentity: String,
+                                 requestedTarget: URL, grantId: String,
+                                 release: @escaping () -> Void = {}) throws -> IOSInstallationLocation {
+        let relativePath = requestedTarget.path == expectedPath ? "" : String(requestedTarget.path.dropFirst(expectedPath.count + 1))
+        let managed = IOSManagedFiles(root: resolvedRoot, expectedRootIdentity: expectedIdentity)
+        let mappedDirectory = relativePath.isEmpty ? resolvedRoot :
+            resolvedRoot.appendingPathComponent(relativePath, isDirectory: requestedTarget.hasDirectoryPath).standardizedFileURL
+        guard Self.contains(resolvedRoot, mappedDirectory) else {
+            throw IOSFileError.invalid("Installation target is outside its authorized root")
+        }
+        _ = try managed.checked(mappedDirectory, allowMissing: true)
+        let values = try resolvedRoot.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+        try Self.requireLocalAvailability(isUbiquitous: values.isUbiquitousItem,
+                                          downloadingStatus: values.ubiquitousItemDownloadingStatus)
+        return IOSInstallationLocation(root: resolvedRoot, directory: mappedDirectory, grantId: grantId,
+                                       grantRelativePath: relativePath, identity: expectedIdentity, release: release)
     }
 
     func acquire(_ target: URL, grantId: String? = nil) throws -> IOSInstallationLocation {
@@ -250,13 +276,26 @@ final class IOSInstallationLocations {
         }
         let roots = try records()
         let matches = roots.filter { entry in
-            guard entry.value["kind"] as? String == "bookmark",
+            guard let kind = entry.value["kind"] as? String, kind == "bookmark" || kind == "direct",
                   let path = entry.value["path"] as? String else { return false }
             return (grantId == nil || entry.key == grantId) && Self.contains(URL(fileURLWithPath: path), requestedTarget)
         }.sorted { ($0.value["path"] as? String ?? "").count > ($1.value["path"] as? String ?? "").count }
-        guard let match = matches.first, let encoded = match.value["bookmark"] as? String,
-              encoded.utf8.count <= 21848, let bookmark = Data(base64Encoded: encoded),
+        guard let match = matches.first, let kind = match.value["kind"] as? String,
               let expectedPath = match.value["path"] as? String, let identity = match.value["rootIdentity"] as? String else {
+            throw IOSFileError.invalid("Select this installation root again to grant persistent access; no default directory was used")
+        }
+        if kind == "direct" {
+            let directRoot = URL(fileURLWithPath: expectedPath, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+            let rootGuard = try IOSManagedFiles(root: directRoot).guardValue(directRoot)
+            guard rootGuard.isDirectory else { throw IOSFileError.invalid("Installation root is unavailable") }
+            guard rootGuard.identity == identity else {
+                throw IOSFileError.invalid("Installation root now points to a different directory; its contents were preserved")
+            }
+            return try verifiedLocation(at: directRoot, expectedPath: expectedPath, expectedIdentity: identity,
+                                        requestedTarget: requestedTarget, grantId: match.key)
+        }
+        guard let encoded = match.value["bookmark"] as? String,
+              encoded.utf8.count <= 21848, let bookmark = Data(base64Encoded: encoded) else {
             throw IOSFileError.invalid("Select this installation root again to grant persistent access; no default directory was used")
         }
         let scopedURL: URL
@@ -273,13 +312,10 @@ final class IOSInstallationLocations {
         guard scopeStarted else { throw IOSFileError.invalid("Installation root authorization was lost; select the same directory again") }
         var retained = false
         defer { if !retained { stopScope(scopedURL) } }
-        let relativePath = requestedTarget.path == expectedPath ? "" : String(requestedTarget.path.dropFirst(expectedPath.count + 1))
-        var root: URL?
-        var directory: URL?
+        var resolvedLocation: IOSInstallationLocation?
         try coordinateRead(scopedURL) { coordinatedURL in
             let coordinatedRoot = coordinatedURL.resolvingSymlinksInPath().standardizedFileURL
-            let unpinned = IOSManagedFiles(root: coordinatedRoot)
-            let rootGuard = try unpinned.guardValue(coordinatedRoot)
+            let rootGuard = try IOSManagedFiles(root: coordinatedRoot).guardValue(coordinatedRoot)
             guard rootGuard.isDirectory else { throw IOSFileError.invalid("Installation root is unavailable") }
             guard rootGuard.identity == identity else {
                 throw IOSFileError.invalid("Installation root bookmark now points to a different directory; its contents were preserved")
@@ -289,24 +325,12 @@ final class IOSInstallationLocations {
                !refreshed.isEmpty, refreshed.count <= 16384 {
                 try? self.refreshBookmark(refreshed, for: match.key)
             }
-            let managed = IOSManagedFiles(root: coordinatedRoot, expectedRootIdentity: identity)
-            let mappedDirectory = relativePath.isEmpty ? coordinatedRoot :
-                coordinatedRoot.appendingPathComponent(relativePath, isDirectory: requestedTarget.hasDirectoryPath).standardizedFileURL
-            guard Self.contains(coordinatedRoot, mappedDirectory) else {
-                throw IOSFileError.invalid("Installation target is outside its authorized root")
-            }
-            _ = try managed.checked(mappedDirectory, allowMissing: true)
-            root = coordinatedRoot
-            directory = mappedDirectory
+            resolvedLocation = try self.verifiedLocation(at: coordinatedRoot, expectedPath: expectedPath,
+                                                         expectedIdentity: identity, requestedTarget: requestedTarget,
+                                                         grantId: match.key) { self.stopScope(scopedURL) }
         }
-        guard let root, let directory else { throw IOSFileError.invalid("The file provider did not restore the authorized directory") }
-        let values = try root.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
-        try Self.requireLocalAvailability(isUbiquitous: values.isUbiquitousItem,
-                                          downloadingStatus: values.ubiquitousItemDownloadingStatus)
+        guard let resolvedLocation else { throw IOSFileError.invalid("The file provider did not restore the authorized directory") }
         retained = true
-        return IOSInstallationLocation(root: root, directory: directory, grantId: match.key,
-                                       grantRelativePath: relativePath, identity: identity) {
-            self.stopScope(scopedURL)
-        }
+        return resolvedLocation
     }
 }

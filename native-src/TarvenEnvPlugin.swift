@@ -14,6 +14,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     private var pendingPickerAction = ""
     private var pendingInstanceId = ""
     private weak var activePickerController: UIDocumentPickerViewController?
+    private var retainedPickerController: UIDocumentPickerViewController?
     private var pickerDismissTimer: DispatchSourceTimer?
     private var pickerDetachedTicks = 0
     private var pendingExportCleanupURL: URL?
@@ -625,7 +626,17 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         pendingPickerAction = ""
         pendingInstanceId = ""
         activePickerController = nil
+        retainedPickerController = nil
         return (call, action, instance)
+    }
+
+    private func dismissPickerIfNeeded(_ controller: UIDocumentPickerViewController) {
+        DispatchQueue.main.async {
+            if controller.presentingViewController != nil && !controller.isBeingDismissed {
+                NSLog("[TarvenEnvPlugin] forcing picker dismissal")
+                controller.dismiss(animated: true)
+            }
+        }
     }
 
     private func cleanupPendingExport() {
@@ -722,9 +733,10 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                     : UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true))
             picker.delegate = self
             picker.allowsMultipleSelection = false
+            picker.shouldShowFileExtensions = true
             // Keep UIKit's default presentation style and internal sheet delegate intact so XPC dismissal callbacks are delivered reliably.
             picker.modalPresentationStyle = .automatic
-            if let popover = picker.popoverPresentationController {
+            if picker.modalPresentationStyle == .popover, let popover = picker.popoverPresentationController {
                 popover.sourceView = presenter.view
                 popover.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 0, height: 0)
                 popover.permittedArrowDirections = []
@@ -754,6 +766,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             self.pendingPickerAction = action
             self.pendingInstanceId = call.getString("instanceId") ?? "default"
             self.activePickerController = picker
+            self.retainedPickerController = picker
             self.pendingExportCleanupURL = cleanupDirectory
             NSLog("[TarvenEnvPlugin] presenting picker action=%@ presenter=%@", action, String(describing: type(of: presenter)))
             presenter.present(picker, animated: true)
@@ -803,6 +816,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         NSLog("[TarvenEnvPlugin] didPickDocumentsAt count=%ld", urls.count)
         let (takenCall, action, instance) = takePendingPicker()
+        dismissPickerIfNeeded(controller)
         guard let call = takenCall, let selected = urls.first else {
             cleanupPendingExport()
             takenCall?.reject("No file was selected")
@@ -816,7 +830,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         // Acquire security scope synchronously before returning to UIKit so remote picker XPC
         // teardown cannot revoke transient folder/file grants before io.async executes.
         let preScoped = selected.startAccessingSecurityScopedResource()
-        NSLog("[TarvenEnvPlugin] didPickDocumentsAt action=%@ preScoped=%@", action, preScoped ? "true" : "false")
+        NSLog("[TarvenEnvPlugin] didPickDocumentsAt action=%@ preScoped=%@ path=%@", action, preScoped ? "true" : "false", selected.path)
         if action == "installDir" {
             io.async {
                 defer { if preScoped { selected.stopAccessingSecurityScopedResource() } }
@@ -824,6 +838,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                     let root = try self.store.locations.select(selected)
                     let result: [String: Any] = ["name": root.lastPathComponent, "path": root.path, "installPathMode": "root",
                         "runtimeLocation": "selected", "persistentAuthorization": true]
+                    UserDefaults.standard.set(root.path, forKey: "configuredInstancesRoot")
                     DispatchQueue.main.async { call.resolve(result) }
                 } catch {
                     let message = error.localizedDescription
@@ -918,6 +933,7 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         NSLog("[TarvenEnvPlugin] documentPickerWasCancelled action=%@", pendingPickerAction)
         cancelPendingPicker()
+        dismissPickerIfNeeded(controller)
     }
     @objc func checkLegacyInstances(_ call: CAPPluginCall) {
         perform(call) { ["instances": try self.store.legacyInstances()] }
@@ -944,8 +960,14 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
         }
     }
     @objc func getAppSettings(_ call: CAPPluginCall) {
+        try? FileManager.default.createDirectory(at: self.store.documents, withIntermediateDirectories: true)
+        let defaultRoot = self.store.documents.appendingPathComponent("instances", isDirectory: true)
+        try? FileManager.default.createDirectory(at: defaultRoot, withIntermediateDirectories: true)
         let configured = UserDefaults.standard.string(forKey: "configuredInstancesRoot")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var result: [String: Any] = [:]
+        var result: [String: Any] = [
+            "defaultInstancesRoot": defaultRoot.path,
+            "documentsRoot": self.store.documents.path,
+        ]
         if let conf = configured, !conf.isEmpty {
             if let rootURL = try? IOSInstallationLocations.path(conf),
                let location = try? self.store.locations.acquire(rootURL) {
@@ -954,6 +976,9 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
             } else {
                 UserDefaults.standard.removeObject(forKey: "configuredInstancesRoot")
             }
+        }
+        if result["configuredInstancesRoot"] == nil {
+            result["configuredInstancesRoot"] = defaultRoot.path
         }
         call.resolve(result)
     }

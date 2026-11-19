@@ -355,6 +355,15 @@ enum IOSNativeTests {
             try require(lease!.files.data(marker) == Data("bookmark persisted".utf8), "Recreated authority could not read and write the selected root")
             lease = nil
             try require(scopeStarts == 2 && scopeStops == 2, "Bookmark round trip leaked a synthetic security-scope lease")
+
+            let directSelected = root.appendingPathComponent("direct-writable-root", isDirectory: true)
+            try FileManager.default.createDirectory(at: directSelected, withIntermediateDirectories: true)
+            let directLocations = IOSInstallationLocations(documents: documents,
+                makeBookmark: { _ in throw IOSFileError.invalid("Bookmark unsupported in direct runtime") },
+                startScope: { _ in false }, stopScope: { _ in }, externalCapability: { _ in })
+            try require(directLocations.select(directSelected).path == directSelected.path, "Direct writable folder selection failed")
+            let directLease = try directLocations.acquire(directSelected.appendingPathComponent("direct-instance", isDirectory: true))
+            try require(directLease.root.path == directSelected.path, "Direct writable root did not resolve")
         }
         test("External folder selection uses the coordinated provider URL and releases failed scopes") { root, files in
             let documents = root.appendingPathComponent("documents", isDirectory: true)

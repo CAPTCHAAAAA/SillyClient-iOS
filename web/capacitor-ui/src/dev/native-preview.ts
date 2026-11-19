@@ -202,7 +202,12 @@ export const nativePreview: TarvenEnvPlugin = {
   async getAppSettings() {
     record("getAppSettings", {});
     const instancesRoot = syntheticRoot();
-    return { instancesRoot, defaultInstancesRoot: instancesRoot };
+    return {
+      instancesRoot,
+      defaultInstancesRoot: instancesRoot,
+      configuredInstancesRoot: instancesRoot,
+      documentsRoot: instancesRoot,
+    };
   },
   async setInstancesRoot(options) {
     record("setInstancesRoot", options ?? {});

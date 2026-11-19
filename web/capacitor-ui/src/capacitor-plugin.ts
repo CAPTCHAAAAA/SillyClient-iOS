@@ -283,7 +283,7 @@ export interface TarvenEnvPlugin {
   }>
 
   /** 读取应用级设置；instancesRoot 为当前默认实例存储根（实例是其直接子目录）。 */
-  getAppSettings(): Promise<{ instancesRoot?: string; defaultInstancesRoot?: string; configuredInstancesRoot?: string }>
+  getAppSettings(): Promise<{ instancesRoot?: string; defaultInstancesRoot?: string; configuredInstancesRoot?: string; documentsRoot?: string }>
 
   /** 设置默认实例存储根；path 留空恢复出厂默认。仅影响之后创建的实例。 */
   setInstancesRoot(options?: { path?: string }): Promise<{ instancesRoot: string | null; configured: boolean }>

@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.15.1</string>
+	<string>1.15.2</string>
 	<key>CFBundleVersion</key>
-	<string>52</string>
+	<string>53</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
@@ -53,6 +53,64 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+
+	<!-- 声明完整的原生文档与文件夹就地打开能力，确保侧载自签与系统“文件”选择器兼容 -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+				<string>public.directory</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Archive</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.zip-archive</string>
+				<string>com.pkware.zip-archive</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Document</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.json</string>
+				<string>public.plain-text</string>
+				<string>public.image</string>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- 加密合规声明 -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
+	<!-- 文件夹访问说明 -->
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>SillyClient 需要访问您的文稿与选定文件夹以安装、读取和备份本地酒馆实例。</string>
+
+	<!-- 相册读写权限声明 (支持酒馆角色卡、封面图导入与备份图保存) -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SillyClient 需要访问相册以选择实例封面图片及酒馆角色卡、背景资源。</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>SillyClient 需要将图片或导出资源保存到您的相册。</string>
+
+	<!-- 相机权限声明 (支持酒馆页面内上传拍照图片) -->
+	<key>NSCameraUsageDescription</key>
+	<string>SillyClient 需要使用相机以在酒馆页面内拍摄并上传图片。</string>
 
 	<!-- 开启后台轻量静音音频保活，杜绝切后台被系统墓碑挂起 -->
 	<key>UIBackgroundModes</key>

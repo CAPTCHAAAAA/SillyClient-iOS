@@ -32,6 +32,7 @@ export interface NewInstanceWizardModalProps {
   newInstanceDir: string;
   setNewInstanceDir: (value: string) => void;
   onPickInstallFolder: () => void;
+  onUseDefaultInstallFolder?: () => void;
   newInstanceVersion: string;
   setNewInstanceVersion: (value: string) => void;
   newInstanceLocalZip: string | null;
@@ -224,6 +225,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
   newInstanceDir,
   setNewInstanceDir,
   onPickInstallFolder,
+  onUseDefaultInstallFolder,
   newInstanceVersion,
   setNewInstanceVersion,
   newInstanceLocalZip,
@@ -470,7 +472,7 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
                 isLight={isLight}
                 desc={
                   isIOS
-                    ? "必选：点「浏览」选择存放文件夹（iOS 请进入目标文件夹后点击右上角「打开」确认），实例会创建在该文件夹内。"
+                    ? "默认已指向应用内共享目录（文件 › 我的 iPhone › SillyClient › instances）可直接创建；点「浏览」可选外部目录（进入目标文件夹后点击右上角「打开」确认），若系统弹窗无响应可点「应用目录」。"
                     : undefined
                 }
               >
@@ -487,6 +489,20 @@ export const NewInstanceWizardModal: React.FC<NewInstanceWizardModalProps> = ({
                         : "bg-white/[0.04] text-white placeholder:text-white/25"
                     )}
                   />
+                  {isIOS && onUseDefaultInstallFolder && (
+                    <button
+                      type="button"
+                      onClick={onUseDefaultInstallFolder}
+                      className={cn(
+                        "flat-capsule motion-control h-9 flex-shrink-0 rounded-full border-0 px-2.5 text-[11px] font-medium",
+                        isLight
+                          ? "text-[#1a1625]/60 hover:text-[#1a1625]"
+                          : "text-white/60 hover:text-white"
+                      )}
+                    >
+                      应用目录
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={onPickInstallFolder}
