@@ -2,6 +2,19 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-19 iOS v1.15.2 (Build 53) 原生权限适配、选盘退场与默认应用内目录兜底
+
+- **问题原因**：真机录屏（`11-19`）与用户反馈显示，iOS 26/27 液态玻璃下点击系统「文件」选择器右上角「打开」高亮后弹窗常不收起/不回填，且新建向导 `getAppSettings()` 首次启动返回空导致用户被强行卡在系统选盘弹窗；同时自签或无沙盒（如 TrollStore）直读目录在 `startAccessingSecurityScopedResource()` 返回 `false` 或不支持 bookmark 时被拒。
+- **修复内容**：
+  - `Info.plist`（`native-src/` 与 `ios/App/App/` 字节一致）：保持零受限私有 entitlement（兼容任意自签/侧载证书），补全 `CFBundleDocumentTypes`（声明 `public.folder` / `public.directory` / `public.zip-archive` / `public.json` / `public.plain-text` / `public.image` / `public.data` 就地打开能力）、`NSDocumentsFolderUsageDescription`、`NSPhotoLibraryUsageDescription`、`NSPhotoLibraryAddUsageDescription`、`NSCameraUsageDescription` 与 `ITSAppUsesNonExemptEncryption=false`；
+  - `TarvenEnvPlugin.swift`（两份同步）：在 `didPickDocumentsAt` 与 `documentPickerWasCancelled` 补充主线程条件兜底退场 `dismissPickerIfNeeded`、强引用 `retainedPickerController`、开启 `shouldShowFileExtensions`、仅在 `.popover` 下配置 `popoverPresentationController`，并在 `installDir` 成功后保存 `configuredInstancesRoot`；改造 `getAppSettings()` 始终预建 `<App>/Documents/instances` 并默认回落 `configuredInstancesRoot`（同时返回 `defaultInstancesRoot` 与 `documentsRoot`）；
+  - `IOSInstallationLocations.swift` & `IOSNativeTests.swift`：对直接可写且通过协调读的目录补充 `"kind": "direct"` 直通读写模式，保留既有 `"bookmark"` 严格校验；
+  - 前端（`capacitor-plugin.ts`、`routes/index.tsx`、`NewInstanceWizardModal.tsx`、`RelocateInstanceModal.tsx`、`native-preview.ts`）：iOS 新建实例默认预填应用内共享目录，并在新建向导与迁移存储弹窗「浏览」旁增加 **`应用目录`** 一键切换按钮，同步更新 `tests/ios-ci.test.mjs`、`scripts/run-ios-e2e.mjs` 与 `instance-location-state.test.cjs`；
+  - 版本统一升级至 `1.15.2`（Build `53`）。
+- **本机与 GitHub Xcode CI 验证**：本机 `node --test tests/ios-*.test.mjs`（119/119）、`verify-ios-cloud.mjs --mock-mode`（7/7）、`tsc --noEmit`、`vite build`（1956 modules）、`web/capacitor-ui/tests/*.test.cjs`（118/118，含 `dev-isolation.test.cjs`）及 `git diff --check` 全通。提交 `d51a5ba8227d6f8289a093b1116ea8d42b05ec90` 触发 GitHub `macos-15` Run `44493020640`（16m11s）全绿：arm64 Release Archive、未签名 IPA、Hosted Simulator 24/24 阶段与 Swift 原生沙盒 fixture 48/48 组全过。
+- **成品验真与归档**：官方产物归档于 `Local/artifacts/v1.15.2/SillyClient-iOS-v1.15.2-unsigned.ipa`（194,308,171 字节，SHA-256 `8927bb9349503d3113fade256b47cb9236e45b599a7034e8c9ce5f93a0ec496e`，与 CI `ipa-sha256.txt` 一致）；ZIP 23,723 条目 CRC、`1.15.2 / Build 53 / com.sillyclient.ios`、`CFBundleDocumentTypes` 与权限声明、`SillyClientCore` 符号（`TarvenEnvPlugin` / `dismissPickerIfNeeded`）、3 份打包 JS 哈希及零开发残留均已核验（证据：`Local/evidence/v1.15.2-release/ios-package-audit.json` 与 `Local/evidence/v1.15.2-release/ios-run-44493020640/`）。
+- **同步与验收边界**：本记录提交仅更新本文件（`[skip ci]`），随后快进合入 `SillyClient_iOS/main` 并在 `SillyClient_Main` 发布 `v1.15.2`（Windows / Android 本轮跳过）。`uiInteractionTested: false`、`physicalDeviceTested: false`，真机侧载表现待测试设备实测。
+
 ## 2026-11-19 iOS 1.15.1 前端同步与正式未签名 IPA 验证交付
 
 - **同步范围**：从 `common-frontend`（`d946b58`）同步统一前端更新（`ManageFolderShell` + `folder-tab-geometry.ts` 一体 SVG 文件夹耳标页签与 `manage-shared-transition.ts` 780ms 刚性同向平切、`HeaderClock`、`CornerResizeCurve` hover/激活态、`interactionLocks`、按需远程轮询、取消/未实现错误收敛、业务源码 `src/dev/` 物理隔离），并一并补齐此前遗漏的 `DeleteConfirmDialog.tsx`、`InstanceMaintenancePanel.tsx` 与 `.overlay-backdrop` 退场虚化收净修正；严格剔除 `src/dev/DevDebugOverlay.tsx` 与 `src/dev/dev-fixtures.tsx`（保持 `src/main.tsx` 无调试浮窗引用）；`src/routes/index.tsx` 三方合并保留首行 `// __SC_TEST__` 标记、`directoryPickerGeneration` 防抖守卫与 `provisionCreatedInstance` 后置 `!isAndroid` 的 `setInstancesRoot` 写入。Swift/ObjC 原生桥与 NodeMobile 未改。
