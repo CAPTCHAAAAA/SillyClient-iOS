@@ -2,6 +2,21 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-24 iOS v1.15.3 (Build 54) 目录身份自愈与跨端同步验证就绪（待用户敲板发布）
+
+- **问题原因（`#16` / `#15` P0 死锁，及前端 `#11` / `#14` / `#17` / `#20`）**：
+  - iOS 重启或重挂载后 APFS 卷设备号 `st_dev` 会发生合法漂移，且自签重装/容器备份恢复会为原目录分配新的 inode 与 birthtime；此前 `IOSInstanceStore` 与 `IOSInstallationLocations` 仅做全字符串精确相等比对，导致已有实例被误判为 `"The registered instance directory was replaced; its contents were preserved"` 而永久死锁（无法启动、管理或删除）。
+- **修复内容**：
+  - `IOSManagedFiles.swift`：新增 `IOSFileGuard.sameInodeAndBirth(_:_:)`，在要求 `inode:birthSec:birthNano` 完全一致的前提下兼容 APFS `st_dev` 漂移；
+  - `IOSInstallationLocations.swift`：新增 `refreshRootIdentity`，对 `direct` 与 `bookmark` 外部授权根容忍仅 `st_dev` 漂移并持久化刷新，保持外部伪造目录拒收；
+  - `IOSInstanceStore.swift`：在注册记录与目录内回执 `.sillyclient-installation.json` 引入持久化 `ownershipToken` UUID（覆盖 `prepare`、`migrate`、`recoverRegistration`）；在 `location()` 中新增 `rebindDirectoryIdentityIfOwned`，支持（1）仅 `st_dev` 漂移自愈、（2）`ownershipToken` 一致性恢复自愈、（3）`v1.15.2` 遗留无 token 回执但 `directoryIdentity` 一致且存在 `server.js` + `package.json` 的容器恢复自愈并自动补发 token；对无有效回执的外部目录替换仍严格 fail-closed 拦截。同步修复 `uninstall()` 在 `self.location(id)` 后刷新 `records = try registry()` 及待删状态容忍 `st_dev` 漂移（保持 2 处成功返回满足同步测试契约）；
+  - `IOSInstanceRelocation.swift`：`mutationSource` 容忍 `st_dev` 漂移，`relocateStopped` 透传 `ownershipToken`；
+  - `IOSNativeTests.swift`：新增第 49 组原生沙盒测试覆盖 `st_dev` 漂移自愈、`v1.15.2` 遗留恢复自愈、`ownershipToken` 复制恢复自愈与外部替换拦截，同步更新 `nativeFixtureGroups` `48 → 49`；
+  - 通用前端同步 `provision-timeout.ts`、`native-errors.ts`、`sentry-diagnostic.ts`、`submit-diagnostic-report.ts`、`capacitor-plugin.ts`、`routes/index.tsx` 与单测（严禁同步 `src/dev/`）；版本统一升至 `1.15.3`（Build `54`）。
+- **本机与 GitHub Xcode CI 验证**：本机 `node --test tests/ios-*.test.mjs`（120/120）、`verify-ios-cloud.mjs --mock-mode`（7/7）、`tsc --noEmit`、`vite build`（1957 modules）、`web/capacitor-ui/tests/*.test.cjs` 全通。功能提交 `91ef6a6` 触发 Run `45345561913`（arm64 Release Archive 通过，Debug Simulator 因第 49 组测试行 1295 漏 `try` 报错）；补齐 `try` 后提交 `83a0f461672c28029a7479485ce8d5836b3d7378` 触发 `macos-15` Run `45346607797`（18m57s）全绿：arm64 Release Archive、未签名 IPA、Hosted Simulator **24/24** 阶段与 Swift 原生沙盒 fixture **49/49** 组全部通过。
+- **成品验真与归档**：官方产物归档于 `Local/artifacts/v1.15.3/SillyClient-iOS-v1.15.3-unsigned.ipa`（`194,316,334` 字节，SHA-256 `3fc6b23e435bdfbc82e320f7c2d1f57587746d1e6a5cbd8c9da3513c23369c5f`，与 CI `ipa-sha256.txt` 及 GitHub Artifact digest 一致）；ZIP `23,723` 条目 CRC、`1.15.3 / Build 54 / com.sillyclient.ios`、`CFBundleDocumentTypes` 与权限描述、SC Bordeaux Revision 3（4/4 资产 SHA-256 `8253f83d…`）及零 `src/dev` 残留全部核验通过（证据：`Local/evidence/v1.15.3-release/ios-package-audit.json` 与 `Local/evidence/v1.15.3-release/ios-run-45346607797/`）。
+- **同步与验收边界**：本记录提交使用 `[skip ci]` 仅推送至 `lts/ios-release-hardening`；尚未合入 `SillyClient_iOS/main` 或创建 Release，等待用户敲板发布。`uiInteractionTested: false`、`physicalDeviceTested: false`，物理设备自签表现待实机复测。
+
 ## 2026-11-19 iOS v1.15.2 (Build 53) 原生权限适配、选盘退场与默认应用内目录兜底
 
 - **问题原因**：真机录屏（`11-19`）与用户反馈显示，iOS 26/27 液态玻璃下点击系统「文件」选择器右上角「打开」高亮后弹窗常不收起/不回填，且新建向导 `getAppSettings()` 首次启动返回空导致用户被强行卡在系统选盘弹窗；同时自签或无沙盒（如 TrollStore）直读目录在 `startAccessingSecurityScopedResource()` 返回 `false` 或不支持 bookmark 时被拒。
