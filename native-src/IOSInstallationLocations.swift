@@ -112,6 +112,14 @@ final class IOSInstallationLocations {
         try files.writeJSON(["revision": 1, "roots": roots], to: registryURL)
     }
 
+    private func refreshRootIdentity(_ newIdentity: String, for key: String) throws {
+        var roots = try records()
+        guard var entry = roots[key] else { return }
+        entry["rootIdentity"] = newIdentity
+        roots[key] = entry
+        try files.writeJSON(["revision": 1, "roots": roots], to: registryURL)
+    }
+
     static func requireLocalAvailability(isUbiquitous: Bool?, downloadingStatus: URLUbiquitousItemDownloadingStatus?) throws {
         guard isUbiquitous != true || downloadingStatus != .notDownloaded else {
             throw IOSFileError.invalid("This iCloud installation folder is not downloaded locally; download it or choose a local folder")
@@ -288,10 +296,13 @@ final class IOSInstallationLocations {
             let directRoot = URL(fileURLWithPath: expectedPath, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
             let rootGuard = try IOSManagedFiles(root: directRoot).guardValue(directRoot)
             guard rootGuard.isDirectory else { throw IOSFileError.invalid("Installation root is unavailable") }
-            guard rootGuard.identity == identity else {
+            guard rootGuard.identity == identity || IOSFileGuard.sameInodeAndBirth(identity, rootGuard.identity) else {
                 throw IOSFileError.invalid("Installation root now points to a different directory; its contents were preserved")
             }
-            return try verifiedLocation(at: directRoot, expectedPath: expectedPath, expectedIdentity: identity,
+            if rootGuard.identity != identity {
+                try? refreshRootIdentity(rootGuard.identity, for: match.key)
+            }
+            return try verifiedLocation(at: directRoot, expectedPath: expectedPath, expectedIdentity: rootGuard.identity,
                                         requestedTarget: requestedTarget, grantId: match.key)
         }
         guard let encoded = match.value["bookmark"] as? String,
@@ -317,8 +328,11 @@ final class IOSInstallationLocations {
             let coordinatedRoot = coordinatedURL.resolvingSymlinksInPath().standardizedFileURL
             let rootGuard = try IOSManagedFiles(root: coordinatedRoot).guardValue(coordinatedRoot)
             guard rootGuard.isDirectory else { throw IOSFileError.invalid("Installation root is unavailable") }
-            guard rootGuard.identity == identity else {
+            guard rootGuard.identity == identity || IOSFileGuard.sameInodeAndBirth(identity, rootGuard.identity) else {
                 throw IOSFileError.invalid("Installation root bookmark now points to a different directory; its contents were preserved")
+            }
+            if rootGuard.identity != identity {
+                try? self.refreshRootIdentity(rootGuard.identity, for: match.key)
             }
             if stale,
                let refreshed = (try? self.makeBookmark(scopedURL)) ?? (try? self.makeBookmark(coordinatedURL)),
@@ -326,7 +340,7 @@ final class IOSInstallationLocations {
                 try? self.refreshBookmark(refreshed, for: match.key)
             }
             resolvedLocation = try self.verifiedLocation(at: coordinatedRoot, expectedPath: expectedPath,
-                                                         expectedIdentity: identity, requestedTarget: requestedTarget,
+                                                         expectedIdentity: rootGuard.identity, requestedTarget: requestedTarget,
                                                          grantId: match.key) { self.stopScope(scopedURL) }
         }
         guard let resolvedLocation else { throw IOSFileError.invalid("The file provider did not restore the authorized directory") }

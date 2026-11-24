@@ -86,7 +86,11 @@ final class IOSInstanceStore {
             let guardValue = try managed.guardValue(location.directory)
             guard guardValue.isDirectory else { throw IOSFileError.invalid("Instance directory is unavailable") }
             if let expected = records[id]?["directoryIdentity"] as? String, expected != guardValue.identity {
-                throw IOSFileError.invalid("The registered instance directory was replaced; its contents were preserved") }
+                guard try rebindDirectoryIdentityIfOwned(id, location: location, expected: expected,
+                                                         current: guardValue, previous: records[id] ?? [:]) else {
+                    throw IOSFileError.invalid("The registered instance directory was replaced; its contents were preserved")
+                }
+            }
         }
         let refreshGrantRecord = registered != nil && registeredGrant != nil && registeredRelativePath == nil
         if refreshGrantRecord {
@@ -190,14 +194,15 @@ final class IOSInstanceStore {
 
     var ownershipName: String { ".sillyclient-installation.json" }
 
-    private func register(_ id: String, location: IOSInstallationLocation) throws {
+    private func register(_ id: String, location: IOSInstallationLocation, ownershipToken: String? = nil) throws {
         var value = try registry()
         guard value[id] == nil, value.count < 256 else { throw IOSFileError.invalid("Instance is already registered or registry is full") }
-        value[id] = try registrationRecord(id, location: location)
+        value[id] = try registrationRecord(id, location: location, ownershipToken: ownershipToken)
         try files.writeJSON(value, to: registryURL)
     }
 
-    func registrationRecord(_ id: String, location: IOSInstallationLocation, previous: [String: Any] = [:]) throws -> [String: Any] {
+    func registrationRecord(_ id: String, location: IOSInstallationLocation, previous: [String: Any] = [:],
+                            ownershipToken: String? = nil) throws -> [String: Any] {
         let now = Date().timeIntervalSince1970 * 1000
         let directory = location.directory
         var record = previous
@@ -206,6 +211,9 @@ final class IOSInstanceStore {
         record["isTakeover"] = false
         record["directoryIdentity"] = try location.files.guardValue(directory).identity
         record["rootIdentity"] = location.rootIdentity
+        if let token = ownershipToken ?? (previous["ownershipToken"] as? String), !token.isEmpty {
+            record["ownershipToken"] = token
+        }
         record["createdAt"] = previous["createdAt"] ?? now
         record["lastUsedAt"] = previous["lastUsedAt"] ?? now
         record["totalUsageMs"] = previous["totalUsageMs"] ?? 0
@@ -218,29 +226,73 @@ final class IOSInstanceStore {
         return record
     }
 
-    func ownershipRecord(_ id: String, location: IOSInstallationLocation, at directory: URL) throws -> [String: Any] {
+    func ownershipRecord(_ id: String, location: IOSInstallationLocation, at directory: URL,
+                         ownershipToken: String? = nil) throws -> [String: Any] {
         var receipt: [String: Any] = ["revision": 1, "owner": "sillyclient", "instanceId": id,
             "path": location.directory.path, "rootIdentity": location.rootIdentity,
             "directoryIdentity": try location.files.guardValue(directory).identity]
         if let grant = location.grantId { receipt["grantId"] = grant }
+        if let token = ownershipToken, !token.isEmpty { receipt["ownershipToken"] = token }
         return receipt
     }
 
-    private func ownership(_ id: String, location: IOSInstallationLocation, at directory: URL) throws {
-        try location.files.writeJSON(ownershipRecord(id, location: location, at: directory),
+    private func ownership(_ id: String, location: IOSInstallationLocation, at directory: URL,
+                           ownershipToken: String? = nil) throws {
+        try location.files.writeJSON(ownershipRecord(id, location: location, at: directory, ownershipToken: ownershipToken),
                                      to: directory.appendingPathComponent(ownershipName), replace: false)
+    }
+
+    private func rebindDirectoryIdentityIfOwned(_ id: String, location: IOSInstallationLocation,
+                                                expected: String, current: IOSFileGuard,
+                                                previous: [String: Any]) throws -> Bool {
+        let managed = location.files
+        let receiptURL = location.directory.appendingPathComponent(ownershipName)
+        let receipt: [String: Any]? = managed.exists(receiptURL) ? (try? managed.json(receiptURL)) : nil
+        let receiptOwned = receipt?["owner"] as? String == "sillyclient" && receipt?["instanceId"] as? String == id
+        let sameInode = IOSFileGuard.sameInodeAndBirth(expected, current.identity)
+        let verified: Bool
+        if sameInode {
+            verified = receipt == nil || receiptOwned
+        } else if let receipt, receiptOwned {
+            if let expectedToken = previous["ownershipToken"] as? String, !expectedToken.isEmpty {
+                verified = (receipt["ownershipToken"] as? String) == expectedToken
+            } else {
+                verified = (receipt["directoryIdentity"] as? String) == expected
+                    && managed.exists(location.directory.appendingPathComponent("server.js"))
+                    && managed.exists(location.directory.appendingPathComponent("package.json"))
+            }
+        } else {
+            verified = false
+        }
+        guard verified else { return false }
+        let token = (previous["ownershipToken"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? (receipt?["ownershipToken"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? UUID().uuidString
+        if managed.exists(receiptURL) || receipt != nil {
+            try? managed.writeJSON(ownershipRecord(id, location: location, at: location.directory, ownershipToken: token),
+                                   to: receiptURL, replace: true)
+        }
+        var updated = try registry()
+        if let prior = updated[id] {
+            updated[id] = try registrationRecord(id, location: location, previous: prior, ownershipToken: token)
+            try? files.writeJSON(updated, to: registryURL)
+        }
+        return true
     }
 
     private func recoverRegistration(_ id: String, location: IOSInstallationLocation) throws {
         let receipt = try location.files.json(location.directory.appendingPathComponent(ownershipName))
+        let currentIdentity = try location.files.guardValue(location.directory).identity
+        let receiptIdentity = receipt["directoryIdentity"] as? String ?? ""
+        let receiptRoot = receipt["rootIdentity"] as? String ?? ""
         guard receipt["revision"] as? Int == 1, receipt["owner"] as? String == "sillyclient",
               receipt["instanceId"] as? String == id, receipt["path"] as? String == location.directory.path,
-              receipt["rootIdentity"] as? String == location.rootIdentity,
+              receiptRoot == location.rootIdentity || IOSFileGuard.sameInodeAndBirth(receiptRoot, location.rootIdentity),
               receipt["grantId"] as? String == location.grantId,
-              receipt["directoryIdentity"] as? String == (try location.files.guardValue(location.directory).identity) else {
+              receiptIdentity == currentIdentity || IOSFileGuard.sameInodeAndBirth(receiptIdentity, currentIdentity) else {
             throw IOSFileError.invalid("The existing destination is not a recoverable launcher-owned instance")
         }
-        try register(id, location: location)
+        try register(id, location: location, ownershipToken: receipt["ownershipToken"] as? String)
     }
 
     private func bundleRuntime() throws -> URL {
@@ -340,14 +392,15 @@ final class IOSInstanceStore {
         try IOSPreinstaller.install(staging: staging, instanceId: id, selection: preinstall, companion: companion) {
             try NodeRunner.shared.checkCurrent(instance: id, operation: operation)
         }
-        try ownership(id, location: location, at: staging)
+        let token = UUID().uuidString
+        try ownership(id, location: location, at: staging, ownershipToken: token)
         try NodeRunner.shared.provisionMutation(instance: id, operation: operation) {
             guard !files.exists(target), try registry()[id] == nil else {
                 throw IOSFileError.invalid("Instance destination was created by another operation")
             }
             try files.move(staging, to: target)
             committed = true
-            do { try register(id, location: location) }
+            do { try register(id, location: location, ownershipToken: token) }
             catch { throw IOSFileError.invalid("The prepared instance was preserved at \(target.path), but registration failed: \(error.localizedDescription)") }
         }
         return target
@@ -562,12 +615,13 @@ final class IOSInstanceStore {
         try dataFiles.copyTree(dataSource, to: copyTarget, destination: files, include: included, cancelled: cancelled)
         try updateConfig(staging, port: 8000, config: nil, dataRoot: target.appendingPathComponent("data"), files: files)
         try IOSPreinstaller.install(staging: staging, instanceId: id, selection: preinstall, companion: nil, cancelled: cancelled)
-        try ownership(id, location: location, at: staging)
+        let token = UUID().uuidString
+        try ownership(id, location: location, at: staging, ownershipToken: token)
         try NodeRunner.shared.provisionMutation(instance: id, operation: operation) {
             guard !files.exists(target) else { throw IOSFileError.invalid("Migration target is occupied") }
             try files.move(staging, to: target)
             committed = true
-            do { try register(id, location: location) }
+            do { try register(id, location: location, ownershipToken: token) }
             catch { throw IOSFileError.invalid("The copied data was preserved at \(target.path), but registration failed: \(error.localizedDescription)") }
         }
         return target
@@ -614,23 +668,27 @@ final class IOSInstanceStore {
             try validateLocation(id, location: location, records: records)
         } else {
             location = try self.location(id, installPath: installPath)
+            records = try registry()
         }
         defer { withExtendedLifetime(location) {} }
         let source = location.directory
         let managed = location.files
         if !pending {
             let sourceIdentity = try managed.guardValue(source).identity
-            if let expected = records[id]?["directoryIdentity"] as? String, expected != sourceIdentity {
+            if let expected = records[id]?["directoryIdentity"] as? String,
+               expected != sourceIdentity && !IOSFileGuard.sameInodeAndBirth(expected, sourceIdentity) {
                 throw IOSFileError.invalid("The instance directory changed before deletion; its contents were preserved")
             }
             let legacy = documents.appendingPathComponent(id == "default" ? "SillyTavern" : "instances/\(id)")
             if records[id] == nil, source.path != legacy.path {
                 let receipt = try managed.json(source.appendingPathComponent(ownershipName))
+                let receiptRoot = receipt["rootIdentity"] as? String ?? ""
+                let receiptDir = receipt["directoryIdentity"] as? String ?? ""
                 guard receipt["revision"] as? Int == 1, receipt["owner"] as? String == "sillyclient",
                       receipt["instanceId"] as? String == id, receipt["path"] as? String == source.path,
-                      receipt["rootIdentity"] as? String == location.rootIdentity,
+                      receiptRoot == location.rootIdentity || IOSFileGuard.sameInodeAndBirth(receiptRoot, location.rootIdentity),
                       receipt["grantId"] as? String == location.grantId,
-                      receipt["directoryIdentity"] as? String == sourceIdentity else {
+                      receiptDir == sourceIdentity || IOSFileGuard.sameInodeAndBirth(receiptDir, sourceIdentity) else {
                     throw IOSFileError.invalid("Uninstall requires a registered or verified launcher-owned instance")
                 }
             }
@@ -647,14 +705,16 @@ final class IOSInstanceStore {
             }
         }
         guard let record = records[id], let identity = record["directoryIdentity"] as? String,
-              record["rootIdentity"] as? String == location.rootIdentity else {
+              let recordRoot = record["rootIdentity"] as? String,
+              recordRoot == location.rootIdentity || IOSFileGuard.sameInodeAndBirth(recordRoot, location.rootIdentity) else {
             throw IOSFileError.invalid("Pending deletion ownership cannot be verified; contents were preserved")
         }
         let checked = try managed.checked(source, allowMissing: true)
         var value = stat()
         if lstat(checked.path, &value) == 0 {
             let current = try managed.guardValue(checked)
-            guard current.isDirectory, current.identity == identity else {
+            guard current.isDirectory,
+                  current.identity == identity || IOSFileGuard.sameInodeAndBirth(identity, current.identity) else {
                 throw IOSFileError.invalid("The pending deletion directory was replaced; its contents were preserved")
             }
             try fm.removeItem(at: checked)

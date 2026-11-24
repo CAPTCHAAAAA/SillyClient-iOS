@@ -23,6 +23,16 @@ struct IOSFileGuard: Equatable {
     var fingerprint: String {
         "\(identity):\(mode):\(size):\(modifiedSeconds):\(modifiedNanos)"
     }
+
+    /// Compare persistent APFS inode + birthtime while tolerating volatile kernel mount `st_dev` changes
+    /// across iOS device reboots, OS updates, or FileProvider remounts.
+    static func sameInodeAndBirth(_ lhs: String, _ rhs: String) -> Bool {
+        let a = lhs.split(separator: ":", omittingEmptySubsequences: false)
+        let b = rhs.split(separator: ":", omittingEmptySubsequences: false)
+        guard a.count == 4, b.count == 4 else { return false }
+        return a[1] == b[1] && a[2] == b[2] && a[3] == b[3]
+            && UInt64(a[1]) != nil && Int64(a[2]) != nil && Int64(a[3]) != nil
+    }
 }
 
 struct IOSFileSnapshot: Equatable {

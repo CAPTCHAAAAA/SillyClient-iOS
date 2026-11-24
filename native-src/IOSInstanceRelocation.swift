@@ -17,10 +17,12 @@ extension IOSInstanceStore {
         if source.files.exists(source.directory.appendingPathComponent(ownershipName)) {
             let receipt = try source.files.json(source.directory.appendingPathComponent(ownershipName))
             let sourceIdentity = try source.files.guardValue(source.directory).identity
+            let receiptRoot = receipt["rootIdentity"] as? String ?? ""
+            let receiptDir = receipt["directoryIdentity"] as? String ?? ""
             guard receipt["owner"] as? String == "sillyclient", receipt["instanceId"] as? String == id,
                   receipt["path"] as? String == source.directory.path,
-                  receipt["rootIdentity"] as? String == source.rootIdentity,
-                  receipt["directoryIdentity"] as? String == sourceIdentity else {
+                  receiptRoot == source.rootIdentity || IOSFileGuard.sameInodeAndBirth(receiptRoot, source.rootIdentity),
+                  receiptDir == sourceIdentity || IOSFileGuard.sameInodeAndBirth(receiptDir, sourceIdentity) else {
                 throw IOSFileError.invalid("The instance ownership receipt does not match its registered location")
             }
         }
@@ -145,7 +147,8 @@ extension IOSInstanceStore {
                 try journal.willWrite(configuration, name: "config.yaml")
                 try destination.files.write(configuration, to: staging.appendingPathComponent("config.yaml"))
             }
-            let receipt = try JSONSerialization.data(withJSONObject: ownershipRecord(id, location: destination, at: staging),
+            let token = (records[id]?["ownershipToken"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString
+            let receipt = try JSONSerialization.data(withJSONObject: ownershipRecord(id, location: destination, at: staging, ownershipToken: token),
                                                      options: [.sortedKeys, .prettyPrinted])
             try journal.willWrite(receipt, name: ownershipName)
             try destination.files.write(receipt, to: staging.appendingPathComponent(ownershipName))
@@ -154,7 +157,7 @@ extension IOSInstanceStore {
                     throw IOSFileError.invalid("The staged instance directory changed")
                 }
                 try destination.files.move(staging, to: target)
-                var record = try registrationRecord(id, location: destination, previous: records[id] ?? [:])
+                var record = try registrationRecord(id, location: destination, previous: records[id] ?? [:], ownershipToken: token)
                 if let name = name { record["name"] = name }
                 records[id] = record
                 try files.writeJSON(records, to: registryURL)

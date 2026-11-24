@@ -1257,6 +1257,65 @@ enum IOSNativeTests {
             }
             try require(IOSRemoteCredentials.read(id, for: first)?.1 == password, "Rejected credential update changed stored data")
         }
+        test("Registered instances self-heal APFS st_dev drift and ownership-verified restores while blocking foreign replacements") { root, files in
+            let store = IOSInstanceStore(root: root)
+            let devDrift = root.appendingPathComponent("instances/dev-drift")
+            try files.createDirectory(devDrift)
+            try files.write(Data("server".utf8), to: devDrift.appendingPathComponent("server.js"))
+            try files.writeJSON(["version": "1.0.0"], to: devDrift.appendingPathComponent("package.json"))
+            let devGuard = try files.guardValue(devDrift)
+            let driftedIdentity = "\(devGuard.device ^ 1):\(devGuard.inode):\(devGuard.birthSeconds):\(devGuard.birthNanos)"
+            try require(IOSFileGuard.sameInodeAndBirth(driftedIdentity, devGuard.identity), "sameInodeAndBirth rejected st_dev-only drift")
+            try files.writeJSON(["dev-drift": [
+                "instanceId": "dev-drift", "path": devDrift.path, "documentsRelativePath": "instances/dev-drift",
+                "directoryIdentity": driftedIdentity, "rootIdentity": try files.guardValue(root).identity, "isTakeover": false
+            ]], to: store.registryURL)
+            let healedStore = IOSInstanceStore(root: root)
+            try require(healedStore.directory("dev-drift").path == devDrift.path, "st_dev-only drift failed to self-heal")
+            try require(healedStore.registry()["dev-drift"]?["directoryIdentity"] as? String == devGuard.identity,
+                        "st_dev-only drift did not refresh persisted directoryIdentity")
+            try require(healedStore.uninstall("dev-drift")["success"] as? Bool == true, "Uninstalling self-healed instance failed")
+
+            // Legacy v1.15.2 backup/container restore: new inode/birthtime, receipt carries matching prior directoryIdentity
+            let restored = root.appendingPathComponent("instances/legacy-restored")
+            try files.createDirectory(restored)
+            try files.write(Data("server".utf8), to: restored.appendingPathComponent("server.js"))
+            try files.writeJSON(["version": "1.0.0"], to: restored.appendingPathComponent("package.json"))
+            let legacyOldId = "999:888:777:666"
+            try files.writeJSON(["revision": 1, "owner": "sillyclient", "instanceId": "legacy-restored",
+                "path": "/old/container/Documents/instances/legacy-restored",
+                "rootIdentity": "999:1:2:3", "directoryIdentity": legacyOldId],
+                to: restored.appendingPathComponent(store.ownershipName))
+            try files.writeJSON(["legacy-restored": [
+                "instanceId": "legacy-restored", "path": "/old/container/Documents/instances/legacy-restored",
+                "documentsRelativePath": "instances/legacy-restored",
+                "directoryIdentity": legacyOldId, "rootIdentity": "999:1:2:3", "isTakeover": false
+            ]], to: store.registryURL)
+            try require(healedStore.directory("legacy-restored").path == restored.path, "Legacy restored instance failed to self-heal")
+            let upgradedToken = healedStore.registry()["legacy-restored"]?["ownershipToken"] as? String
+            try require(upgradedToken != nil && !upgradedToken!.isEmpty, "Self-healed legacy instance did not mint ownershipToken")
+
+            // Token-verified restore after another container copy (new inode/birthtime, matching ownershipToken)
+            let copied = root.appendingPathComponent("instances/token-copy-tmp")
+            try FileManager.default.copyItem(at: restored, to: copied)
+            try FileManager.default.removeItem(at: restored)
+            try files.move(copied, to: restored)
+            try require(healedStore.directory("legacy-restored").path == restored.path, "ownershipToken-verified restore failed to self-heal")
+            try require(healedStore.uninstall("legacy-restored")["success"] as? Bool == true, "Uninstalling restored instance failed")
+
+            // Foreign directory replacement without valid receipt must still fail closed
+            let foreign = root.appendingPathComponent("instances/foreign-replaced")
+            try files.createDirectory(foreign)
+            try files.write(Data("keep".utf8), to: foreign.appendingPathComponent("user.txt"))
+            try files.writeJSON(["foreign-replaced": [
+                "instanceId": "foreign-replaced", "path": foreign.path, "documentsRelativePath": "instances/foreign-replaced",
+                "directoryIdentity": "111:222:333:444", "rootIdentity": try files.guardValue(root).identity,
+                "ownershipToken": UUID().uuidString, "isTakeover": false
+            ]], to: store.registryURL)
+            try rejects("Foreign directory replacement was accepted") { _ = try healedStore.directory("foreign-replaced") }
+            try rejects("Foreign directory replacement was uninstalled") { _ = try healedStore.uninstall("foreign-replaced") }
+            try require(files.data(foreign.appendingPathComponent("user.txt")) == Data("keep".utf8), "Foreign replacement contents were altered")
+        }
         return ["success": results.allSatisfy { $0["passed"] as? Bool == true }, "results": results,
                 "scope": "Actual Swift modules on synthetic sandbox fixtures"]
     }

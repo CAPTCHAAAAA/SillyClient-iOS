@@ -55,7 +55,7 @@ test('simulator acceptance does not claim synthetic showcase interactions', () =
     const runner = read('scripts/run-ios-e2e.mjs');
     assert.doesNotMatch(runner, /__SC_TEST__|evalInConsole|uiStepsShowcased|setWizardMode|setManageTab/);
     assert.match(runner, /uiInteractionTested: false/);
-    assert.match(runner, /const nativeFixtureGroups = 48;/);
+    assert.match(runner, /const nativeFixtureGroups = 49;/);
     assert.match(runner, /maxBuffer: 64 \* 1024 \* 1024, timeout: 300000/);
 });
 
@@ -113,12 +113,25 @@ test('capability probe returns before creating the real console and stays isolat
 test('unsigned artifact version and monotonic native build agree', () => {
     const plist = read('native-src/Info.plist');
     const workflow = read('.github/workflows/build-ipa.yml');
-    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.15\.2<\/string>/);
+    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.15\.3<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 53);
+    assert.equal(build, 54);
     assert.equal(plist, read('ios/App/App/Info.plist'));
-    assert.match(workflow, /SillyClient-iOS-v1\.15\.2-unsigned/);
+    assert.match(workflow, /SillyClient-iOS-v1\.15\.3-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
+});
+
+test('iOS instance store self-heals APFS st_dev drift and ownership-verified restores without weakening foreign-replacement protection', () => {
+    const managed = read('native-src/IOSManagedFiles.swift');
+    const locations = read('native-src/IOSInstallationLocations.swift');
+    const store = read('native-src/IOSInstanceStore.swift');
+    const tests = read('native-src/IOSNativeTests.swift');
+    assert.match(managed, /static func sameInodeAndBirth\(_ lhs: String, _ rhs: String\) -> Bool/);
+    assert.match(locations, /IOSFileGuard\.sameInodeAndBirth\(identity, rootGuard\.identity\)/);
+    assert.match(store, /private func rebindDirectoryIdentityIfOwned\(/);
+    assert.match(store, /record\["ownershipToken"\] = token/);
+    assert.match(store, /location = try self\.location\(id, installPath: installPath\)\s+records = try registry\(\)/);
+    assert.match(tests, /self-heal APFS st_dev drift and ownership-verified restores/);
 });
 
 test('SC Bordeaux revision 3 matches the pinned preset files in both iOS resource sources', () => {
@@ -596,7 +609,7 @@ async function simulateDriver(scenario = 'success') {
         const reject = error => ({ success: false, error });
         switch (request.method) {
         case 'getPlatform': return success({ platform: 'ios' });
-        case 'getAppVersion': return success({ version: '1.15.2' });
+        case 'getAppVersion': return success({ version: '1.15.3' });
         case 'getInstanceInfo': {
             const record = registry[options.instanceId];
             return record ? success({ ...record, installPath: record.path }) : reject('Instance directory is unavailable');
