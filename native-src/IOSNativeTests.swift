@@ -1292,7 +1292,7 @@ enum IOSNativeTests {
                 "directoryIdentity": legacyOldId, "rootIdentity": "999:1:2:3", "isTakeover": false
             ]], to: store.registryURL)
             try require(healedStore.directory("legacy-restored").path == restored.path, "Legacy restored instance failed to self-heal")
-            let upgradedToken = healedStore.registry()["legacy-restored"]?["ownershipToken"] as? String
+            let upgradedToken = try healedStore.registry()["legacy-restored"]?["ownershipToken"] as? String
             try require(upgradedToken != nil && !upgradedToken!.isEmpty, "Self-healed legacy instance did not mint ownershipToken")
 
             // Token-verified restore after another container copy (new inode/birthtime, matching ownershipToken)
