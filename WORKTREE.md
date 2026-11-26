@@ -2,6 +2,20 @@
 
 > **[LTS 核心工作树]** 本文档为该工作树的自包含边界与记录中枢。本树所有进行中改动、调试日志与设计草稿就地记录在此，严禁向中央本地目录散落碎片文档。
 
+## 2026-11-27 iOS v1.15.4 (Build 55) 背景图 Intl/Jimp 修复、预制扩展与纯 JS Git 桥接及前端同步验证就绪（待用户敲板发布）
+
+- **问题根因**：
+  1. **iOS 背景图列表空白（初始图与新导入图均不显示、无法选择，但文件已在目录中）**：IPA 内 `NodeMobile.framework` 编译参数为 `v8_enable_i18n_support: 0`（`--without-intl`），运行期 `globalThis.Intl` 未定义；SillyTavern `1.19.0` 的 `POST /api/backgrounds/all` 调用 `getImages()` → `src/util.js:706` 执行 `files.sort(Intl.Collator().compare)` 直接抛出 `ReferenceError: Intl is not defined` 返回 HTTP 500（`stable-diffusion.js:26` 同源），而 `/api/backgrounds/upload` 不调用 `getImages()` 故上传成功但列表永空；同时 `src/jimp.js` 写死 WASM 解码器，无 WebAssembly 下缩略图与主色计算全败（纯 JS 解码 8K 壁纸还会峰值飙升 +467 MB）。
+  2. **预设安装插件失败与酒馆内扩展更新断链**：原镜像池中 `ghfast.top`（SSL EOF）与 `ghproxy.net`（HTTP 403）已失效，且 `IOSPinnedDownload` 缺 `Accept-Encoding: identity`、无粘性镜像记忆、无重试清理、单源超时 `45s` / 大包总时限 `90s` 失衡、无下载进度上报、`validateManifest` 缺版本/兼容性/数组入口校验、已存在目录未校验 `manifest.json`、`catalog.json` 缺 `displayName` 且未写 `.git/` 元数据；酒馆内部扩展检查/更新全走 `simple-git` 但在 iOS 无系统 `git` 二进制，且 `Module.register` 对 `Worker` 线程与 CJS 无效。
+- **修复与同步内容**：
+  - `ios-loader.mjs`：注入纯 JS `Intl.Collator`（兼容无 `new` 直接调用及 `numeric`/`sensitivity`/`ignorePunctuation`）与 `DateTimeFormat` / `NumberFormat` 兜底；
+  - `patch-sillytavern.mjs`：新增幂等步骤 `7b`（无 WASM 时 `src/jimp.js` 切换已内置纯 JS `@jimp/js-png` 与带 `maxResolutionInMP: 16, maxMemoryUsageInMB: 128` 保护的 `@jimp/js-jpeg`）与 `7c`（包入口直插 `node_modules/.sillyclient-ios-git-bridge.cjs` + 原始 `isomorphic-git/http/node` 备份至 `node_modules/.sillyclient-ios-git-http-orig.cjs` 避开 `package.json` `exports` 拦截，统一覆盖 Main/`Worker` 与 ESM/CJS 的 `simple-git` 与 `isomorphic-git/http/node` 多镜像回退及 `pull()`/`checkout()` 孤儿文件与空目录清理）；
+  - `IOSPreinstaller.swift`、`IOSInstanceStore.swift`、`TarvenEnvPlugin.swift`（两份同步）、`catalog.json`：换用实测可用的 6 源镜像池（`gh-proxy.com`、`gh-proxy.org`、`direct`、`edgeone.gh-proxy.com`、`ghproxy.vip`、`v6.gh-proxy.org`）与粘性优先记忆、补齐 `Accept-Encoding: identity`（含重定向）、调整超时 `20s / 180s`、镜像循环内完成 SHA-256 校验与重试清场、贯通 `onProgress` 进度回调、补全 `validateManifest`/`requireCompatible`（支持 `[String]` 入口与版本/兼容性校验）、严格保护半残目录、写入 `.git/` 元数据、对齐 `catalog.json` `displayName`；
+  - 通用前端同步 `common-frontend` `40436b2`（全站 `--motion-hover: 500ms` 悬停过渡统一与控制岛硬切修复，完整保留 iOS 原生适配），版本统一升至 `1.15.4`（Build `55`）；补齐 `ios-runtime.test.mjs`、`ios-ci.test.mjs` 与 `IOSNativeTests.swift` 回归测试。
+- **本机与 GitHub Xcode CI 验证**：本机 `node --test tests/ios-*.test.mjs`（124/124）、`verify-ios-cloud.mjs --mock-mode`（7/7）、`tsc --noEmit`、`vite build`（1957 modules）、`web/capacitor-ui/tests/*.test.cjs`（123/123）与 `git diff --check` 全通。功能提交 `8e9e06cefe33445fcb1844c84ede34d861efe5ca` 触发 `macos-15` Run `45898259070`（首跑因 runner 拥堵触发 `xcrun simctl launch ETIMEDOUT`，重跑 Job `140184706428` 用时 `17m57s` 全绿）：Node 18.20.4 无 WASM 启动、arm64 Release Archive、未签名 IPA、Hosted Simulator **24/24** 阶段与 Swift 原生沙盒 fixture **49/49** 组全部通过。
+- **成品验真与归档**：官方产物归档于 `Local/artifacts/v1.15.4/SillyClient-iOS-v1.15.4-unsigned.ipa`（`194,277,290` 字节，SHA-256 `8aa740a4e38e17af833545dd72668f5b83b217b76ecb79633648c229df6bb8b5`，与 CI `ipa-sha256.txt` 一致）与 `Local/artifacts/v1.15.4/SHA256SUMS.txt`；ZIP `23,725` 条目 CRC、`1.15.4 / Build 55 / com.sillyclient.ios`、`SillyClientCore` 符号、`catalog.json` `displayName`、`ios-loader.mjs` `Intl` 兜底、`src/jimp.js` 纯 JS 降级、Git 桥接 CJS/ESM 包装、5 份前端资产与本地 `dist` 逐字节一致及零 `src/dev` 残留全部核验通过（证据：`Local/evidence/v1.15.4-release/ios-package-audit.json` 与 `Local/evidence/v1.15.4-release/ios-run-45898259070/`）。
+- **同步与验收边界**：本记录提交使用 `[skip ci]` 仅推送至 `lts/ios-release-hardening`；尚未合入 `SillyClient_iOS/main` 或在 `SillyClient_Main` 发布 Release，等待用户确认发布范围。`uiInteractionTested: false`、`physicalDeviceTested: false`，物理设备自签表现待真机复测。
+
 ## 2026-11-24 iOS v1.15.3 (Build 54) 目录身份自愈与跨端同步验证就绪（待用户敲板发布）
 
 - **问题原因（`#16` / `#15` P0 死锁，及前端 `#11` / `#14` / `#17` / `#20`）**：
