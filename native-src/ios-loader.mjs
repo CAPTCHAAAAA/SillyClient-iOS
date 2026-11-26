@@ -45,6 +45,104 @@ if (typeof globalThis.TextDecoder !== 'undefined') {
     }
 }
 
+// 注入轻量 Intl 兜底，消除 NodeMobile (--without-intl / v8_enable_i18n_support=0) 下
+// SillyTavern getImages() 等调用 Intl.Collator().compare 抛出 ReferenceError: Intl is not defined 的问题
+if (typeof globalThis.Intl === 'undefined' || typeof globalThis.Intl.Collator !== 'function') {
+    const existingIntl = (typeof globalThis.Intl === 'object' && globalThis.Intl !== null) ? globalThis.Intl : {};
+    const createCollatorCompare = (options = {}) => {
+        const sensitivity = options?.sensitivity;
+        const numeric = Boolean(options?.numeric);
+        const ignorePunctuation = Boolean(options?.ignorePunctuation);
+        const normalize = (value) => {
+            let text = String(value ?? '');
+            if (ignorePunctuation) {
+                text = text.replace(/[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g, '');
+            }
+            if (sensitivity === 'base' || sensitivity === 'accent') {
+                text = text.toLowerCase();
+            }
+            return text;
+        };
+        return (a, b) => {
+            const sa = normalize(a);
+            const sb = normalize(b);
+            if (numeric) {
+                const pa = sa.split(/(\d+)/g);
+                const pb = sb.split(/(\d+)/g);
+                const len = Math.max(pa.length, pb.length);
+                for (let i = 0; i < len; i++) {
+                    const xa = pa[i] ?? '';
+                    const xb = pb[i] ?? '';
+                    if (xa === xb) continue;
+                    const na = /^\d+$/.test(xa);
+                    const nb = /^\d+$/.test(xb);
+                    if (na && nb) {
+                        const diff = Number(xa) - Number(xb);
+                        if (diff !== 0) return diff;
+                    }
+                    return xa < xb ? -1 : 1;
+                }
+                return 0;
+            }
+            const la = sa.toLowerCase();
+            const lb = sb.toLowerCase();
+            if (la !== lb) return la < lb ? -1 : 1;
+            return sa < sb ? -1 : sa > sb ? 1 : 0;
+        };
+    };
+
+    function SafeCollator(locales, options) {
+        const opts = options && typeof options === 'object' ? options : {};
+        const instance = new.target ? this : Object.create(SafeCollator.prototype);
+        instance.compare = createCollatorCompare(opts);
+        instance.resolvedOptions = () => ({
+            locale: Array.isArray(locales) ? String(locales[0] || 'en') : String(locales || 'en'),
+            usage: opts.usage || 'sort',
+            sensitivity: opts.sensitivity || 'variant',
+            ignorePunctuation: Boolean(opts.ignorePunctuation),
+            collation: 'default',
+            numeric: Boolean(opts.numeric),
+            caseFirst: opts.caseFirst || 'false',
+        });
+        return instance;
+    }
+    SafeCollator.supportedLocalesOf = (locales) => (Array.isArray(locales) ? locales.map(String) : locales ? [String(locales)] : []);
+
+    function SafeDateTimeFormat(locales, options) {
+        const opts = options && typeof options === 'object' ? options : {};
+        const instance = new.target ? this : Object.create(SafeDateTimeFormat.prototype);
+        instance.format = (value) => new Date(value === undefined ? Date.now() : value).toISOString();
+        instance.resolvedOptions = () => ({
+            locale: Array.isArray(locales) ? String(locales[0] || 'en') : String(locales || 'en'),
+            calendar: 'gregory',
+            numberingSystem: 'latn',
+            timeZone: opts.timeZone || 'UTC',
+        });
+        return instance;
+    }
+    SafeDateTimeFormat.supportedLocalesOf = SafeCollator.supportedLocalesOf;
+
+    function SafeNumberFormat(locales, options) {
+        const opts = options && typeof options === 'object' ? options : {};
+        const instance = new.target ? this : Object.create(SafeNumberFormat.prototype);
+        instance.format = (value) => String(Number(value));
+        instance.resolvedOptions = () => ({
+            locale: Array.isArray(locales) ? String(locales[0] || 'en') : String(locales || 'en'),
+            numberingSystem: 'latn',
+            style: opts.style || 'decimal',
+        });
+        return instance;
+    }
+    SafeNumberFormat.supportedLocalesOf = SafeCollator.supportedLocalesOf;
+
+    globalThis.Intl = {
+        ...existingIntl,
+        Collator: existingIntl.Collator || SafeCollator,
+        DateTimeFormat: existingIntl.DateTimeFormat || SafeDateTimeFormat,
+        NumberFormat: existingIntl.NumberFormat || SafeNumberFormat,
+    };
+}
+
 // 关键环境变量设置
 process.env.ST_DISABLE_SHARP = 'true';
 process.env.NODE_ENV = 'production';

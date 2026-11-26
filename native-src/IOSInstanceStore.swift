@@ -332,7 +332,8 @@ final class IOSInstanceStore {
 
     func prepare(instance id: String, operation: String, version: String?, localZip: String?,
                  installPath: String?, installPathMode: String? = nil, port: Int, config: [String: Any]?,
-                 preinstall: [String: Any]?, companion: [String: Any]?, createIntent: Bool = false) throws -> URL {
+                 preinstall: [String: Any]?, companion: [String: Any]?, createIntent: Bool = false,
+                 onProgress: ((Int, String) -> Void)? = nil) throws -> URL {
         guard (1...65535).contains(port) else { throw IOSFileError.invalid("Invalid port") }
         guard localZip == nil else {
             throw IOSFileError.invalid("Arbitrary server ZIP versions are unsupported; import their user data instead")
@@ -389,7 +390,7 @@ final class IOSInstanceStore {
         defer { if !committed { try? fm.removeItem(at: files.checked(staging)) } }
         try NodeRunner.shared.checkCurrent(instance: id, operation: operation)
         try updateConfig(staging, port: port, config: config, dataRoot: target.appendingPathComponent("data"), files: files)
-        try IOSPreinstaller.install(staging: staging, instanceId: id, selection: preinstall, companion: companion) {
+        try IOSPreinstaller.install(staging: staging, instanceId: id, selection: preinstall, companion: companion, onProgress: onProgress) {
             try NodeRunner.shared.checkCurrent(instance: id, operation: operation)
         }
         let token = UUID().uuidString

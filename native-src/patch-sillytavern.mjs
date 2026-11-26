@@ -299,6 +299,636 @@ export default function getWebpackServeMiddleware() {
   }
 }
 
+// 7b. 补丁 SillyTavern 官方源码 src/jimp.js：在无 WebAssembly 的 iOS 运行时自动切换纯 JS JPEG/PNG 解码器并限制单图峰值内存
+const jimpPath = path.join(targetDir, 'src', 'jimp.js');
+if (fs.existsSync(jimpPath)) {
+  let content = fs.readFileSync(jimpPath, 'utf8');
+  if (!content.includes('// SillyClient iOS pure-JS Jimp fallback')) {
+    const wasmImports = `import webp from '@jimp/wasm-webp';
+import png from '@jimp/wasm-png';
+import jpeg from '@jimp/wasm-jpeg';
+import avif from '@jimp/wasm-avif';`;
+    const formatList = 'formats: [webp, png, jpeg, avif, bmp, msBmp, gif, tiff],';
+    if (content.includes(wasmImports) && content.includes(formatList)) {
+      content = content.replace(
+        wasmImports,
+        `// SillyClient iOS pure-JS Jimp fallback
+import webp from '@jimp/wasm-webp';
+import png from '@jimp/wasm-png';
+import jpeg from '@jimp/wasm-jpeg';
+import avif from '@jimp/wasm-avif';
+import jsPng from '@jimp/js-png';
+import jsJpeg from '@jimp/js-jpeg';
+
+const hasWebAssembly = typeof WebAssembly !== 'undefined' && typeof WebAssembly.instantiate === 'function';
+function safeJsJpeg() {
+    const codec = jsJpeg();
+    return {
+        ...codec,
+        decode: (data, options = {}) => codec.decode(data, {
+            maxResolutionInMP: 16,
+            maxMemoryUsageInMB: 128,
+            ...options,
+        }),
+    };
+}`
+      );
+      content = content.replace(
+        formatList,
+        'formats: hasWebAssembly ? [webp, png, jpeg, avif, bmp, msBmp, gif, tiff] : [jsPng, safeJsJpeg, bmp, msBmp, gif, tiff],'
+      );
+      fs.writeFileSync(jimpPath, content, 'utf8');
+      console.log(`[patch-sillytavern] [7b/8] Successfully patched src/jimp.js with no-WASM pure-JS JPEG/PNG fallback: ${jimpPath}`);
+    }
+  } else {
+    console.log(`[patch-sillytavern] [7b/8] Notice: src/jimp.js already has pure-JS fallback: ${jimpPath}`);
+  }
+}
+
+// 7c. 补丁 simple-git 与 isomorphic-git/http/node：
+// iOS NodeMobile 无系统 git 可执行文件且运行在 Worker 线程中（Module.register 对 Worker 与 CJS 无效），
+// 直接在 node_modules 包入口注入纯 JS Git 桥接 + 多镜像回退 + pull 孤儿文件清理，同时覆盖 Main/Worker 与 ESM/CJS。
+const simpleGitDir = path.join(targetDir, 'node_modules', 'simple-git');
+const isoGitHttpDir = path.join(targetDir, 'node_modules', 'isomorphic-git', 'http', 'node');
+const isoGitHttpCjs = path.join(isoGitHttpDir, 'index.cjs');
+const isoGitHttpEsm = path.join(isoGitHttpDir, 'index.js');
+const isoGitHttpOrigCjs = path.join(targetDir, 'node_modules', '.sillyclient-ios-git-http-orig.cjs');
+const bridgeCjsPath = path.join(targetDir, 'node_modules', '.sillyclient-ios-git-bridge.cjs');
+
+if (fs.existsSync(isoGitHttpCjs) && fs.existsSync(simpleGitDir)) {
+  const currentIsoHttp = fs.readFileSync(isoGitHttpCjs, 'utf8');
+  if (!fs.existsSync(isoGitHttpOrigCjs) && !currentIsoHttp.includes('SillyClient iOS Git HTTP bridge')) {
+    fs.copyFileSync(isoGitHttpCjs, isoGitHttpOrigCjs);
+  }
+  if (fs.existsSync(isoGitHttpOrigCjs)) {
+    const bridgeSource = `'use strict';
+// SillyClient iOS pure-JS Git bridge (ESM + CJS + Worker compatible, zero system git required)
+const fs = require('node:fs');
+const path = require('node:path');
+const isomorphicGit = require('./isomorphic-git');
+const origHttp = require('./.sillyclient-ios-git-http-orig.cjs');
+
+const KNOWN_REPOS = {
+  'JS-Slash-Runner': { repo: 'N0VI028/JS-Slash-Runner', version: '4.11.2', commit: '46ec10df770b47e1ce6562de747d72f1bde3549e' },
+  'LittleWhiteBox': { repo: 'RT15548/LittleWhiteBox', version: '3.1.6', commit: '66cb1001e860cdddd77e5a3911c7c47ea325df3a' },
+  'ST-Prompt-Template': { repo: 'zonde306/ST-Prompt-Template', version: '1.17.9', commit: 'd6f520d149aba146305b0b781ddd691d449c28d2' },
+  'Extension-Dice': { repo: 'SillyTavern/Extension-Dice', version: '2.0.0', commit: 'b4047508a1191ba3b32cb20f64ebc5f7877d689b' },
+};
+
+const DEFAULT_GIT_MIRRORS = [
+  'https://gh-proxy.com/',
+  'https://gh-proxy.org/',
+  'https://edgeone.gh-proxy.com/',
+  'https://ghproxy.vip/',
+  'https://v6.gh-proxy.org/',
+];
+
+function createBridge(fsMod, pathMod, isoGit, baseHttp) {
+  let preferredMirrorPrefix = null;
+
+  function isSha(val) {
+    return typeof val === 'string' && val.length === 40 && /^[0-9a-f]{40}$/i.test(val);
+  }
+
+  function stripGitSuffix(rawUrl) {
+    const text = String(rawUrl || '').trim();
+    return text.toLowerCase().endsWith('.git') ? text.slice(0, -4) : text;
+  }
+
+  async function collectBody(body) {
+    if (!body) return undefined;
+    if (Buffer.isBuffer(body) || body instanceof Uint8Array) return [Buffer.from(body)];
+    if (Array.isArray(body)) return [Buffer.concat(body.map(b => Buffer.from(b)))];
+    const chunks = [];
+    for await (const chunk of body) chunks.push(Buffer.from(chunk));
+    return [Buffer.concat(chunks)];
+  }
+
+  function withTimeout(promise, ms) {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Git HTTP request timed out')), ms);
+      }),
+    ]).finally(() => clearTimeout(timer));
+  }
+
+  function buildCandidateUrls(rawUrl) {
+    const envMirrors = process.env.SILLYCLIENT_GIT_MIRRORS;
+    const mirrorList = (envMirrors !== undefined ? envMirrors.split(',') : DEFAULT_GIT_MIRRORS)
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(m => (m.endsWith('/') ? m : m + '/'));
+    const isGitHub = /^https:\\/\\/github\\.com\\//i.test(rawUrl);
+    if (!isGitHub && !envMirrors) {
+      return [{ prefix: '', url: rawUrl }];
+    }
+    const orderedPrefixes = [];
+    if (preferredMirrorPrefix !== null && (preferredMirrorPrefix === '' || mirrorList.includes(preferredMirrorPrefix))) {
+      orderedPrefixes.push(preferredMirrorPrefix);
+    }
+    for (const m of mirrorList) {
+      if (!orderedPrefixes.includes(m)) orderedPrefixes.push(m);
+    }
+    if (!orderedPrefixes.includes('')) {
+      const insertAt = Math.min(2, orderedPrefixes.length);
+      orderedPrefixes.splice(insertAt, 0, '');
+    }
+    return orderedPrefixes.map(prefix => ({ prefix, url: prefix ? prefix + rawUrl : rawUrl }));
+  }
+
+  const http = {
+    async request(req) {
+      const candidates = buildCandidateUrls(req.url);
+      const bufferedBody = await collectBody(req.body);
+      const isPackTransfer = String(req.method || 'GET').toUpperCase() === 'POST' || /git-upload-pack/i.test(req.url);
+      const failures = [];
+      for (const candidate of candidates) {
+        const timeoutMs = isPackTransfer ? 60000 : (candidate.prefix === '' ? 10000 : 15000);
+        try {
+          const res = await withTimeout(
+            baseHttp.request({
+              ...req,
+              url: candidate.url,
+              headers: { 'User-Agent': 'git/2.43.0 SillyClient-iOS', ...(req.headers || {}) },
+              body: bufferedBody ? [Buffer.from(bufferedBody[0])] : undefined,
+            }),
+            timeoutMs
+          );
+          if (res && res.statusCode >= 200 && res.statusCode < 400) {
+            preferredMirrorPrefix = candidate.prefix;
+            return { ...res, url: req.url };
+          }
+          failures.push((candidate.prefix || 'direct') + ': HTTP ' + (res && res.statusCode));
+        } catch (err) {
+          failures.push((candidate.prefix || 'direct') + ': ' + (err && err.message ? err.message : String(err)));
+        }
+      }
+      throw new Error('Git HTTP request failed for ' + req.url + ' (' + failures.join('; ') + ')');
+    },
+  };
+
+  function writeGitFiles(baseDir, remoteUrl, branch, commit) {
+    const gitDir = pathMod.join(baseDir, '.git');
+    fsMod.mkdirSync(pathMod.join(gitDir, 'refs/heads'), { recursive: true });
+    fsMod.mkdirSync(pathMod.join(gitDir, 'refs/remotes/origin'), { recursive: true });
+    fsMod.mkdirSync(pathMod.join(gitDir, 'objects/info'), { recursive: true });
+    fsMod.mkdirSync(pathMod.join(gitDir, 'objects/pack'), { recursive: true });
+    fsMod.writeFileSync(pathMod.join(gitDir, 'HEAD'), 'ref: refs/heads/' + branch + '\\n');
+    fsMod.writeFileSync(
+      pathMod.join(gitDir, 'config'),
+      '[core]\\n\\trepositoryformatversion = 0\\n\\tfilemode = false\\n\\tbare = false\\n\\tlogallrefupdates = true\\n' +
+      '[remote "origin"]\\n\\turl = ' + remoteUrl + '\\n\\tfetch = +refs/heads/*:refs/remotes/origin/*\\n' +
+      '[branch "' + branch + '"]\\n\\tremote = origin\\n\\tmerge = refs/heads/' + branch + '\\n'
+    );
+    fsMod.writeFileSync(pathMod.join(gitDir, 'refs/heads', branch), commit + '\\n');
+    fsMod.writeFileSync(pathMod.join(gitDir, 'refs/remotes/origin', branch), commit + '\\n');
+  }
+
+  function ensureExtensionGitRepo(baseDir) {
+    if (!baseDir || typeof baseDir !== 'string') return;
+    const headFile = pathMod.join(baseDir, '.git/HEAD');
+    if (fsMod.existsSync(headFile)) return;
+    const manifestFile = pathMod.join(baseDir, 'manifest.json');
+    if (!fsMod.existsSync(manifestFile)) return;
+    try {
+      const manifest = JSON.parse(fsMod.readFileSync(manifestFile, 'utf8'));
+      const dirName = pathMod.basename(baseDir);
+      const known = KNOWN_REPOS[dirName];
+      let remoteUrl = '';
+      let commit = '1111111111111111111111111111111111111111';
+      if (known) {
+        remoteUrl = 'https://github.com/' + known.repo + '.git';
+        if (manifest.version === known.version) commit = known.commit;
+      } else {
+        const rawRepo = manifest.homePage || manifest.homepage ||
+          (manifest.repository && typeof manifest.repository === 'object' ? manifest.repository.url : manifest.repository) || '';
+        const parsed = new URL(String(rawRepo).trim());
+        if (parsed.hostname.toLowerCase() === 'github.com') {
+          const parts = parsed.pathname.split('/').filter(Boolean);
+          if (parts.length >= 2) {
+            remoteUrl = 'https://github.com/' + parts[0] + '/' + stripGitSuffix(parts[1]) + '.git';
+          }
+        }
+      }
+      if (remoteUrl) writeGitFiles(baseDir, remoteUrl, 'main', commit);
+    } catch (_) {}
+  }
+
+  function readRef(baseDir, refPath) {
+    const full = pathMod.join(baseDir, '.git', refPath);
+    if (fsMod.existsSync(full) && fsMod.statSync(full).isFile()) {
+      const val = fsMod.readFileSync(full, 'utf8').trim();
+      if (val.startsWith('ref: ')) return readRef(baseDir, val.slice(5).trim());
+      if (isSha(val)) return val.toLowerCase();
+    }
+    const packed = pathMod.join(baseDir, '.git/packed-refs');
+    if (fsMod.existsSync(packed)) {
+      for (const line of fsMod.readFileSync(packed, 'utf8').split(/\\r?\\n/)) {
+        if (!line || line.startsWith('#') || line.startsWith('^')) continue;
+        const [oid, ref] = line.trim().split(/\\s+/);
+        if (ref === refPath && isSha(oid)) return oid.toLowerCase();
+      }
+    }
+    return '';
+  }
+
+  function getHeadInfo(baseDir) {
+    const headFile = pathMod.join(baseDir, '.git/HEAD');
+    if (!fsMod.existsSync(headFile)) return { detached: false, current: '', oid: '' };
+    const raw = fsMod.readFileSync(headFile, 'utf8').trim();
+    if (raw.startsWith('ref: ')) {
+      const ref = raw.slice(5).trim();
+      const branch = ref.replace(/^refs\\/heads\\//, '');
+      return { detached: false, current: branch, oid: readRef(baseDir, ref) };
+    }
+    return { detached: true, current: 'HEAD', oid: raw.toLowerCase() };
+  }
+
+  function getOriginUrl(baseDir) {
+    const cfgFile = pathMod.join(baseDir, '.git/config');
+    if (!fsMod.existsSync(cfgFile)) return '';
+    const text = fsMod.readFileSync(cfgFile, 'utf8');
+    const m = text.match(/\\[remote\\s+"origin"\\][\\s\\S]*?^\\s*url\\s*=\\s*(\\S+)/m);
+    return m ? m[1].trim() : '';
+  }
+
+  function listRefFiles(rootDir, prefix = '') {
+    if (!fsMod.existsSync(rootDir)) return [];
+    const results = [];
+    for (const entry of fsMod.readdirSync(rootDir, { withFileTypes: true })) {
+      const rel = prefix ? prefix + '/' + entry.name : entry.name;
+      const full = pathMod.join(rootDir, entry.name);
+      if (entry.isDirectory()) results.push(...listRefFiles(full, rel));
+      else if (entry.isFile() && entry.name !== 'HEAD') {
+        const oid = fsMod.readFileSync(full, 'utf8').trim();
+        if (isSha(oid)) results.push({ name: rel, oid: oid.toLowerCase() });
+      }
+    }
+    return results;
+  }
+
+  function listWorktreeFiles(baseDir) {
+    if (typeof fsMod.readdirSync !== 'function') return [];
+    const results = [];
+    const walk = (dir, prefix) => {
+      for (const entry of fsMod.readdirSync(dir, { withFileTypes: true })) {
+        if (!prefix && (entry.name === '.git' || entry.name.startsWith('.sillyclient'))) continue;
+        const rel = prefix ? prefix + '/' + entry.name : entry.name;
+        const full = pathMod.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full, rel);
+        else if (entry.isFile()) results.push(rel);
+      }
+    };
+    try { walk(baseDir, ''); } catch (_) {}
+    return results;
+  }
+
+  function pruneEmptyDirs(baseDir, startDir) {
+    let current = startDir;
+    while (current && current !== baseDir && current.startsWith(baseDir + pathMod.sep)) {
+      try {
+        const entries = fsMod.readdirSync(current);
+        if (entries.length > 0) break;
+        fsMod.rmdirSync(current);
+      } catch (_) {
+        break;
+      }
+      current = pathMod.dirname(current);
+    }
+  }
+
+  async function pruneOrphanedFilesAfterCheckout(baseDir, targetBranch, previousFiles) {
+    if (!previousFiles.length || typeof isoGit.listFiles !== 'function' || typeof fsMod.unlinkSync !== 'function') return;
+    try {
+      const tracked = await isoGit.listFiles({ fs: fsMod, dir: baseDir, ref: targetBranch });
+      if (!Array.isArray(tracked) || tracked.length === 0) return;
+      const trackedSet = new Set(tracked.map(p => String(p).replace(/\\\\/g, '/')));
+      for (const rel of previousFiles) {
+        if (!trackedSet.has(rel)) {
+          const full = pathMod.join(baseDir, rel);
+          try {
+            if (fsMod.existsSync(full)) {
+              fsMod.unlinkSync(full);
+              pruneEmptyDirs(baseDir, pathMod.dirname(full));
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
+  const fetchCache = new Map();
+  const CheckRepoActions = {
+    IS_REPO_ROOT: 'root',
+    IS_REPO_HOME: 'home',
+    BARE: 'bare',
+    IN_TREE: 'tree',
+  };
+  const ResetMode = { MIXED: 'mixed', SOFT: 'soft', HARD: 'hard', MERGE: 'merge', KEEP: 'keep' };
+  const CleanOptions = { DRY_RUN: 'n', FORCE: 'f', IGNORED_INCLUDED: 'x', IGNORED_ONLY: 'X', EXCLUDE: 'e', QUIET: 'q', RECURSIVE: 'd' };
+
+  function simpleGit(optionsOrPath) {
+    const requestedBaseDir = typeof optionsOrPath === 'string'
+      ? optionsOrPath
+      : (optionsOrPath && optionsOrPath.baseDir) || process.cwd();
+    let baseDir = pathMod.resolve(requestedBaseDir);
+    try { baseDir = fsMod.realpathSync(baseDir); } catch (_) {}
+    ensureExtensionGitRepo(baseDir);
+
+    async function doFetch() {
+      const url = getOriginUrl(baseDir);
+      if (!url) { fetchCache.delete(baseDir); return; }
+      const now = Date.now();
+      const cached = fetchCache.get(baseDir);
+      if (cached && cached.url === url) {
+        if (cached.promise) return cached.promise;
+        if (now >= cached.time && now - cached.time < 3000) return cached.refs;
+      }
+      const entry = { url, promise: null, time: 0, refs: null };
+      fetchCache.set(baseDir, entry);
+      entry.promise = (async () => {
+        try {
+          const refs = await isoGit.listServerRefs({
+            http,
+            url,
+            symrefs: true,
+            prefix: 'refs/heads/',
+          });
+          if (fetchCache.get(baseDir) !== entry || getOriginUrl(baseDir) !== url) return refs;
+          for (const r of refs) {
+            if (r.ref && r.ref.startsWith('refs/heads/') && isSha(r.oid)) {
+              const branchName = r.ref.slice('refs/heads/'.length);
+              const dest = pathMod.join(baseDir, '.git/refs/remotes/origin', branchName);
+              fsMod.mkdirSync(pathMod.dirname(dest), { recursive: true });
+              fsMod.writeFileSync(dest, r.oid.toLowerCase() + '\\n');
+            }
+          }
+          const head = getHeadInfo(baseDir);
+          if (!head.detached && head.current && refs.length > 0) {
+            const hasCurrentOnRemote = refs.some(r => r.ref === 'refs/heads/' + head.current);
+            if (!hasCurrentOnRemote) {
+              const fallbackRef = refs.find(r => r.ref === 'refs/heads/master') || refs[0];
+              const fallbackBranch = fallbackRef.ref.slice('refs/heads/'.length);
+              const oldHeadOid = head.oid || '1111111111111111111111111111111111111111';
+              const newHeadPath = pathMod.join(baseDir, '.git/refs/heads', fallbackBranch);
+              fsMod.mkdirSync(pathMod.dirname(newHeadPath), { recursive: true });
+              if (!fsMod.existsSync(newHeadPath)) fsMod.writeFileSync(newHeadPath, oldHeadOid + '\\n');
+              fsMod.writeFileSync(pathMod.join(baseDir, '.git/HEAD'), 'ref: refs/heads/' + fallbackBranch + '\\n');
+              const aliasDest = pathMod.join(baseDir, '.git/refs/remotes/origin', head.current);
+              fsMod.mkdirSync(pathMod.dirname(aliasDest), { recursive: true });
+              fsMod.writeFileSync(aliasDest, fallbackRef.oid.toLowerCase() + '\\n');
+            }
+          }
+          entry.refs = refs;
+          entry.time = Date.now();
+          return refs;
+        } finally {
+          if (fetchCache.get(baseDir) === entry) {
+            if (entry.refs) entry.promise = null;
+            else fetchCache.delete(baseDir);
+          }
+        }
+      })();
+      return entry.promise;
+    }
+
+    return {
+      async checkIsRepo() {
+        ensureExtensionGitRepo(baseDir);
+        return fsMod.existsSync(pathMod.join(baseDir, '.git/HEAD'));
+      },
+      async revparse(args) {
+        const arr = Array.isArray(args) ? args : [args];
+        if (arr.includes('--is-shallow-repository')) return 'false';
+        const head = getHeadInfo(baseDir);
+        if (arr.includes('--abbrev-ref')) {
+          if (arr.includes('@{u}')) return 'origin/' + (head.current || 'main');
+          return head.detached ? 'HEAD' : (head.current || 'main');
+        }
+        if (arr.includes('--short')) return (head.oid || '').slice(0, 7);
+        const target = arr[arr.length - 1] || 'HEAD';
+        if (target === 'HEAD') {
+          if (!head.oid) throw new Error('HEAD cannot be resolved');
+          return head.oid;
+        }
+        if (target.startsWith('origin/')) {
+          return readRef(baseDir, 'refs/remotes/' + target) || head.oid;
+        }
+        return readRef(baseDir, 'refs/heads/' + target) || head.oid;
+      },
+      async branch(args) {
+        const arr = Array.isArray(args) ? args : [];
+        if (arr.includes('-r')) {
+          const remotes = listRefFiles(pathMod.join(baseDir, '.git/refs/remotes/origin'));
+          const branches = {};
+          const all = [];
+          for (const r of remotes) {
+            const name = 'origin/' + r.name;
+            all.push(name);
+            branches[name] = { current: false, name, commit: r.oid.slice(0, 7), label: r.oid.slice(0, 7) };
+          }
+          return { detached: false, current: '', all, branches };
+        }
+        const head = getHeadInfo(baseDir);
+        const locals = listRefFiles(pathMod.join(baseDir, '.git/refs/heads'));
+        const branches = {};
+        const all = [];
+        for (const l of locals) {
+          all.push(l.name);
+          branches[l.name] = {
+            current: !head.detached && l.name === head.current,
+            name: l.name,
+            commit: l.oid.slice(0, 7),
+            label: l.oid.slice(0, 7),
+          };
+        }
+        if (head.current && !branches[head.current] && head.oid) {
+          all.push(head.current);
+          branches[head.current] = { current: !head.detached, name: head.current, commit: head.oid.slice(0, 7), label: head.oid.slice(0, 7) };
+        }
+        return { detached: head.detached, current: head.current, all, branches };
+      },
+      async branchLocal() {
+        return this.branch([]);
+      },
+      async fetch() {
+        await doFetch();
+        return {};
+      },
+      async log(options = {}) {
+        const head = getHeadInfo(baseDir);
+        const fromRef = options.from || head.oid;
+        const toSpec = options.to || ('origin/' + (head.current || 'main'));
+        const fromOid = isSha(fromRef)
+          ? fromRef.toLowerCase()
+          : (readRef(baseDir, 'refs/heads/' + fromRef) || head.oid);
+        const toOid = toSpec.startsWith('origin/')
+          ? readRef(baseDir, 'refs/remotes/' + toSpec)
+          : (isSha(toSpec) ? toSpec.toLowerCase() : readRef(baseDir, 'refs/heads/' + toSpec));
+        if (!toOid || !fromOid || fromOid === toOid) {
+          return { all: [], total: 0, latest: null };
+        }
+        const entry = { hash: toOid, date: '', message: 'Update available', refs: '', body: '', author_name: '', author_email: '' };
+        return { all: [entry], total: 1, latest: entry };
+      },
+      async getRemotes() {
+        const cleanUrl = stripGitSuffix(getOriginUrl(baseDir));
+        return cleanUrl ? [{ name: 'origin', refs: { fetch: cleanUrl, push: cleanUrl } }] : [];
+      },
+      async pull(_remote = 'origin', branch) {
+        fetchCache.delete(baseDir);
+        try {
+          const head = getHeadInfo(baseDir);
+          const targetBranch = branch || head.current || 'main';
+          const url = getOriginUrl(baseDir);
+          if (!url) throw new Error('No origin remote configured');
+          const previousFiles = listWorktreeFiles(baseDir);
+          const fetchRes = await isoGit.fetch({
+            fs: fsMod,
+            http,
+            dir: baseDir,
+            url,
+            ref: targetBranch,
+            depth: 1,
+            singleBranch: true,
+            tags: false,
+          });
+          const latestOid = (fetchRes && fetchRes.fetchHead) || readRef(baseDir, 'refs/remotes/origin/' + targetBranch);
+          if (!latestOid) throw new Error('Unable to resolve remote HEAD for ' + targetBranch);
+          const localRefFile = pathMod.join(baseDir, '.git/refs/heads', targetBranch);
+          fsMod.mkdirSync(pathMod.dirname(localRefFile), { recursive: true });
+          fsMod.writeFileSync(localRefFile, latestOid + '\\n');
+          const remoteRefFile = pathMod.join(baseDir, '.git/refs/remotes/origin', targetBranch);
+          fsMod.mkdirSync(pathMod.dirname(remoteRefFile), { recursive: true });
+          fsMod.writeFileSync(remoteRefFile, latestOid + '\\n');
+          fsMod.writeFileSync(pathMod.join(baseDir, '.git/HEAD'), 'ref: refs/heads/' + targetBranch + '\\n');
+          await isoGit.checkout({ fs: fsMod, dir: baseDir, ref: targetBranch, force: true });
+          await pruneOrphanedFilesAfterCheckout(baseDir, targetBranch, previousFiles);
+          return {};
+        } finally { fetchCache.delete(baseDir); }
+      },
+      async remote() {
+        return '';
+      },
+      async checkout(branch) {
+        fetchCache.delete(baseDir);
+        try {
+          const targetBranch = String(branch).replace(/^origin\\//, '');
+          const url = getOriginUrl(baseDir);
+          const previousFiles = listWorktreeFiles(baseDir);
+          if (url) {
+            const fetchRes = await isoGit.fetch({
+              fs: fsMod,
+              http,
+              dir: baseDir,
+              url,
+              ref: targetBranch,
+              depth: 1,
+              singleBranch: true,
+              tags: false,
+            });
+            const oid = (fetchRes && fetchRes.fetchHead) || readRef(baseDir, 'refs/remotes/origin/' + targetBranch);
+            if (oid) {
+              const localRefFile = pathMod.join(baseDir, '.git/refs/heads', targetBranch);
+              fsMod.mkdirSync(pathMod.dirname(localRefFile), { recursive: true });
+              fsMod.writeFileSync(localRefFile, oid + '\\n');
+            }
+          }
+          fsMod.writeFileSync(pathMod.join(baseDir, '.git/HEAD'), 'ref: refs/heads/' + targetBranch + '\\n');
+          await isoGit.checkout({ fs: fsMod, dir: baseDir, ref: targetBranch, force: true });
+          await pruneOrphanedFilesAfterCheckout(baseDir, targetBranch, previousFiles);
+        } finally { fetchCache.delete(baseDir); }
+      },
+      async checkoutBranch(localBranch, startPoint) {
+        await this.checkout(localBranch || startPoint);
+      },
+      async clone(url, localPath, options) {
+        let ref;
+        let depth = 1;
+        if (Array.isArray(options)) {
+          const bIdx = options.indexOf('-b') >= 0 ? options.indexOf('-b') : options.indexOf('--branch');
+          if (bIdx >= 0 && options[bIdx + 1]) ref = options[bIdx + 1];
+        } else if (options && typeof options === 'object') {
+          if (options['--branch']) ref = options['--branch'];
+          else if (options.branch) ref = options.branch;
+          if (options['--depth'] !== undefined) depth = Number(options['--depth']) || 1;
+          else if (options.depth !== undefined) depth = Number(options.depth) || 1;
+        }
+        await isoGit.clone({
+          fs: fsMod,
+          http,
+          dir: localPath,
+          url,
+          ref,
+          depth,
+          singleBranch: Boolean(ref) || depth !== undefined,
+        });
+      },
+      async show() {
+        return '';
+      },
+    };
+  }
+
+  return { http, CheckRepoActions, ResetMode, CleanOptions, simpleGit };
+}
+
+const bridge = createBridge(fs, path, isomorphicGit, origHttp);
+module.exports = Object.assign(bridge.simpleGit, bridge, {
+  default: bridge.simpleGit,
+  gitP: bridge.simpleGit,
+  createBridge,
+});
+`;
+    fs.writeFileSync(bridgeCjsPath, bridgeSource, 'utf8');
+
+    const isoHttpCjsWrapper = `'use strict';
+// SillyClient iOS Git HTTP bridge
+const bridge = require('../../../.sillyclient-ios-git-bridge.cjs');
+module.exports = bridge.http;
+`;
+    const isoHttpEsmWrapper = `// SillyClient iOS Git HTTP bridge
+import bridge from '../../../.sillyclient-ios-git-bridge.cjs';
+export const request = bridge.http.request;
+export default bridge.http;
+`;
+    fs.writeFileSync(isoGitHttpCjs, isoHttpCjsWrapper, 'utf8');
+    if (fs.existsSync(isoGitHttpEsm)) {
+      fs.writeFileSync(isoGitHttpEsm, isoHttpEsmWrapper, 'utf8');
+    }
+
+    const simpleGitCjs = path.join(simpleGitDir, 'dist', 'cjs', 'index.js');
+    const simpleGitEsm = path.join(simpleGitDir, 'dist', 'esm', 'index.js');
+    const simpleGitPromise = path.join(simpleGitDir, 'promise.js');
+    if (fs.existsSync(simpleGitCjs)) {
+      fs.writeFileSync(simpleGitCjs, `'use strict';
+// SillyClient iOS simple-git bridge
+module.exports = require('../../../.sillyclient-ios-git-bridge.cjs');
+`, 'utf8');
+    }
+    if (fs.existsSync(simpleGitEsm)) {
+      fs.writeFileSync(simpleGitEsm, `// SillyClient iOS simple-git bridge
+import bridge from '../../../.sillyclient-ios-git-bridge.cjs';
+export const simpleGit = bridge.simpleGit;
+export const gitP = bridge.simpleGit;
+export const CheckRepoActions = bridge.CheckRepoActions;
+export const ResetMode = bridge.ResetMode;
+export const CleanOptions = bridge.CleanOptions;
+export default bridge.simpleGit;
+`, 'utf8');
+    }
+    if (fs.existsSync(simpleGitPromise)) {
+      fs.writeFileSync(simpleGitPromise, `'use strict';
+// SillyClient iOS simple-git bridge
+module.exports = require('../.sillyclient-ios-git-bridge.cjs');
+`, 'utf8');
+    }
+    console.log(`[patch-sillytavern] [7c/8] Successfully installed iOS pure-JS Git bridge (simple-git + isomorphic-git/http/node): ${bridgeCjsPath}`);
+  }
+}
+
 // 8. 深度递归扫描并防御性替换 node_modules 中的任意 \p{Cc}, \p{L}, \p{N} 与 fatal: true 遗留
 function deepScanAndPatch(dir) {
   if (!fs.existsSync(dir)) return;

@@ -113,11 +113,11 @@ test('capability probe returns before creating the real console and stays isolat
 test('unsigned artifact version and monotonic native build agree', () => {
     const plist = read('native-src/Info.plist');
     const workflow = read('.github/workflows/build-ipa.yml');
-    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.15\.3<\/string>/);
+    assert.match(plist, /CFBundleShortVersionString<\/key>\s*<string>1\.15\.4<\/string>/);
     const build = Number(plist.match(/CFBundleVersion<\/key>\s*<string>(\d+)<\/string>/)?.[1]);
-    assert.equal(build, 54);
+    assert.equal(build, 55);
     assert.equal(plist, read('ios/App/App/Info.plist'));
-    assert.match(workflow, /SillyClient-iOS-v1\.15\.3-unsigned/);
+    assert.match(workflow, /SillyClient-iOS-v1\.15\.4-unsigned/);
     assert.doesNotMatch(workflow, /万能|直接安装|真机截图/);
 });
 
@@ -609,7 +609,7 @@ async function simulateDriver(scenario = 'success') {
         const reject = error => ({ success: false, error });
         switch (request.method) {
         case 'getPlatform': return success({ platform: 'ios' });
-        case 'getAppVersion': return success({ version: '1.15.3' });
+        case 'getAppVersion': return success({ version: '1.15.4' });
         case 'getInstanceInfo': {
             const record = registry[options.instanceId];
             return record ? success({ ...record, installPath: record.path }) : reject('Instance directory is unavailable');
@@ -957,3 +957,44 @@ for (const [scenario, stage, message] of [
         if (scenario === 'process-exit') assert.ok(actual.clock < 1000, 'Application exit waited for the startup deadline');
     });
 }
+
+test('IOSPreinstaller hardens mirror pool, identity encoding, sticky promotion, progress, and runtime Intl/Jimp fixes', () => {
+    const preinstaller = read('native-src/IOSPreinstaller.swift');
+    assert.doesNotMatch(preinstaller, /ghfast\.top|ghproxy\.net/);
+    for (const mirror of ['https://gh-proxy.com/', 'https://gh-proxy.org/', 'https://edgeone.gh-proxy.com/', 'https://ghproxy.vip/', 'https://v6.gh-proxy.org/']) {
+        assert.ok(preinstaller.includes(mirror), `Missing live mirror in IOSPreinstaller.swift: ${mirror}`);
+    }
+    assert.match(preinstaller, /setValue\("identity",\s*forHTTPHeaderField:\s*"Accept-Encoding"\)/);
+    assert.match(preinstaller, /preferredMirrorPrefix\s*=\s*candidate\.prefix/);
+    assert.match(preinstaller, /timeoutIntervalForResource\s*=\s*180/);
+    assert.match(preinstaller, /mirrorFailures\.joined\(separator:\s*"; "\)/);
+
+    const store = read('native-src/IOSInstanceStore.swift');
+    const plugin = read('native-src/TarvenEnvPlugin.swift');
+    assert.match(store, /IOSPreinstaller\.install\(staging:\s*staging,\s*instanceId:\s*id,\s*selection:\s*preinstall,\s*companion:\s*companion,\s*onProgress:\s*onProgress\)/);
+    assert.match(plugin, /onProgress:\s*\{\s*percent,\s*stage in/);
+    assert.equal(plugin, read('ios/App/App/TarvenEnvPlugin.swift'));
+
+    const loader = read('native-src/ios-loader.mjs');
+    assert.match(loader, /typeof globalThis\.Intl === 'undefined'/);
+    assert.match(loader, /SafeCollator/);
+
+    const patcher = read('native-src/patch-sillytavern.mjs');
+    assert.match(patcher, /SillyClient iOS pure-JS Jimp fallback/);
+    assert.match(patcher, /maxResolutionInMP:\s*16/);
+    assert.match(patcher, /\.sillyclient-ios-git-bridge\.cjs/);
+    assert.match(patcher, /pruneOrphanedFilesAfterCheckout/);
+
+    assert.match(preinstaller, /try writeGitMetadata\(directory:\s*extracted,\s*repository:\s*repository,\s*commit:\s*commit\)/);
+    assert.match(preinstaller, /Existing incomplete extension preserved:/);
+    assert.match(preinstaller, /requireCompatible\(clientVersion:/);
+
+    const nativeCatalog = JSON.parse(read('native-src/Resources/preinstalled-extensions/catalog.json'));
+    const frontendCatalog = JSON.parse(read('web/capacitor-ui/src/data/preinstall-catalog.json'));
+    assert.deepEqual(nativeCatalog, frontendCatalog, 'iOS native catalog.json must match frontend preinstall-catalog.json including displayName');
+
+    const styles = read('web/capacitor-ui/src/styles.css');
+    const runtimeJs = read('web/capacitor-ui/public/reviewed-material-runtime.js');
+    assert.match(styles, /--motion-hover:\s*500ms;/);
+    assert.match(runtimeJs, /var\(--motion-hover,\s*500ms\)/);
+});

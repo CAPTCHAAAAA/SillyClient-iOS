@@ -504,3 +504,209 @@ test('iOS web console adapts platform labels, eliminates Android shell text, and
     assert.ok(tarvenPluginSwift.includes('triggerGarbageCollection'), 'TarvenEnvPlugin sendCommand must support gc command');
     assert.ok(tarvenPluginSwift.includes('notifyListeners("log"'), 'TarvenEnvPlugin sendCommand must emit log event');
 });
+
+test('ios-loader installs pure-JS Intl.Collator fallback when NodeMobile is compiled without ICU', { timeout: 10000 }, t => {
+    const f = fixture(t);
+    const loader = path.join(f.server, 'ios-loader.mjs');
+    fs.copyFileSync(path.join(root, 'native-src', 'ios-loader.mjs'), loader);
+    const outputFile = path.join(f.server, 'intl-check.json');
+    fs.writeFileSync(path.join(f.server, 'server.js'), `
+        import fs from 'node:fs';
+        const files = ['tavern day.jpg', 'Bedroom Clean.jpg', '_black.jpg', 'bg10.jpg', 'bg2.jpg'];
+        const sortedDefault = [...files].sort(Intl.Collator().compare);
+        const sortedNumeric = ['bg10.jpg', 'bg2.jpg', 'bg1.jpg'].sort(new Intl.Collator('en', { numeric: true }).compare);
+        const dateSample = Intl.DateTimeFormat().format(0);
+        const numSample = Intl.NumberFormat().format(42);
+        fs.writeFileSync(${JSON.stringify(outputFile)}, JSON.stringify({
+            hasCollator: typeof Intl?.Collator === 'function',
+            sortedDefault,
+            sortedNumeric,
+            dateSample,
+            numSample,
+        }));
+    `);
+    const entry = path.join(f.server, 'without-intl-entry.mjs');
+    fs.writeFileSync(entry, `
+        delete globalThis.Intl;
+        await import(${JSON.stringify(pathToFileURL(loader).href)});
+        setTimeout(() => process.exit(0), 200);
+    `);
+    const result = spawnSync(process.execPath, [entry], {
+        cwd: f.server,
+        env: { ...process.env, TARVEN_SERVER_DIR: f.server },
+        encoding: 'utf8',
+        timeout: 8000,
+    });
+    assert.ok(fs.existsSync(outputFile), `Expected intl-check.json to be written:\n${result.stdout}\n${result.stderr}`);
+    const payload = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
+    assert.equal(payload.hasCollator, true);
+    assert.deepEqual(payload.sortedDefault, ['_black.jpg', 'Bedroom Clean.jpg', 'bg10.jpg', 'bg2.jpg', 'tavern day.jpg']);
+    assert.deepEqual(payload.sortedNumeric, ['bg1.jpg', 'bg2.jpg', 'bg10.jpg']);
+    assert.equal(payload.dateSample, '1970-01-01T00:00:00.000Z');
+    assert.equal(payload.numSample, '42');
+});
+
+test('patch-sillytavern patches src/jimp.js with pure-JS JPEG/PNG fallback and memory bounds when WebAssembly is absent', t => {
+    const f = fixture(t);
+    const jimpPath = path.join(f.server, 'src', 'jimp.js');
+    fs.writeFileSync(jimpPath, `import { createJimp } from '@jimp/core';
+
+// Optimized image formats
+import webp from '@jimp/wasm-webp';
+import png from '@jimp/wasm-png';
+import jpeg from '@jimp/wasm-jpeg';
+import avif from '@jimp/wasm-avif';
+
+import bmp, { msBmp } from '@jimp/js-bmp';
+import gif from '@jimp/js-gif';
+import tiff from '@jimp/js-tiff';
+
+const Jimp = createJimp({
+    formats: [webp, png, jpeg, avif, bmp, msBmp, gif, tiff],
+    plugins: [],
+});
+export default Jimp;
+`);
+    const first = spawnSync(process.execPath, [path.join(root, 'native-src', 'patch-sillytavern.mjs'), f.server], { encoding: 'utf8' });
+    assert.equal(first.status, 0, first.stderr);
+    const patched = fs.readFileSync(jimpPath, 'utf8');
+    assert.match(patched, /\/\/ SillyClient iOS pure-JS Jimp fallback/);
+    assert.match(patched, /import jsPng from '@jimp\/js-png';/);
+    assert.match(patched, /import jsJpeg from '@jimp\/js-jpeg';/);
+    assert.match(patched, /maxResolutionInMP:\s*16/);
+    assert.match(patched, /maxMemoryUsageInMB:\s*128/);
+    assert.match(patched, /formats:\s*hasWebAssembly \? \[webp, png, jpeg, avif, bmp, msBmp, gif, tiff\] : \[jsPng, safeJsJpeg, bmp, msBmp, gif, tiff\]/);
+
+    // Verify idempotency on second run
+    const second = spawnSync(process.execPath, [path.join(root, 'native-src', 'patch-sillytavern.mjs'), f.server], { encoding: 'utf8' });
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(fs.readFileSync(jimpPath, 'utf8'), patched);
+});
+
+test('patch-sillytavern installs pure-JS Git bridge across ESM, CJS, and Worker threads with mirror failover and pull orphan cleanup', { timeout: 15000 }, async t => {
+    const f = fixture(t);
+    const isoHttpDir = path.join(f.server, 'node_modules', 'isomorphic-git', 'http', 'node');
+    const sgCjsDir = path.join(f.server, 'node_modules', 'simple-git', 'dist', 'cjs');
+    const sgEsmDir = path.join(f.server, 'node_modules', 'simple-git', 'dist', 'esm');
+    fs.mkdirSync(isoHttpDir, { recursive: true });
+    fs.mkdirSync(sgCjsDir, { recursive: true });
+    fs.mkdirSync(sgEsmDir, { recursive: true });
+
+    fs.writeFileSync(path.join(f.server, 'node_modules', 'isomorphic-git', 'package.json'), JSON.stringify({
+        name: 'isomorphic-git',
+        main: 'index.cjs',
+        exports: {
+            '.': './index.cjs',
+            './http/node': { import: './http/node/index.js', require: './http/node/index.cjs' },
+        },
+    }));
+    fs.writeFileSync(path.join(f.server, 'node_modules', 'isomorphic-git', 'index.cjs'), `'use strict';
+module.exports = {
+  async listServerRefs({ url }) { return [{ ref: 'refs/heads/main', oid: '${'b'.repeat(40)}' }]; },
+  async fetch({ dir, ref }) { return { fetchHead: '${'b'.repeat(40)}' }; },
+  async checkout({ fs, dir, ref }) {
+    fs.writeFileSync(require('node:path').join(dir, 'index.js'), 'v2');
+  },
+  async listFiles() { return ['manifest.json', 'index.js']; },
+  async clone() {},
+};
+`);
+    fs.writeFileSync(path.join(isoHttpDir, 'package.json'), JSON.stringify({ type: 'module' }));
+    fs.writeFileSync(path.join(isoHttpDir, 'index.cjs'), `'use strict';
+const calls = [];
+module.exports = {
+  calls,
+  async request(req) {
+    calls.push(req.url);
+    if (req.url.startsWith('https://gh-proxy.com/')) {
+      return { statusCode: 502, headers: {}, body: [] };
+    }
+    return { statusCode: 200, headers: {}, body: [], url: req.url };
+  },
+};
+`);
+    fs.writeFileSync(path.join(isoHttpDir, 'index.js'), 'export default {};\n');
+
+    fs.writeFileSync(path.join(f.server, 'node_modules', 'simple-git', 'package.json'), JSON.stringify({
+        name: 'simple-git',
+        main: 'dist/cjs/index.js',
+        exports: { '.': { import: './dist/esm/index.js', require: './dist/cjs/index.js' } },
+    }));
+    fs.writeFileSync(path.join(sgEsmDir, 'package.json'), JSON.stringify({ type: 'module' }));
+    fs.writeFileSync(path.join(sgCjsDir, 'index.js'), 'module.exports = () => { throw new Error("unpatched"); };\n');
+    fs.writeFileSync(path.join(sgEsmDir, 'index.js'), 'export default () => { throw new Error("unpatched"); };\n');
+
+    // Run patch twice to verify idempotency and backup preservation
+    for (let run = 0; run < 2; run++) {
+        const res = spawnSync(process.execPath, [path.join(root, 'native-src', 'patch-sillytavern.mjs'), f.server], { encoding: 'utf8' });
+        assert.equal(res.status, 0, res.stderr);
+    }
+    const origBackup = path.join(f.server, 'node_modules', '.sillyclient-ios-git-http-orig.cjs');
+    assert.ok(fs.existsSync(origBackup), 'Expected original isomorphic-git/http/node backup');
+    assert.doesNotMatch(fs.readFileSync(origBackup, 'utf8'), /SillyClient iOS Git HTTP bridge/);
+
+    // Verify generated bridge passes syntax check
+    const bridgeFile = path.join(f.server, 'node_modules', '.sillyclient-ios-git-bridge.cjs');
+    const syntax = spawnSync(process.execPath, ['--check', bridgeFile], { encoding: 'utf8' });
+    assert.equal(syntax.status, 0, syntax.stderr);
+
+    // Prepare synthetic preinstalled extension directory with an obsolete orphan file
+    const extDir = path.join(f.server, 'data', 'default-user', 'extensions', 'Extension-Dice');
+    fs.mkdirSync(path.join(extDir, 'legacy'), { recursive: true });
+    fs.writeFileSync(path.join(extDir, 'manifest.json'), JSON.stringify({ display_name: 'Dice', version: '2.0.0', js: 'index.js' }));
+    fs.writeFileSync(path.join(extDir, 'index.js'), 'v1');
+    fs.writeFileSync(path.join(extDir, 'legacy', 'removed-upstream.js'), 'stale');
+
+    // Execute inside a real Worker thread using BOTH ESM import and CJS require
+    const workerScript = path.join(f.server, 'verify-git-bridge-worker.mjs');
+    fs.writeFileSync(workerScript, `
+        import assert from 'node:assert/strict';
+        import fs from 'node:fs';
+        import path from 'node:path';
+        import { createRequire } from 'node:module';
+        import { parentPort } from 'node:worker_threads';
+        import simpleGitEsm, { CheckRepoActions } from 'simple-git';
+        import httpEsm from 'isomorphic-git/http/node';
+
+        const require = createRequire(import.meta.url);
+        const simpleGitCjs = require('simple-git');
+        const httpCjs = require('isomorphic-git/http/node');
+        assert.equal(simpleGitEsm, simpleGitCjs.simpleGit);
+        assert.equal(httpEsm.request, httpCjs.request);
+        assert.equal(CheckRepoActions.IS_REPO_ROOT, 'root');
+
+        // 1. Verify Git HTTP mirror failover and sticky promotion
+        const r1 = await httpEsm.request({ url: 'https://github.com/SillyTavern/Extension-Dice.git/info/refs?service=git-upload-pack', method: 'GET' });
+        assert.equal(r1.statusCode, 200);
+        assert.equal(r1.url, 'https://github.com/SillyTavern/Extension-Dice.git/info/refs?service=git-upload-pack');
+        const origHttp = require('./node_modules/.sillyclient-ios-git-http-orig.cjs');
+        assert.equal(origHttp.calls[0].startsWith('https://gh-proxy.com/'), true);
+        assert.equal(origHttp.calls[1].startsWith('https://gh-proxy.org/'), true);
+        await httpEsm.request({ url: 'https://github.com/SillyTavern/Extension-Dice.git/git-upload-pack', method: 'POST' });
+        assert.equal(origHttp.calls[2].startsWith('https://gh-proxy.org/'), true, 'Expected sticky mirror promotion');
+
+        // 2. Verify simple-git repo detection, update check, and pull orphan cleanup
+        const extDir = ${JSON.stringify(extDir)};
+        const git = simpleGitEsm({ baseDir: extDir });
+        assert.equal(await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT), true);
+        assert.equal(await git.revparse(['HEAD']), 'b4047508a1191ba3b32cb20f64ebc5f7877d689b');
+        await git.fetch('origin');
+        const diffLog = await git.log({ from: await git.revparse(['HEAD']), to: 'origin/main' });
+        assert.equal(diffLog.total, 1);
+        await git.pull('origin', 'main');
+        assert.equal(fs.readFileSync(path.join(extDir, 'index.js'), 'utf8'), 'v2');
+        assert.equal(fs.existsSync(path.join(extDir, 'legacy', 'removed-upstream.js')), false, 'Orphan file must be pruned after pull');
+        assert.equal(fs.existsSync(path.join(extDir, 'legacy')), false, 'Empty parent directory of orphan file must be pruned');
+        assert.equal(fs.existsSync(path.join(extDir, '.git', 'HEAD')), true, '.git metadata must remain intact');
+        parentPort.postMessage({ ok: true });
+    `);
+    const worker = new Worker(pathToFileURL(workerScript), { stdout: true, stderr: true });
+    let stderr = '';
+    worker.stderr.on('data', chunk => { stderr += chunk; });
+    try {
+        const [msg] = await once(worker, 'message');
+        assert.deepEqual(msg, { ok: true }, stderr);
+    } finally {
+        await worker.terminate();
+    }
+});

@@ -168,7 +168,11 @@ public final class TarvenEnvPlugin: CAPPlugin, CAPBridgedPlugin, UIDocumentPicke
                             version: call.getString("version"), localZip: call.getString("localZipPath"),
                             installPath: call.getString("installPath"), installPathMode: call.getString("installPathMode"), port: port, config: call.getObject("config"),
                             preinstall: call.getObject("preinstall"), companion: call.getObject("companionPreset"),
-                            createIntent: call.getBool("createIntent") ?? false)
+                            createIntent: call.getBool("createIntent") ?? false,
+                            onProgress: { percent, stage in
+                                self.notifyListeners("progress", data: ["instanceId": instance, "operationId": operation,
+                                    "percent": percent, "stage": stage])
+                            })
                         NodeRunner.shared.startPrepared(instance: instance, operation: operation, server: directory,
                             data: directory.appendingPathComponent("data"), config: directory.appendingPathComponent("config.yaml"),
                             location: location, port: port, ipv4: try self.store.ipv4(directory)) { result in

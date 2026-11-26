@@ -900,6 +900,41 @@ enum IOSNativeTests {
             try rejects("Missing manifest entry was accepted") {
                 try IOSPreinstaller.validateManifest(["js": "missing.js"], directory: root)
             }
+            try files.write(Data("css entry".utf8), to: root.appendingPathComponent("style.css"))
+            try IOSPreinstaller.validateManifest(["display_name": "Dice", "version": "2.0.0", "js": ["index.js"], "css": ["style.css"], "minimum_client_version": "1.13.0"],
+                                                 directory: root, expectedVersion: "2.0.0", clientVersion: "1.19.0")
+            try rejects("Version mismatch was accepted") {
+                try IOSPreinstaller.validateManifest(["display_name": "Dice", "version": "1.9.0", "js": "index.js"],
+                                                     directory: root, expectedVersion: "2.0.0", clientVersion: "1.19.0")
+            }
+            try rejects("Incompatible minimum_client_version was accepted") {
+                try IOSPreinstaller.validateManifest(["display_name": "Dice", "version": "2.0.0", "js": "index.js", "minimum_client_version": "2.0.0"],
+                                                     directory: root, expectedVersion: "2.0.0", clientVersion: "1.19.0")
+            }
+            try rejects("Missing display_name was accepted") {
+                try IOSPreinstaller.validateManifest(["version": "2.0.0", "js": "index.js"],
+                                                     directory: root, expectedVersion: "2.0.0", clientVersion: "1.19.0")
+            }
+            let gitRoot = root.appendingPathComponent("git-ext")
+            try files.createDirectory(gitRoot)
+            try IOSPreinstaller.writeGitMetadata(directory: gitRoot, repository: "SillyTavern/Extension-Dice", commit: "b4047508a1191ba3b32cb20f64ebc5f7877d689b")
+            try require(String(decoding: try files.data(gitRoot.appendingPathComponent(".git/HEAD")), as: UTF8.self) == "ref: refs/heads/main\n",
+                        "Expected .git/HEAD ref to point to main")
+            try require(String(decoding: try files.data(gitRoot.appendingPathComponent(".git/refs/heads/main")), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "b4047508a1191ba3b32cb20f64ebc5f7877d689b",
+                        "Expected .git/refs/heads/main commit pin")
+            try require(String(decoding: try files.data(gitRoot.appendingPathComponent(".git/config")), as: UTF8.self).contains("https://github.com/SillyTavern/Extension-Dice.git"),
+                        "Expected .git/config origin remote URL")
+            let raw = "https://codeload.github.com/SillyTavern/Extension-Dice/zip/b4047508a1191ba3b32cb20f64ebc5f7877d689b"
+            let defaultMirrors = IOSPreinstaller.mirrorCandidates(for: raw)
+            try require(defaultMirrors.count == IOSPreinstaller.defaultMirrorPrefixes.count && defaultMirrors.count >= 6,
+                        "Expected multi-mirror candidate list")
+            try require(defaultMirrors.contains(where: { $0.label == "direct" && $0.url.absoluteString == raw }),
+                        "Direct codeload fallback was missing from mirror candidates")
+            try require(!defaultMirrors.contains(where: { $0.url.absoluteString.contains("ghfast.top") || $0.url.absoluteString.contains("ghproxy.net") }),
+                        "Dead mirrors remained in IOSPreinstaller candidate list")
+            let promoted = IOSPreinstaller.mirrorCandidates(for: raw, preferredPrefix: "https://gh-proxy.org/")
+            try require(promoted.first?.prefix == "https://gh-proxy.org/" && promoted.count == defaultMirrors.count,
+                        "Preferred mirror prefix was not promoted to the front")
         }
         test("Prepared runtime validation rejects missing and empty version identities") { root, files in
             let store = IOSInstanceStore(root: root)
